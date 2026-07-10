@@ -5,7 +5,9 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -16,6 +18,8 @@ type Config struct {
 	LegacyAdminPort string
 	LegacyUserPort  string
 	FrontendOrigins []string
+	AdminSessionTTL time.Duration
+	CookieSecure    bool
 }
 
 func Load() (Config, error) {
@@ -28,6 +32,16 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	adminSessionTTL, err := time.ParseDuration(EnvOr("ADMIN_SESSION_TTL", "12h"))
+	if err != nil || adminSessionTTL <= 0 {
+		return Config{}, fmt.Errorf("ADMIN_SESSION_TTL must be a positive duration")
+	}
+
+	cookieSecure, err := strconv.ParseBool(EnvOr("ADMIN_COOKIE_SECURE", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("ADMIN_COOKIE_SECURE must be true or false")
+	}
+
 	return Config{
 		Port:            EnvOr("APP_PORT", EnvOr("SERVER_PORT", EnvOr("BACKEND_PORT", "8080"))),
 		DatabaseURL:     databaseURL,
@@ -37,6 +51,8 @@ func Load() (Config, error) {
 			"http://localhost:5173",
 			"http://127.0.0.1:5173",
 		},
+		AdminSessionTTL: adminSessionTTL,
+		CookieSecure:    cookieSecure,
 	}, nil
 }
 

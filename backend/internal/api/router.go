@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"pjsk/backend/internal/admin"
 	"pjsk/backend/internal/config"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,6 +51,15 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", server.healthHandler)
 	mux.HandleFunc("/api/config", server.configHandler)
+
+	adminHandler := admin.NewHandler(
+		admin.NewPostgresStore(dbPool),
+		cfg.AdminSessionTTL,
+		cfg.CookieSecure,
+	)
+	mux.HandleFunc("/api/admin/login", adminHandler.Login)
+	mux.Handle("/api/admin/me", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Me)))
+	mux.Handle("/api/admin/logout", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Logout)))
 
 	return withCORS(loggingMiddleware(mux), cfg.FrontendOrigins)
 }
@@ -152,10 +162,11 @@ func withCORS(next http.Handler, allowedOrigins []string) http.Handler {
 		origin := r.Header.Get("Origin")
 		if origin != "" && isAllowedOrigin(origin, allowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Vary", "Origin")
 		}
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set(
 			"Access-Control-Allow-Headers",
 			"Content-Type, Authorization",
