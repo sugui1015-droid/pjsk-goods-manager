@@ -1,0 +1,21 @@
+__pycache__/
+.pytest_cache/
+.streamlit/secrets.toml
+.env
+
+# Local app data and uploaded payment images
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.csv
+
+# IDE / system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Codex local metadata
+.agents/
+.codex/
