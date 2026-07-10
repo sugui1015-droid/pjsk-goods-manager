@@ -1,0 +1,3 @@
+﻿file_name,fixture_type,expected_rows,expected_sheet_count,expected_cn_count,expected_amount_sum,expected_source_sheets,expected_format,notes
+【生日羽排】汇总-20251001.xlsx,canonical,27,1,19,1620.00,Sheet1,matrix,旧版 records.csv 的当前来源
+26感谢祭单领.xlsx,canonical,483,4,78,42684.48,Sheet1|Sheet2|Sheet3|Sheet4,matrix,多 Sheet 真实导入样本

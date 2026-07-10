@@ -2,6 +2,10 @@ __pycache__/
 .pytest_cache/
 .streamlit/secrets.toml
 .env
+.env.*
+!.env.example
+.env.local
+.env.*.local
 
 # Local app data and uploaded payment images
 data/
@@ -9,6 +13,13 @@ data/
 *.sqlite3
 *.db
 *.csv
+uploads/
+backups/
+pjsk-data-backup/
+testdata/excel/*
+!testdata/excel/README.md
+!testdata/excel/manifest.csv
+testdata/private/
 
 # IDE / system files
 .idea/
@@ -16,6 +27,26 @@ data/
 .DS_Store
 Thumbs.db
 
+# Python envs
+.venv/
+venv/
+
 # Codex local metadata
 .agents/
 .codex/
+
+# Frontend / backend build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.vite-temp/
+backend/bin/
+backend/.tmp/
+backend/tmp/
+backend/*.exe
+
+# Logs
+*.log
+
+# Local build caches
+.cache/

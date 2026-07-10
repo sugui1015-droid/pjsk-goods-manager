@@ -1,43 +1,42 @@
 # PJSK Goods Manager
 
-这是一个用 Streamlit 写的谷子管理系统，支持管理员端和普通查询端。
+This repository now keeps the legacy Streamlit app and the new Vue 3 + Go stack side by side.
 
-## 功能
+## Directory Layout
 
-- Excel 导入和重复记录跳过
-- 按 CN、谷子名称、角色、是否已收、团购批次筛选
-- 任意筛选组合的金额统计
-- 按 CN 汇总和导出表格
-- 系列累计金额
-- 收款码设置
-- 普通用户提交交肾截图，管理员查看交肾记录
-- 管理员维护交肾状态
-- 微信交肾金额展示手续费参考金额
-- 配置 Supabase 后支持云端共享数据和图片
-- 管理员通过交肾记录后，该记录截图会锁定，普通用户仍可新增截图记录
+- `frontend/`: Vue 3 + TypeScript frontend.
+- `backend/`: Go backend API.
+- `legacy-streamlit/`: existing Streamlit version, kept runnable during migration.
+- `docs/`: migration notes, database design, runbook, and workflow docs.
+- `testdata/excel/`: local Excel parser test files and expected results.
 
-## 本地运行
-
-管理员端：
+## Run New Frontend
 
 ```bash
-streamlit run main.py --server.port 8512
+cd frontend
+pnpm dev
 ```
 
-普通端：
+Open `http://localhost:5173`.
+
+## Run New Backend
 
 ```bash
-streamlit run user.py --server.port 8513
+cd backend
+go run .
 ```
 
-## Supabase
+The backend listens on `http://localhost:8080` and exposes:
 
-先在 Supabase SQL Editor 运行 `supabase_schema.sql`，再在 Streamlit Secrets 里配置：
+- `GET /health`
+- `GET /api/config`
 
-```toml
-SUPABASE_URL = "你的 Supabase Project URL"
-SUPABASE_SERVICE_ROLE_KEY = "你的 service_role key"
-PJSK_SUPABASE_BUCKET = "pjsk"
+## Run Legacy Streamlit
+
+```bash
+cd legacy-streamlit
+python -m streamlit run main.py --server.port 8512
+python -m streamlit run user.py --server.port 8513
 ```
 
-没有配置 Supabase 时，程序会继续使用本地数据文件，方便本地测试。
+The legacy app stays available until the new stack fully covers import, query, payment submission, and review.
