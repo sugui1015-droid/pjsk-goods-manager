@@ -1,0 +1,1 @@
+# pjsk-goods-manager
