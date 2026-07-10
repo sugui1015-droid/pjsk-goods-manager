@@ -9,6 +9,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+try:
+    from supabase import create_client
+except ImportError:
+    create_client = None
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("PJSK_DATA_DIR") or os.environ.get("LOCALAPPDATA") or str(Path.home())) / "pjsk-goods-manager"
@@ -18,6 +23,10 @@ PAYMENT_IMAGE_DIR = DATA_DIR / "payment_images"
 QR_DIR = DATA_DIR / "qr_codes"
 ALIPAY_QR_PATH = QR_DIR / "alipay.png"
 WECHAT_QR_PATH = QR_DIR / "wechat.png"
+SUPABASE_RECORDS_TABLE = "records"
+SUPABASE_PAYMENTS_TABLE = "payment_records"
+SUPABASE_BUCKET = "pjsk"
+SUPABASE_PREFIX = "supabase://"
 
 PAYMENT_COLUMNS = [
     "payment_id",
@@ -27,6 +36,8 @@ PAYMENT_COLUMNS = [
     "method",
     "note",
     "image_path",
+    "approved",
+    "approved_at",
     "created_at",
     "updated_at",
 ]
@@ -312,10 +323,87 @@ def read_excel(file_bytes: bytes, file_name: str) -> Tuple[pd.DataFrame, Dict[st
     return pd.concat(frames, ignore_index=True), mappings
 
 
-def load_records() -> pd.DataFrame:
-    if not DATA_PATH.exists():
-        return empty_records()
-    frame = pd.read_csv(DATA_PATH, dtype={"record_id": str})
+def config_value(*names: str) -> str:
+    for name in names:
+        try:
+            if name in st.secrets:
+                return str(st.secrets[name]).strip()
+        except Exception:
+            pass
+        value = os.environ.get(name)
+        if value:
+            return value.strip()
+    return ""
+
+
+@st.cache_resource(show_spinner=False)
+def get_supabase_client():
+    if create_client is None:
+        return None
+    url = config_value("SUPABASE_URL")
+    key = config_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY", "SUPABASE_ANON_KEY")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+
+def supabase_bucket_name() -> str:
+    return config_value("PJSK_SUPABASE_BUCKET", "SUPABASE_BUCKET") or SUPABASE_BUCKET
+
+
+def supabase_table_name(default: str, env_name: str) -> str:
+    return config_value(env_name) or default
+
+
+def supabase_enabled() -> bool:
+    return get_supabase_client() is not None
+
+
+def clean_supabase_value(value):
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
+def frame_to_rows(frame: pd.DataFrame) -> List[Dict[str, object]]:
+    rows = []
+    for row in frame.to_dict("records"):
+        rows.append({key: clean_supabase_value(value) for key, value in row.items()})
+    return rows
+
+
+def select_supabase_rows(table_name: str) -> List[Dict[str, object]]:
+    client = get_supabase_client()
+    if client is None:
+        return []
+    rows: List[Dict[str, object]] = []
+    start = 0
+    chunk_size = 1000
+    while True:
+        response = client.table(table_name).select("*").range(start, start + chunk_size - 1).execute()
+        batch = response.data or []
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < chunk_size:
+            break
+        start += chunk_size
+    return rows
+
+
+def replace_supabase_table(table_name: str, id_column: str, frame: pd.DataFrame) -> None:
+    client = get_supabase_client()
+    if client is None:
+        return
+    client.table(table_name).delete().neq(id_column, "__pjsk_never__").execute()
+    rows = frame_to_rows(frame)
+    for start in range(0, len(rows), 500):
+        client.table(table_name).insert(rows[start : start + 500]).execute()
+
+
+def normalize_records_frame(frame: pd.DataFrame) -> pd.DataFrame:
     for column in REQUIRED_COLUMNS:
         if column not in frame.columns:
             frame[column] = False if column == "collected" else ""
@@ -326,10 +414,107 @@ def load_records() -> pd.DataFrame:
     return frame[REQUIRED_COLUMNS]
 
 
+def normalize_payment_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    for column in PAYMENT_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
+    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce").fillna(0)
+    frame["approved"] = frame["approved"].astype(str).str.lower().isin(["true", "1", "yes", "是", "已通过"])
+    return frame[PAYMENT_COLUMNS]
+
+
+def make_storage_ref(path: str, bucket: Optional[str] = None) -> str:
+    return f"{SUPABASE_PREFIX}{bucket or supabase_bucket_name()}/{path}"
+
+
+def split_storage_ref(ref: str) -> Tuple[str, str]:
+    raw = str(ref).replace(SUPABASE_PREFIX, "", 1)
+    if "/" not in raw:
+        return supabase_bucket_name(), raw
+    bucket, path = raw.split("/", 1)
+    return bucket, path
+
+
+def content_type_for_name(file_name: str) -> str:
+    suffix = image_suffix(file_name)
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/png"
+
+
+def upload_storage_file(path: str, file_bytes: bytes, content_type: str, bucket: Optional[str] = None) -> str:
+    client = get_supabase_client()
+    if client is None:
+        raise RuntimeError("Supabase is not configured")
+    bucket_name = bucket or supabase_bucket_name()
+    storage = client.storage.from_(bucket_name)
+    options = {"content-type": content_type, "upsert": "true"}
+    try:
+        storage.upload(path, file_bytes, file_options=options)
+    except Exception:
+        storage.update(path, file_bytes, file_options=options)
+    return make_storage_ref(path, bucket_name)
+
+
+def save_uploaded_file_to_ref(uploaded_file, ref: str) -> str:
+    file_bytes = uploaded_file.getvalue()
+    content_type = getattr(uploaded_file, "type", None) or content_type_for_name(uploaded_file.name)
+    if str(ref).startswith(SUPABASE_PREFIX):
+        bucket, path = split_storage_ref(str(ref))
+        return upload_storage_file(path, file_bytes, content_type, bucket)
+    target = Path(str(ref))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(file_bytes)
+    return str(target)
+
+
+def load_image_bytes(ref: object) -> Optional[bytes]:
+    if not ref:
+        return None
+    ref_text = str(ref)
+    if ref_text.startswith(SUPABASE_PREFIX):
+        client = get_supabase_client()
+        if client is None:
+            return None
+        bucket, path = split_storage_ref(ref_text)
+        try:
+            return client.storage.from_(bucket).download(path)
+        except Exception:
+            return None
+    path = Path(ref_text)
+    if not path.exists():
+        return None
+    return path.read_bytes()
+
+
+def load_records() -> pd.DataFrame:
+    if supabase_enabled():
+        table_name = supabase_table_name(SUPABASE_RECORDS_TABLE, "PJSK_RECORDS_TABLE")
+        try:
+            return normalize_records_frame(pd.DataFrame(select_supabase_rows(table_name)))
+        except Exception as exc:
+            st.error(f"Supabase 读取明细失败：{exc}")
+            return empty_records()
+    if not DATA_PATH.exists():
+        return empty_records()
+    frame = pd.read_csv(DATA_PATH, dtype={"record_id": str})
+    return normalize_records_frame(frame)
+
+
 def save_records(frame: pd.DataFrame) -> None:
+    frame = normalize_records_frame(frame.copy())
+    if supabase_enabled():
+        table_name = supabase_table_name(SUPABASE_RECORDS_TABLE, "PJSK_RECORDS_TABLE")
+        try:
+            replace_supabase_table(table_name, "record_id", frame)
+            return
+        except Exception as exc:
+            st.error(f"Supabase 保存明细失败：{exc}")
+            raise exc
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        frame = frame.copy()
         frame.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
     except PermissionError as exc:
         st.error(f"保存失败：当前电脑不允许写入数据文件夹。请检查这个路径的权限：{DATA_DIR}")
@@ -359,17 +544,29 @@ def empty_payment_records() -> pd.DataFrame:
 
 
 def load_payment_records() -> pd.DataFrame:
+    if supabase_enabled():
+        table_name = supabase_table_name(SUPABASE_PAYMENTS_TABLE, "PJSK_PAYMENTS_TABLE")
+        try:
+            return normalize_payment_frame(pd.DataFrame(select_supabase_rows(table_name)))
+        except Exception as exc:
+            st.error(f"Supabase 读取交肾记录失败：{exc}")
+            return empty_payment_records()
     if not PAYMENT_PATH.exists():
         return empty_payment_records()
     frame = pd.read_csv(PAYMENT_PATH, dtype={"payment_id": str})
-    for column in PAYMENT_COLUMNS:
-        if column not in frame.columns:
-            frame[column] = ""
-    frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce").fillna(0)
-    return frame[PAYMENT_COLUMNS]
+    return normalize_payment_frame(frame)
 
 
 def save_payment_records(frame: pd.DataFrame) -> None:
+    frame = normalize_payment_frame(frame.copy())
+    if supabase_enabled():
+        table_name = supabase_table_name(SUPABASE_PAYMENTS_TABLE, "PJSK_PAYMENTS_TABLE")
+        try:
+            replace_supabase_table(table_name, "payment_id", frame)
+            return
+        except Exception as exc:
+            st.error(f"Supabase 保存交肾记录失败：{exc}")
+            raise exc
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     frame.to_csv(PAYMENT_PATH, index=False, encoding="utf-8-sig")
 
@@ -389,14 +586,21 @@ def image_suffix(file_name: str) -> str:
 
 
 def save_uploaded_image(uploaded_file, folder: Path, stem: str) -> str:
+    target_name = f"{stem}{image_suffix(uploaded_file.name)}"
+    if supabase_enabled():
+        storage_path = f"{folder.name}/{target_name}"
+        content_type = getattr(uploaded_file, "type", None) or content_type_for_name(uploaded_file.name)
+        return upload_storage_file(storage_path, uploaded_file.getvalue(), content_type)
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{stem}{image_suffix(uploaded_file.name)}"
+    target = folder / target_name
     target.write_bytes(uploaded_file.getvalue())
     return str(target)
 
 
-def qr_paths() -> Dict[str, Path]:
-    return {"支付宝": ALIPAY_QR_PATH, "微信": WECHAT_QR_PATH}
+def qr_paths() -> Dict[str, str]:
+    if supabase_enabled():
+        return {"支付宝": make_storage_ref("qr_codes/alipay.png"), "微信": make_storage_ref("qr_codes/wechat.png")}
+    return {"支付宝": str(ALIPAY_QR_PATH), "微信": str(WECHAT_QR_PATH)}
 
 
 def money(value: float) -> str:
@@ -663,19 +867,19 @@ def render_qr_settings_admin() -> None:
 
     col1, col2 = st.columns(2)
     uploads = [
-        ("支付宝", ALIPAY_QR_PATH, col1),
-        ("微信", WECHAT_QR_PATH, col2),
+        ("支付宝", qr_paths()["支付宝"], col1),
+        ("微信", qr_paths()["微信"], col2),
     ]
 
-    for label, path, column in uploads:
+    for label, ref, column in uploads:
         with column:
             st.markdown(f"#### {label}")
-            if path.exists():
-                st.image(str(path), use_container_width=True)
+            image_bytes = load_image_bytes(ref)
+            if image_bytes:
+                st.image(image_bytes, use_container_width=True)
             uploaded = st.file_uploader(f"上传{label}收款码", type=["png", "jpg", "jpeg", "webp"], key=f"qr_{label}")
             if uploaded and st.button(f"保存{label}收款码", key=f"save_qr_{label}", use_container_width=True):
-                QR_DIR.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(uploaded.getvalue())
+                save_uploaded_file_to_ref(uploaded, ref)
                 st.success(f"{label}收款码已保存。")
                 st.rerun()
 
@@ -711,11 +915,12 @@ def render_payment_user(frame: pd.DataFrame) -> None:
 
     st.markdown("### 收款码")
     qr_cols = st.columns(2)
-    for index, (label, path) in enumerate(qr_paths().items()):
+    for index, (label, ref) in enumerate(qr_paths().items()):
         with qr_cols[index]:
             st.markdown(f"#### {label}")
-            if path.exists():
-                st.image(str(path), use_container_width=True)
+            image_bytes = load_image_bytes(ref)
+            if image_bytes:
+                st.image(image_bytes, use_container_width=True)
             else:
                 st.info(f"管理员还没有上传{label}收款码。")
 
@@ -760,6 +965,8 @@ def render_payment_user(frame: pd.DataFrame) -> None:
                     "method": method,
                     "note": note,
                     "image_path": image_path,
+                    "approved": False,
+                    "approved_at": "",
                     "created_at": created_at,
                     "updated_at": created_at,
                 }
@@ -779,9 +986,14 @@ def render_payment_user(frame: pd.DataFrame) -> None:
     st.dataframe(mine.drop(columns=["image_path"]), use_container_width=True, hide_index=True)
     selected_payment_id = st.selectbox("选择要查看/修改的记录", mine["payment_id"].tolist())
     selected = mine[mine["payment_id"] == selected_payment_id].iloc[0]
-    image_path = Path(str(selected["image_path"]))
-    if image_path.exists():
-        st.image(str(image_path), caption="当前截图", use_container_width=True)
+    approved = bool(selected.get("approved", False))
+    image_bytes = load_image_bytes(selected["image_path"])
+    if image_bytes:
+        st.image(image_bytes, caption="当前截图", use_container_width=True)
+
+    if approved:
+        st.success("这条交肾记录已由管理员通过，截图已锁定，不能再替换。需要补充图片的话，可以在上方重新提交一条新的交肾截图记录。")
+        return
 
     replacement = st.file_uploader("替换这条记录的截图", type=["png", "jpg", "jpeg", "webp"], key=f"replace_{selected_payment_id}")
     if st.button("保存替换截图", disabled=replacement is None):
@@ -812,10 +1024,35 @@ def render_payment_records_admin() -> None:
 
     selected_payment_id = st.selectbox("查看截图", payments["payment_id"].tolist())
     selected = payments[payments["payment_id"] == selected_payment_id].iloc[0]
-    st.write(f"CN：{selected['cn']}，金额：{money(float(selected['amount']))}，方式：{selected['method']}")
-    image_path = Path(str(selected["image_path"]))
-    if image_path.exists():
-        st.image(str(image_path), use_container_width=True)
+    approved = bool(selected.get("approved", False))
+    status_text = "已通过" if approved else "待审核"
+    st.write(f"CN：{selected['cn']}，金额：{money(float(selected['amount']))}，方式：{selected['method']}，状态：{status_text}")
+
+    approve_col, cancel_col = st.columns(2)
+    with approve_col:
+        if st.button("标记为已通过", type="primary", disabled=approved, use_container_width=True):
+            updated = payments.copy()
+            mask = updated["payment_id"].astype(str) == selected_payment_id
+            updated.loc[mask, "approved"] = True
+            updated.loc[mask, "approved_at"] = now_text()
+            updated.loc[mask, "updated_at"] = now_text()
+            save_payment_records(updated)
+            st.success("这条交肾记录已通过，普通用户将不能再替换这张截图。")
+            st.rerun()
+    with cancel_col:
+        if st.button("取消通过", disabled=not approved, use_container_width=True):
+            updated = payments.copy()
+            mask = updated["payment_id"].astype(str) == selected_payment_id
+            updated.loc[mask, "approved"] = False
+            updated.loc[mask, "approved_at"] = ""
+            updated.loc[mask, "updated_at"] = now_text()
+            save_payment_records(updated)
+            st.success("已取消通过，这条记录可以由普通用户重新替换截图。")
+            st.rerun()
+
+    image_bytes = load_image_bytes(selected["image_path"])
+    if image_bytes:
+        st.image(image_bytes, use_container_width=True)
     else:
         st.warning("这条记录的截图文件不存在。")
 

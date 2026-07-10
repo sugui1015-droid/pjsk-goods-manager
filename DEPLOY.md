@@ -1,72 +1,76 @@
-# 部署到公网和云储存建议
+# 部署到公网和 Supabase 云存储
 
-## 推荐方案
-
-推荐先用：
+推荐组合：
 
 - 网页托管：Streamlit Community Cloud
-- 数据云储存：Supabase
+- 数据云存储：Supabase Database + Supabase Storage
 
-这个组合最适合当前项目：Streamlit 负责生成公网网址，Supabase 负责长期保存表格数据、收款码、交肾截图。
-
-## 为什么这样选
-
-Streamlit Community Cloud 的优点：
-
-- 免费
-- 直接连接 GitHub 仓库
-- 选择 repo、branch、入口文件后即可部署
-- 每次 `git push` 后自动更新网页
-
-Supabase 的优点：
-
-- 有免费额度
-- 同时支持数据库和文件储存
-- 适合保存 Excel 拆出来的数据、交肾记录、二维码、付款截图
-
-## 当前项目入口
-
-当前本地有两个入口：
+当前项目有两个入口：
 
 - 管理员端：`main.py`
 - 普通端：`user.py`
 
-部署时可以在 Streamlit Cloud 上建两个 app：
+可以在 Streamlit Cloud 里建两个 app，分别选择这两个入口文件，这样会得到两个公网网址。
 
-- 管理员 app 选择入口文件 `main.py`
-- 普通用户 app 选择入口文件 `user.py`
+## 1. Supabase 初始化
 
-这样会得到两个公网网址。
+在 Supabase 项目的 SQL Editor 里运行仓库里的 `supabase_schema.sql`。
 
-## 注意事项
+它会创建：
 
-当前代码仍然使用本地 CSV 和本地图片路径保存数据：
+- `records`：谷子明细数据
+- `payment_records`：交肾截图记录
+- `pjsk` Storage bucket：保存收款码和交肾截图
 
-- `records.csv`
-- `payment_records.csv`
-- `payment_images/`
-- `qr_codes/`
+## 2. Streamlit Secrets
 
-这在本机测试没问题，但部署到云端后不适合作为长期数据源。正式公网使用前，需要把这些保存逻辑改成 Supabase 数据库和 Supabase Storage。
+在 Streamlit Cloud 的 app 设置里添加 Secrets：
 
-## 建议的部署步骤
+```toml
+SUPABASE_URL = "你的 Supabase Project URL"
+SUPABASE_SERVICE_ROLE_KEY = "你的 service_role key"
+PJSK_SUPABASE_BUCKET = "pjsk"
+```
 
-1. 注册 GitHub，把本项目上传到一个仓库。
-2. 注册 Supabase，创建一个项目。
-3. 在 Supabase 创建一个 Storage bucket，例如 `pjsk`.
-4. 在 Streamlit Cloud 新建管理员 app，入口选择 `main.py`.
-5. 在 Streamlit Cloud 新建普通用户 app，入口选择 `user.py`.
-6. 在 Streamlit Cloud 的 Secrets 里保存 Supabase 的连接信息。
-7. 把本地 CSV/图片保存逻辑替换为 Supabase 读写逻辑。
+建议用 `SUPABASE_SERVICE_ROLE_KEY`，并且只放在 Streamlit Secrets 里，不要写进代码或上传到 GitHub。
 
-## 便宜服务器备选
+如果以后你想自定义表名，也可以加：
 
-如果不想改云储存逻辑，也可以用带持久磁盘的服务器直接跑 Streamlit。
+```toml
+PJSK_RECORDS_TABLE = "records"
+PJSK_PAYMENTS_TABLE = "payment_records"
+```
 
-更省事但需要一点费用：
+## 3. 本地运行
 
-- Render Web Service + Persistent Disk
-- Railway
-- 一台轻量 VPS
+如果本地没有配置 Supabase，程序会继续使用本地 CSV 和本地图片文件，不影响测试。
 
-不过长期看，推荐还是 Streamlit Cloud + Supabase，因为后续维护更轻。
+管理员端：
+
+```bash
+streamlit run main.py --server.port 8512
+```
+
+普通端：
+
+```bash
+streamlit run user.py --server.port 8513
+```
+
+## 4. 云端运行后的数据位置
+
+配置 Supabase 后：
+
+- Excel 导入后的明细保存到 Supabase `records`
+- 交肾截图记录保存到 Supabase `payment_records`
+- 管理员通过交肾记录后，普通用户不能再替换该条记录截图，但可以继续新增交肾截图记录
+- 收款码保存到 Supabase Storage：`qr_codes/`
+- 普通用户交肾截图保存到 Supabase Storage：`payment_images/`
+
+这样管理员端和普通端会共享同一份数据。
+
+## 5. 注意
+
+- 不要把 Supabase key 写进 GitHub。
+- `service_role key` 权限很高，只能放在 Streamlit Secrets 或服务器环境变量里。
+- 如果 Supabase 没配置成功，页面会回退到本地模式，公网部署时就会出现数据不共享的问题。
