@@ -10,6 +10,7 @@ import (
 
 	"pjsk/backend/internal/admin"
 	"pjsk/backend/internal/config"
+	"pjsk/backend/internal/importpreview"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -60,6 +61,12 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("/api/admin/login", adminHandler.Login)
 	mux.Handle("/api/admin/me", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Me)))
 	mux.Handle("/api/admin/logout", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Logout)))
+
+	importPreviewHandler := importpreview.NewHandler(importpreview.NewPostgresStore(dbPool))
+	mux.Handle(
+		"/api/admin/imports/preview",
+		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.Preview)),
+	)
 
 	return withCORS(loggingMiddleware(mux), cfg.FrontendOrigins)
 }
