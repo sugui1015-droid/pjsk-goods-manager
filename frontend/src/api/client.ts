@@ -100,7 +100,8 @@ export type ImportBatch = {
 }
 
 export type ImportPreviewResponse = {
-  file: {
+  import_batch_id?: string
+file: {
     original_filename: string
     sha256: string
     size_bytes: number
@@ -172,4 +173,17 @@ export async function postForm<T>(path: string, body: FormData): Promise<T> {
     body,
   })
   return parseResponse<T>(response)
+}
+
+export type ImportConfirmResponse = {
+  import_batch_id: string
+  project_id: string
+  status: string
+  cn_count: number
+  product_count: number
+  order_count: number
+  order_item_count: number
+  total_quantity: number
+  total_amount: number
+  confirmed_at: string
 }

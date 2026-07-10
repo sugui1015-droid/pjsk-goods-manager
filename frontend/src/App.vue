@@ -12,6 +12,7 @@ import {
   type ImportBatch,
   type ImportIssue,
   type ImportPreviewResponse,
+  type ImportConfirmResponse,
 } from './api/client'
 
 const maxExcelSize = 20 * 1024 * 1024
@@ -66,6 +67,10 @@ const selectedFile = ref<File | null>(null)
 const uploadLoading = ref(false)
 const uploadMessage = ref('')
 const preview = ref<ImportPreviewResponse | null>(null)
+const confirmResult = ref<ImportConfirmResponse | null>(null)
+const confirmLoading = ref(false)
+const confirmMessage = ref('')
+const allowWarnings = ref(false)
 const expandedBatchIds = ref<Set<string>>(new Set())
 const issueFilter = ref<IssueFilter>('all')
 
@@ -74,6 +79,12 @@ const readyCount = computed(() => config.value.modules.filter((item) => item.sta
 const queuedCount = computed(() => config.value.modules.filter((item) => item.status === 'queued').length)
 const isAdminRoute = computed(() => routeName.value === 'admin-imports')
 const canUpload = computed(() => selectedFile.value !== null && !uploadLoading.value)
+const canConfirm = computed(() => {
+  if (!preview.value?.import_batch_id || confirmLoading.value) return false
+  if ((preview.value.errors?.length ?? 0) > 0) return false
+  if ((preview.value.warnings?.length ?? 0) > 0 && !allowWarnings.value) return false
+  return true
+})
 
 const templateCounts = computed(() => {
   const counts = new Map<string, number>()
@@ -182,6 +193,9 @@ function onFileChange(event: Event) {
   const file = input.files?.[0] ?? null
   uploadMessage.value = ''
   preview.value = null
+  confirmResult.value = null
+  confirmMessage.value = ''
+  allowWarnings.value = false
 
   if (file === null) {
     selectedFile.value = null
@@ -214,6 +228,9 @@ async function uploadPreview() {
 
   try {
     preview.value = await postForm<ImportPreviewResponse>('/api/admin/imports/preview', form)
+    confirmResult.value = null
+    confirmMessage.value = ''
+    allowWarnings.value = false
     expandedBatchIds.value = new Set()
     issueFilter.value = 'all'
   } catch (error) {
@@ -228,6 +245,29 @@ async function uploadPreview() {
   }
 }
 
+async function confirmImport() {
+  if (!preview.value?.import_batch_id || confirmLoading.value) {
+    return
+  }
+
+  confirmLoading.value = true
+  confirmMessage.value = ''
+  try {
+    confirmResult.value = await postJSON<ImportConfirmResponse>('/api/admin/imports/confirm', {
+      import_batch_id: preview.value.import_batch_id,
+      allow_warnings: allowWarnings.value,
+    })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    confirmMessage.value = error instanceof Error ? error.message : '确认导入失败'
+  } finally {
+    confirmLoading.value = false
+  }
+}
 function toggleBatch(batchId: string) {
   const next = new Set(expandedBatchIds.value)
   if (next.has(batchId)) {
@@ -414,6 +454,43 @@ onMounted(() => {
           </article>
         </section>
 
+        <section v-if="preview" class="panel confirm-panel">
+          <div class="panel__header">
+            <div>
+              <h2>确认导入</h2>
+              <p class="muted">确认后会写入导入批次、CN、谷子种类和订单明细；不会写入付款数据。</p>
+            </div>
+            <span>{{ preview.import_batch_id || 'no preview id' }}</span>
+          </div>
+
+          <div v-if="(preview.errors?.length ?? 0) > 0" class="inline-alert">
+            存在 error，当前预览禁止确认导入。
+          </div>
+          <label v-if="(preview.warnings?.length ?? 0) > 0" class="confirm-check">
+            <input v-model="allowWarnings" type="checkbox" />
+            <span>我已人工检查 warnings，允许继续确认导入。</span>
+          </label>
+
+          <div class="confirm-actions">
+            <button class="primary-button" type="button" :disabled="!canConfirm" @click="confirmImport">
+              {{ confirmLoading ? '确认中' : '确认导入' }}
+            </button>
+            <span class="muted">确认导入使用服务器保存的预览结果，不使用前端回传明细。</span>
+          </div>
+
+          <div v-if="confirmMessage" class="inline-alert">{{ confirmMessage }}</div>
+
+          <div v-if="confirmResult" class="confirm-result">
+            <strong>导入已确认</strong>
+            <span>CN {{ confirmResult.cn_count }}</span>
+            <span>谷子种类 {{ confirmResult.product_count }}</span>
+            <span>订单 {{ confirmResult.order_count }}</span>
+            <span>明细 {{ confirmResult.order_item_count }}</span>
+            <span>总件数 {{ confirmResult.total_quantity }}</span>
+            <span>总金额 {{ formatMoney(confirmResult.total_amount) }}</span>
+            <span>确认时间 {{ confirmResult.confirmed_at }}</span>
+          </div>
+        </section>
         <section v-if="preview" class="panel">
           <div class="panel__header">
             <h2>工作表摘要</h2>

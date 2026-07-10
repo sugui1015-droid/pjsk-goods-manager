@@ -67,6 +67,10 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		"/api/admin/imports/preview",
 		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.Preview)),
 	)
+	mux.Handle(
+		"/api/admin/imports/confirm",
+		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.Confirm)),
+	)
 
 	return withCORS(loggingMiddleware(mux), cfg.FrontendOrigins)
 }

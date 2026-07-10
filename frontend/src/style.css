@@ -581,3 +581,48 @@ th {
     width: 100%;
   }
 }
+
+.confirm-panel {
+  border-color: #c9d8e6;
+}
+
+.confirm-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  color: #34495d;
+}
+
+.confirm-check input {
+  width: 16px;
+  height: 16px;
+}
+
+.confirm-actions,
+.confirm-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.confirm-result {
+  padding: 12px;
+  border: 1px solid #cfe2d7;
+  border-radius: 8px;
+  background: #f0faf4;
+}
+
+.confirm-result span,
+.confirm-result strong {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #24425f;
+  font-size: 12px;
+}

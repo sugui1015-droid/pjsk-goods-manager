@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
@@ -14,7 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"pjsk/backend/internal/admin"
+
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,11 +30,24 @@ type Handler struct {
 
 type Store interface {
 	FindImportFile(context.Context, string, string) (ImportFileState, error)
+	SavePreview(context.Context, Preview, string) (PreviewState, error)
+	ConfirmImport(context.Context, string, string, bool) (ConfirmResult, error)
 }
 
 type ImportFileState struct {
 	DuplicateFile    bool
 	FilenameConflict bool
+}
+
+type PreviewState struct {
+	ImportBatchID    string
+	DuplicateFile    bool
+	FilenameConflict bool
+}
+
+type confirmRequest struct {
+	ImportBatchID string `json:"import_batch_id"`
+	AllowWarnings bool   `json:"allow_warnings"`
 }
 
 func NewHandler(store Store) *Handler {
@@ -40,6 +57,12 @@ func NewHandler(store Store) *Handler {
 func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	account, ok := admin.CurrentAdmin(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
@@ -79,14 +102,15 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	state, err := h.store.FindImportFile(ctx, fileHash, header.Filename)
+	state, err := h.store.SavePreview(ctx, preview, account.ID)
 	if err != nil {
-		log.Printf("check import duplicate: %v", err)
+		log.Printf("save import preview: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	preview.ImportBatchID = state.ImportBatchID
 	preview.File.DuplicateFile = state.DuplicateFile
 	preview.File.FilenameConflict = state.FilenameConflict
 	if state.DuplicateFile {
@@ -105,6 +129,54 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, preview)
+}
+
+func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	account, ok := admin.CurrentAdmin(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	var request confirmRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	request.ImportBatchID = strings.TrimSpace(request.ImportBatchID)
+	if request.ImportBatchID == "" {
+		writeError(w, http.StatusBadRequest, "import_batch_id is required")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	result, err := h.store.ConfirmImport(ctx, request.ImportBatchID, account.ID, request.AllowWarnings)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrImportNotFound):
+			writeError(w, http.StatusNotFound, "import preview not found")
+		case errors.Is(err, ErrImportAlreadyConfirmed):
+			writeError(w, http.StatusConflict, "import batch has already been confirmed")
+		case errors.Is(err, ErrImportHasErrors):
+			writeError(w, http.StatusBadRequest, "import preview has errors and cannot be confirmed")
+		case errors.Is(err, ErrWarningsNeedApproval):
+			writeError(w, http.StatusConflict, "import preview has warnings; confirm again with allow_warnings=true")
+		case errors.Is(err, ErrNoOrderItems):
+			writeError(w, http.StatusBadRequest, "import preview has no order items to confirm")
+		default:
+			log.Printf("confirm import: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func readUploadedFile(file multipart.File, limit int64) ([]byte, error) {
@@ -135,11 +207,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
-func (s *PostgresStore) FindImportFile(
-	ctx context.Context,
-	fileHash string,
-	filename string,
-) (ImportFileState, error) {
+func (s *PostgresStore) FindImportFile(ctx context.Context, fileHash string, filename string) (ImportFileState, error) {
 	var state ImportFileState
 	if s.pool == nil {
 		return state, nil
@@ -165,8 +233,389 @@ func (s *PostgresStore) FindImportFile(
 	return state, err
 }
 
+func (s *PostgresStore) SavePreview(ctx context.Context, preview Preview, adminID string) (PreviewState, error) {
+	payload, err := json.Marshal(preview)
+	if err != nil {
+		return PreviewState{}, err
+	}
+
+	state, err := s.FindImportFile(ctx, preview.File.SHA256, preview.File.OriginalFilename)
+	if err != nil {
+		return PreviewState{}, err
+	}
+
+	var importBatchID, status string
+	err = s.pool.QueryRow(ctx, `
+		select id::text, status
+		from import_batches
+		where file_hash = $1
+	`, preview.File.SHA256).Scan(&importBatchID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = s.pool.QueryRow(ctx, `
+			insert into import_batches (
+				original_filename,
+				file_hash,
+				file_size,
+				sheet_count,
+				total_rows,
+				success_rows,
+				failed_rows,
+				status,
+				imported_by,
+				preview_payload,
+				error_count,
+				warning_count,
+				notice_count,
+				started_at
+			) values ($1, $2, $3, $4, $5, 0, $6, 'previewed', $7::uuid, $8::jsonb, $9, $10, $11, now())
+			returning id::text
+		`,
+			preview.File.OriginalFilename,
+			preview.File.SHA256,
+			preview.File.SizeBytes,
+			preview.File.SheetCount,
+			len(preview.Batches),
+			len(preview.Errors),
+			adminID,
+			payload,
+			len(preview.Errors),
+			len(preview.Warnings),
+			len(preview.Notices),
+		).Scan(&importBatchID)
+		if err != nil {
+			return PreviewState{}, err
+		}
+		return PreviewState{ImportBatchID: importBatchID, DuplicateFile: false, FilenameConflict: state.FilenameConflict}, nil
+	}
+	if err != nil {
+		return PreviewState{}, err
+	}
+
+	if status == "previewed" || status == "pending" || status == "failed" || status == "cancelled" {
+		_, err = s.pool.Exec(ctx, `
+			update import_batches
+			set original_filename = $1,
+				file_size = $2,
+				sheet_count = $3,
+				total_rows = $4,
+				failed_rows = $5,
+				status = 'previewed',
+				imported_by = $6::uuid,
+				preview_payload = $7::jsonb,
+				error_count = $8,
+				warning_count = $9,
+				notice_count = $10,
+				started_at = now()
+			where id = $11::uuid
+		`,
+			preview.File.OriginalFilename,
+			preview.File.SizeBytes,
+			preview.File.SheetCount,
+			len(preview.Batches),
+			len(preview.Errors),
+			adminID,
+			payload,
+			len(preview.Errors),
+			len(preview.Warnings),
+			len(preview.Notices),
+			importBatchID,
+		)
+		if err != nil {
+			return PreviewState{}, err
+		}
+	}
+
+	return PreviewState{ImportBatchID: importBatchID, DuplicateFile: true, FilenameConflict: state.FilenameConflict}, nil
+}
+
+var (
+	ErrImportNotFound         = errors.New("import preview not found")
+	ErrImportAlreadyConfirmed = errors.New("import already confirmed")
+	ErrImportHasErrors        = errors.New("import has errors")
+	ErrWarningsNeedApproval   = errors.New("warnings need approval")
+	ErrNoOrderItems           = errors.New("no order items")
+)
+
+func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string, adminID string, allowWarnings bool) (ConfirmResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ConfirmResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var payload []byte
+	var status string
+	var fileHash string
+	var originalFilename string
+	err = tx.QueryRow(ctx, `
+		select preview_payload, status, file_hash, original_filename
+		from import_batches
+		where id = $1::uuid
+		for update
+	`, importBatchID).Scan(&payload, &status, &fileHash, &originalFilename)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ConfirmResult{}, ErrImportNotFound
+	}
+	if err != nil {
+		return ConfirmResult{}, err
+	}
+	if status == "confirmed" || status == "completed" || status == "partial" {
+		return ConfirmResult{}, ErrImportAlreadyConfirmed
+	}
+	if status != "previewed" {
+		return ConfirmResult{}, fmt.Errorf("import batch status %q cannot be confirmed", status)
+	}
+	if len(payload) == 0 {
+		return ConfirmResult{}, ErrImportNotFound
+	}
+
+	var preview Preview
+	if err := json.Unmarshal(payload, &preview); err != nil {
+		return ConfirmResult{}, err
+	}
+	if len(preview.Errors) > 0 {
+		return ConfirmResult{}, ErrImportHasErrors
+	}
+	if len(preview.Warnings) > 0 && !allowWarnings {
+		return ConfirmResult{}, ErrWarningsNeedApproval
+	}
+
+	orderItemTotal := 0
+	for _, batch := range preview.Batches {
+		orderItemTotal += len(batch.Details)
+	}
+	if orderItemTotal == 0 {
+		return ConfirmResult{}, ErrNoOrderItems
+	}
+
+	if _, err := tx.Exec(ctx, `
+		update import_batches
+		set status = 'processing', started_at = coalesce(started_at, now())
+		where id = $1::uuid
+	`, importBatchID); err != nil {
+		return ConfirmResult{}, err
+	}
+
+	projectID, err := insertProject(ctx, tx, importBatchID, fileHash, originalFilename)
+	if err != nil {
+		return ConfirmResult{}, err
+	}
+
+	userIDs := map[string]string{}
+	productIDs := map[string]string{}
+	orderIDs := map[string]string{}
+	productCount := 0
+	orderItemCount := 0
+	totalQuantity := 0
+	totalAmount := 0.0
+
+	for _, batch := range preview.Batches {
+		for _, detail := range batch.Details {
+			userID, ok := userIDs[detail.NormalizedCN]
+			if !ok {
+				userID, err = upsertUser(ctx, tx, detail.NormalizedCN, detail.OriginalCN)
+				if err != nil {
+					return ConfirmResult{}, err
+				}
+				userIDs[detail.NormalizedCN] = userID
+			}
+
+			productKey := productKey(batch, detail)
+			productID, ok := productIDs[productKey]
+			if !ok {
+				productID, err = upsertProduct(ctx, tx, projectID, productKey, batch, detail)
+				if err != nil {
+					return ConfirmResult{}, err
+				}
+				productIDs[productKey] = productID
+				productCount++
+			}
+
+			orderID, ok := orderIDs[userID]
+			if !ok {
+				orderID, err = insertOrder(ctx, tx, importBatchID, projectID, userID, detail.NormalizedCN)
+				if err != nil {
+					return ConfirmResult{}, err
+				}
+				orderIDs[userID] = orderID
+			}
+
+			if err := insertOrderItem(ctx, tx, importBatchID, orderID, productID, batch, detail); err != nil {
+				return ConfirmResult{}, err
+			}
+			orderItemCount++
+			totalQuantity += detail.Quantity
+			totalAmount = round2(totalAmount + detail.Amount)
+		}
+	}
+
+	for userID, orderID := range orderIDs {
+		_ = userID
+		if _, err := tx.Exec(ctx, `
+			update orders
+			set total_amount = coalesce((
+				select sum(amount)
+				from order_items
+				where order_id = $1::uuid
+			), 0),
+				status = 'submitted',
+				updated_at = now()
+			where id = $1::uuid
+		`, orderID); err != nil {
+			return ConfirmResult{}, err
+		}
+	}
+
+	confirmedAt := time.Now().UTC()
+	result := ConfirmResult{
+		ImportBatchID:  importBatchID,
+		ProjectID:      projectID,
+		Status:         "confirmed",
+		CNCount:        len(userIDs),
+		ProductCount:   productCount,
+		OrderCount:     len(orderIDs),
+		OrderItemCount: orderItemCount,
+		TotalQuantity:  totalQuantity,
+		TotalAmount:    round2(totalAmount),
+		ConfirmedAt:    confirmedAt.Format(time.RFC3339),
+	}
+	resultPayload, err := json.Marshal(result)
+	if err != nil {
+		return ConfirmResult{}, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		update import_batches
+		set status = 'confirmed',
+			success_rows = $2,
+			failed_rows = 0,
+			completed_at = $3,
+			confirmed_by = $4::uuid,
+			confirmed_at = $3,
+			confirmed_project_id = $5::uuid,
+			confirm_result = $6::jsonb
+		where id = $1::uuid
+	`, importBatchID, orderItemCount, confirmedAt, adminID, projectID, resultPayload); err != nil {
+		return ConfirmResult{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return ConfirmResult{}, err
+	}
+	return result, nil
+}
+
+type dbTx interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func insertProject(ctx context.Context, tx dbTx, importBatchID string, fileHash string, filename string) (string, error) {
+	code := "import-" + strings.ReplaceAll(importBatchID, "-", "")[:20]
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		name = "Imported Excel " + fileHash[:8]
+	}
+	var projectID string
+	err := tx.QueryRow(ctx, `
+		insert into projects (code, name, description, status, opened_at)
+		values ($1, $2, $3, 'active', now())
+		returning id::text
+	`, code, name, "Confirmed Excel import "+fileHash).Scan(&projectID)
+	return projectID, err
+}
+
+func upsertUser(ctx context.Context, tx dbTx, normalizedCN string, originalCN string) (string, error) {
+	var userID string
+	err := tx.QueryRow(ctx, `
+		insert into users (cn_code, display_name, status)
+		values ($1, $2, 'active')
+		on conflict (cn_code) do update
+		set display_name = coalesce(users.display_name, excluded.display_name),
+			updated_at = now()
+		returning id::text
+	`, normalizedCN, originalCN).Scan(&userID)
+	return userID, err
+}
+
+func productKey(batch BatchPreview, detail DetailPreview) string {
+	parts := []string{
+		batch.ID,
+		detail.Category,
+		detail.ItemName,
+		detail.ColumnName,
+		detail.PriceType,
+		fmt.Sprintf("%.2f", detail.UnitPrice),
+	}
+	return hashStrings(parts...)
+}
+
+func upsertProduct(ctx context.Context, tx dbTx, projectID string, sku string, batch BatchPreview, detail DetailPreview) (string, error) {
+	category := strings.TrimSpace(batch.BatchName)
+	if detail.Category != "" {
+		category += " / " + detail.Category
+	}
+	var productID string
+	err := tx.QueryRow(ctx, `
+		insert into products (project_id, sku, name, character_name, category, unit_price, status, sort_order)
+		values ($1::uuid, $2, $3, $4, $5, $6, 'active', $7)
+		on conflict (project_id, sku) do update
+		set name = excluded.name,
+			character_name = excluded.character_name,
+			category = excluded.category,
+			unit_price = excluded.unit_price,
+			updated_at = now()
+		returning id::text
+	`, projectID, sku, detail.ItemName, detail.ItemName, category, detail.UnitPrice, detail.ColumnIndex).Scan(&productID)
+	return productID, err
+}
+
+func insertOrder(ctx context.Context, tx dbTx, importBatchID string, projectID string, userID string, normalizedCN string) (string, error) {
+	orderNo := "IMP-" + strings.ReplaceAll(importBatchID, "-", "")[:12] + "-" + hashStrings(normalizedCN)[:10]
+	var orderID string
+	err := tx.QueryRow(ctx, `
+		insert into orders (project_id, user_id, order_no, status, total_amount, note)
+		values ($1::uuid, $2::uuid, $3, 'draft', 0, $4)
+		returning id::text
+	`, projectID, userID, orderNo, "Created from Excel import "+importBatchID).Scan(&orderID)
+	return orderID, err
+}
+
+func insertOrderItem(ctx context.Context, tx dbTx, importBatchID string, orderID string, productID string, batch BatchPreview, detail DetailPreview) error {
+	sourceRowKey := fmt.Sprintf("%s!%s%d", detail.SheetName, detail.ColumnName, detail.RowNumber)
+	legacyRecordID := hashStrings(importBatchID, detail.SheetName, batch.ID, detail.NormalizedCN, detail.ColumnName, fmt.Sprint(detail.RowNumber), detail.ItemName)
+	_, err := tx.Exec(ctx, `
+		insert into order_items (
+			order_id,
+			product_id,
+			quantity,
+			unit_price,
+			amount,
+			payment_status,
+			import_batch_id,
+			source_sheet,
+			source_row_key,
+			legacy_record_id
+		) values ($1::uuid, $2::uuid, $3, $4, $5, 'unpaid', $6::uuid, $7, $8, $9)
+	`, orderID, productID, detail.Quantity, detail.UnitPrice, detail.Amount, importBatchID, detail.SheetName, sourceRowKey, legacyRecordID)
+	return err
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

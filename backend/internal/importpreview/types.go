@@ -1,12 +1,13 @@
 package importpreview
 
 type Preview struct {
-	File     FileInfo       `json:"file"`
-	Sheets   []SheetSummary `json:"sheets"`
-	Batches  []BatchPreview `json:"batches"`
-	Errors   []Issue        `json:"errors"`
-	Warnings []Issue        `json:"warnings"`
-	Notices  []Issue        `json:"notices"`
+	ImportBatchID string         `json:"import_batch_id,omitempty"`
+	File          FileInfo       `json:"file"`
+	Sheets        []SheetSummary `json:"sheets"`
+	Batches       []BatchPreview `json:"batches"`
+	Errors        []Issue        `json:"errors"`
+	Warnings      []Issue        `json:"warnings"`
+	Notices       []Issue        `json:"notices"`
 }
 
 type FileInfo struct {
@@ -85,4 +86,17 @@ type Issue struct {
 	BatchID   string `json:"batch_id,omitempty"`
 	RowNumber int    `json:"row_number,omitempty"`
 	Column    string `json:"column,omitempty"`
+}
+
+type ConfirmResult struct {
+	ImportBatchID  string  `json:"import_batch_id"`
+	ProjectID      string  `json:"project_id"`
+	Status         string  `json:"status"`
+	CNCount        int     `json:"cn_count"`
+	ProductCount   int     `json:"product_count"`
+	OrderCount     int     `json:"order_count"`
+	OrderItemCount int     `json:"order_item_count"`
+	TotalQuantity  int     `json:"total_quantity"`
+	TotalAmount    float64 `json:"total_amount"`
+	ConfirmedAt    string  `json:"confirmed_at"`
 }
