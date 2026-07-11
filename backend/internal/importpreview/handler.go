@@ -32,6 +32,8 @@ type Store interface {
 	FindImportFile(context.Context, string, string) (ImportFileState, error)
 	SavePreview(context.Context, Preview, string) (PreviewState, error)
 	ConfirmImport(context.Context, string, string, bool) (ConfirmResult, error)
+	ListImports(context.Context) (ImportHistoryResponse, error)
+	GetImport(context.Context, string) (ImportDetailResponse, error)
 }
 
 type ImportFileState struct {
@@ -179,6 +181,51 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	response, err := h.store.ListImports(ctx)
+	if err != nil {
+		log.Printf("list imports: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	importBatchID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/imports/"), "/")
+	if importBatchID == "" || importBatchID == "history" || strings.Contains(importBatchID, "/") {
+		writeError(w, http.StatusNotFound, "import batch not found")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	response, err := h.store.GetImport(ctx, importBatchID)
+	if err != nil {
+		if errors.Is(err, ErrImportNotFound) {
+			writeError(w, http.StatusNotFound, "import batch not found")
+			return
+		}
+		log.Printf("get import detail: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
 func readUploadedFile(file multipart.File, limit int64) ([]byte, error) {
 	reader := io.LimitReader(file, limit+1)
 	data, err := io.ReadAll(reader)
@@ -328,6 +375,152 @@ func (s *PostgresStore) SavePreview(ctx context.Context, preview Preview, adminI
 	return PreviewState{ImportBatchID: importBatchID, DuplicateFile: true, FilenameConflict: state.FilenameConflict}, nil
 }
 
+func (s *PostgresStore) ListImports(ctx context.Context) (ImportHistoryResponse, error) {
+	rows, err := s.pool.Query(ctx, `
+		select
+			b.id::text,
+			b.original_filename,
+			b.file_hash,
+			coalesce(b.file_size, 0),
+			coalesce(b.sheet_count, 0),
+			b.total_rows,
+			b.status,
+			coalesce(importer.username, ''),
+			coalesce(confirmer.username, ''),
+			to_char(b.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(to_char(b.started_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(to_char(b.confirmed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(to_char(b.completed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			b.error_count,
+			b.warning_count,
+			b.notice_count,
+			b.warnings_accepted,
+			coalesce(b.confirm_result::text, '')
+		from import_batches b
+		left join admins importer on importer.id = b.imported_by
+		left join admins confirmer on confirmer.id = b.confirmed_by
+		order by b.created_at desc
+		limit 100
+	`)
+	if err != nil {
+		return ImportHistoryResponse{}, err
+	}
+	defer rows.Close()
+
+	response := ImportHistoryResponse{Items: []ImportHistoryItem{}}
+	for rows.Next() {
+		item, err := scanImportHistoryItem(rows)
+		if err != nil {
+			return ImportHistoryResponse{}, err
+		}
+		response.Items = append(response.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return ImportHistoryResponse{}, err
+	}
+	return response, nil
+}
+
+func (s *PostgresStore) GetImport(ctx context.Context, importBatchID string) (ImportDetailResponse, error) {
+	row := s.pool.QueryRow(ctx, `
+		select
+			b.id::text,
+			b.original_filename,
+			b.file_hash,
+			coalesce(b.file_size, 0),
+			coalesce(b.sheet_count, 0),
+			b.total_rows,
+			b.status,
+			coalesce(importer.username, ''),
+			coalesce(confirmer.username, ''),
+			to_char(b.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(to_char(b.started_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(to_char(b.confirmed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(to_char(b.completed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			b.error_count,
+			b.warning_count,
+			b.notice_count,
+			b.warnings_accepted,
+			coalesce(b.confirm_result::text, ''),
+			coalesce(b.preview_payload::text, '')
+		from import_batches b
+		left join admins importer on importer.id = b.imported_by
+		left join admins confirmer on confirmer.id = b.confirmed_by
+		where b.id = $1::uuid
+	`, importBatchID)
+
+	item, previewPayload, err := scanImportDetail(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ImportDetailResponse{}, ErrImportNotFound
+	}
+	if err != nil {
+		return ImportDetailResponse{}, err
+	}
+
+	response := ImportDetailResponse{Import: item}
+	if previewPayload != "" {
+		var preview Preview
+		if err := json.Unmarshal([]byte(previewPayload), &preview); err != nil {
+			return ImportDetailResponse{}, err
+		}
+		response.Preview = &preview
+	}
+	return response, nil
+}
+
+type importHistoryScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanImportHistoryItem(scanner importHistoryScanner) (ImportHistoryItem, error) {
+	item, _, err := scanImportHistoryFields(scanner, false)
+	return item, err
+}
+
+func scanImportDetail(scanner importHistoryScanner) (ImportHistoryItem, string, error) {
+	return scanImportHistoryFields(scanner, true)
+}
+
+func scanImportHistoryFields(scanner importHistoryScanner, includePreview bool) (ImportHistoryItem, string, error) {
+	var item ImportHistoryItem
+	var confirmPayload string
+	var previewPayload string
+	dest := []any{
+		&item.ID,
+		&item.OriginalFilename,
+		&item.FileHash,
+		&item.FileSize,
+		&item.SheetCount,
+		&item.BatchCount,
+		&item.Status,
+		&item.UploadedBy,
+		&item.ConfirmedBy,
+		&item.CreatedAt,
+		&item.StartedAt,
+		&item.ConfirmedAt,
+		&item.CompletedAt,
+		&item.ErrorCount,
+		&item.WarningCount,
+		&item.NoticeCount,
+		&item.WarningsAccepted,
+		&confirmPayload,
+	}
+	if includePreview {
+		dest = append(dest, &previewPayload)
+	}
+	if err := scanner.Scan(dest...); err != nil {
+		return ImportHistoryItem{}, "", err
+	}
+	if confirmPayload != "" {
+		var result ConfirmResult
+		if err := json.Unmarshal([]byte(confirmPayload), &result); err != nil {
+			return ImportHistoryItem{}, "", err
+		}
+		item.ConfirmResult = &result
+	}
+	return item, previewPayload, nil
+}
+
 var (
 	ErrImportNotFound         = errors.New("import preview not found")
 	ErrImportAlreadyConfirmed = errors.New("import already confirmed")
@@ -468,16 +661,17 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 
 	confirmedAt := time.Now().UTC()
 	result := ConfirmResult{
-		ImportBatchID:  importBatchID,
-		ProjectID:      projectID,
-		Status:         "confirmed",
-		CNCount:        len(userIDs),
-		ProductCount:   productCount,
-		OrderCount:     len(orderIDs),
-		OrderItemCount: orderItemCount,
-		TotalQuantity:  totalQuantity,
-		TotalAmount:    round2(totalAmount),
-		ConfirmedAt:    confirmedAt.Format(time.RFC3339),
+		ImportBatchID:    importBatchID,
+		ProjectID:        projectID,
+		Status:           "confirmed",
+		CNCount:          len(userIDs),
+		ProductCount:     productCount,
+		OrderCount:       len(orderIDs),
+		OrderItemCount:   orderItemCount,
+		TotalQuantity:    totalQuantity,
+		TotalAmount:      round2(totalAmount),
+		WarningsAccepted: allowWarnings,
+		ConfirmedAt:      confirmedAt.Format(time.RFC3339),
 	}
 	resultPayload, err := json.Marshal(result)
 	if err != nil {
@@ -493,9 +687,10 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 			confirmed_by = $4::uuid,
 			confirmed_at = $3,
 			confirmed_project_id = $5::uuid,
-			confirm_result = $6::jsonb
+			confirm_result = $6::jsonb,
+			warnings_accepted = $7
 		where id = $1::uuid
-	`, importBatchID, orderItemCount, confirmedAt, adminID, projectID, resultPayload); err != nil {
+	`, importBatchID, orderItemCount, confirmedAt, adminID, projectID, resultPayload, allowWarnings); err != nil {
 		return ConfirmResult{}, err
 	}
 

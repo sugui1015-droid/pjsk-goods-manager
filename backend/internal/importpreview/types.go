@@ -89,14 +89,45 @@ type Issue struct {
 }
 
 type ConfirmResult struct {
-	ImportBatchID  string  `json:"import_batch_id"`
-	ProjectID      string  `json:"project_id"`
-	Status         string  `json:"status"`
-	CNCount        int     `json:"cn_count"`
-	ProductCount   int     `json:"product_count"`
-	OrderCount     int     `json:"order_count"`
-	OrderItemCount int     `json:"order_item_count"`
-	TotalQuantity  int     `json:"total_quantity"`
-	TotalAmount    float64 `json:"total_amount"`
-	ConfirmedAt    string  `json:"confirmed_at"`
+	ImportBatchID    string  `json:"import_batch_id"`
+	ProjectID        string  `json:"project_id"`
+	Status           string  `json:"status"`
+	CNCount          int     `json:"cn_count"`
+	ProductCount     int     `json:"product_count"`
+	OrderCount       int     `json:"order_count"`
+	OrderItemCount   int     `json:"order_item_count"`
+	TotalQuantity    int     `json:"total_quantity"`
+	TotalAmount      float64 `json:"total_amount"`
+	WarningsAccepted bool    `json:"warnings_accepted"`
+	ConfirmedAt      string  `json:"confirmed_at"`
+}
+
+type ImportHistoryItem struct {
+	ID               string         `json:"id"`
+	OriginalFilename string         `json:"original_filename"`
+	FileHash         string         `json:"file_hash"`
+	FileSize         int64          `json:"file_size"`
+	SheetCount       int            `json:"sheet_count"`
+	BatchCount       int            `json:"batch_count"`
+	Status           string         `json:"status"`
+	UploadedBy       string         `json:"uploaded_by,omitempty"`
+	ConfirmedBy      string         `json:"confirmed_by,omitempty"`
+	CreatedAt        string         `json:"created_at"`
+	StartedAt        string         `json:"started_at,omitempty"`
+	ConfirmedAt      string         `json:"confirmed_at,omitempty"`
+	CompletedAt      string         `json:"completed_at,omitempty"`
+	ErrorCount       int            `json:"error_count"`
+	WarningCount     int            `json:"warning_count"`
+	NoticeCount      int            `json:"notice_count"`
+	WarningsAccepted bool           `json:"warnings_accepted"`
+	ConfirmResult    *ConfirmResult `json:"confirm_result,omitempty"`
+}
+
+type ImportHistoryResponse struct {
+	Items []ImportHistoryItem `json:"items"`
+}
+
+type ImportDetailResponse struct {
+	Import  ImportHistoryItem `json:"import"`
+	Preview *Preview          `json:"preview,omitempty"`
 }

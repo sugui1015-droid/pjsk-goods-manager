@@ -626,3 +626,41 @@ th {
   color: #24425f;
   font-size: 12px;
 }
+
+.admin-actions .panel__header {
+  margin-bottom: 12px;
+}
+
+.action-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.history-table {
+  max-height: 560px;
+}
+
+.history-table td small {
+  display: block;
+  margin-top: 4px;
+  color: #667085;
+}
+
+.hash-cell {
+  max-width: 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.nested-panel {
+  margin-top: 14px;
+  padding: 14px;
+  background: #fbfdff;
+}
+
+.detail-result {
+  margin: 14px 0;
+}

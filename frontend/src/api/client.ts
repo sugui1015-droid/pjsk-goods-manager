@@ -185,5 +185,35 @@ export type ImportConfirmResponse = {
   order_item_count: number
   total_quantity: number
   total_amount: number
+  warnings_accepted: boolean
   confirmed_at: string
+}
+export type ImportHistoryItem = {
+  id: string
+  original_filename: string
+  file_hash: string
+  file_size: number
+  sheet_count: number
+  batch_count: number
+  status: string
+  uploaded_by?: string
+  confirmed_by?: string
+  created_at: string
+  started_at?: string
+  confirmed_at?: string
+  completed_at?: string
+  error_count: number
+  warning_count: number
+  notice_count: number
+  warnings_accepted: boolean
+  confirm_result?: ImportConfirmResponse
+}
+
+export type ImportHistoryResponse = {
+  items: ImportHistoryItem[]
+}
+
+export type ImportDetailResponse = {
+  import: ImportHistoryItem
+  preview?: ImportPreviewResponse
 }
