@@ -942,6 +942,11 @@ function statusLabel(status: string) {
   return labels[status] ?? status
 }
 
+function queryCharacterLabel(item: { character_name?: string; series_code?: string }) {
+  if (!item.character_name) return '-'
+  return item.series_code ? `${item.character_name}（${item.series_code}）` : item.character_name
+}
+
 function queryPaymentStatusLabel(status: string) {
   const labels: Record<string, string> = {
     unpaid: '未付款',
@@ -1473,7 +1478,7 @@ onMounted(() => {
                   <tr v-for="item in order.items" :key="item.id">
                     <td>{{ item.display_name || item.goods_name }}</td>
                     <td>{{ item.category || '-' }}</td>
-                    <td>{{ item.character_name || '-' }}</td>
+                    <td>{{ queryCharacterLabel(item) }}</td>
                     <td>{{ item.quantity }}</td>
                     <td>{{ formatMoney(item.unit_price) }}</td>
                     <td>{{ formatMoney(item.amount) }}</td>

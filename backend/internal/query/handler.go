@@ -84,6 +84,7 @@ type OrderItem struct {
 	GoodsName      string  `json:"goods_name"`
 	Category       string  `json:"category,omitempty"`
 	CharacterName  string  `json:"character_name,omitempty"`
+	SeriesCode     string  `json:"series_code,omitempty"`
 	DisplayName    string  `json:"display_name"`
 	Quantity       float64 `json:"quantity"`
 	UnitPrice      float64 `json:"unit_price"`
@@ -348,6 +349,7 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			product.name,
 			coalesce(product.category, ''),
 			coalesce(product.character_name, ''),
+			coalesce(product.series_code, ''),
 			case when coalesce(product.category, '') = '' or product.category = '默认分类' then product.name else product.name || '-' || product.category end,
 			oi.quantity::float8,
 			oi.unit_price::float8,
@@ -376,6 +378,7 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			&item.GoodsName,
 			&item.Category,
 			&item.CharacterName,
+			&item.SeriesCode,
 			&item.DisplayName,
 			&item.Quantity,
 			&item.UnitPrice,

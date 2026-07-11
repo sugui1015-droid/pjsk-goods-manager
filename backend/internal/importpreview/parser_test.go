@@ -62,11 +62,65 @@ func TestParseStandardImportTemplate(t *testing.T) {
 	if got := batch.Details[0].CharacterName; got != "miku" {
 		t.Fatalf("character = %q", got)
 	}
-	if len(batch.Errors) == 0 || batch.Errors[0].Code != "invalid_character_name" {
+	if len(batch.Errors) == 0 || batch.Errors[0].Code != "invalid_character_header" {
 		t.Fatalf("expected invalid character error, got %#v", batch.Errors)
 	}
 	if len(batch.Warnings) == 0 || batch.Warnings[0].Code != "duplicate_cn_in_standard_sheet" {
 		t.Fatalf("expected duplicate CN warning, got %#v", batch.Warnings)
+	}
+}
+
+func TestParseStandardImportCompositeCharacters(t *testing.T) {
+	data := testWorkbook(t, testSheet{
+		Name: "standard-composite",
+		Rows: [][]any{
+			{"【新队服卡套单领】汇总详情"},
+			{nil, "分类", "卡套", nil, nil},
+			{nil, "种类", "25h miku", "ln luka", "vbs meiko"},
+			{nil, "单价", 85.8, 23.32, 22.88},
+			{"总金额", "昵称/总数", 1, 2, 1},
+			{155.32, "Yoru", 1, 2, 0},
+			{22.88, "无桦", 0, 0, 1},
+		},
+	})
+
+	preview, err := Parse(data, ParseOptions{Filename: "composite.xlsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := preview.Batches[0]
+	if len(batch.Errors) != 0 {
+		t.Fatalf("expected no character errors, got %#v", batch.Errors)
+	}
+	if len(batch.Details) != 3 || batch.TotalQuantity != 4 || batch.CalculatedAmount != 155.32 {
+		t.Fatalf("summary details=%d qty=%d amount=%.2f", len(batch.Details), batch.TotalQuantity, batch.CalculatedAmount)
+	}
+	checks := map[string]struct{ character, variant string }{
+		"25h miku":  {"miku", "25h"},
+		"ln luka":   {"luka", "ln"},
+		"vbs meiko": {"meiko", "vbs"},
+	}
+	for _, detail := range batch.Details {
+		want := checks[detail.ItemName]
+		if detail.CharacterName != want.character || detail.SeriesCode != want.variant {
+			t.Fatalf("%s character=%q variant=%q", detail.ItemName, detail.CharacterName, detail.SeriesCode)
+		}
+	}
+}
+
+func TestParseCharacterNameComposite(t *testing.T) {
+	tests := map[string]struct{ character, variant string }{
+		"miku":     {"miku", ""},
+		"25h miku": {"miku", "25h"},
+		"ln luka":  {"luka", "ln"},
+		"mmj rin":  {"rin", "mmj"},
+		"限定":       {"", ""},
+	}
+	for input, want := range tests {
+		got := parseCharacterName(input)
+		if got.Character != want.character || got.Variant != want.variant {
+			t.Fatalf("%q => character=%q variant=%q", input, got.Character, got.Variant)
+		}
 	}
 }
 

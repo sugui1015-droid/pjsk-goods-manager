@@ -334,6 +334,7 @@ export type QueryOrderItem = {
   goods_name: string
   category?: string
   character_name?: string
+  series_code?: string
   display_name: string
   quantity: number
   unit_price: number

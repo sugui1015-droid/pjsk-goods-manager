@@ -357,7 +357,7 @@ func parseMatrixBlock(currentSheet sheet, candidate matrixCandidate, endRow int,
 				ProductCategory: item.Category,
 				SeriesCode:      item.SeriesName,
 				DisplayName:     goodsDisplayName(title, item.Category),
-				CharacterName:   characterNameFromItemName(item.Name),
+				CharacterName:   item.Character,
 				Category:        item.Category,
 				SeriesName:      item.SeriesName,
 				ItemName:        item.Name,
@@ -410,6 +410,7 @@ type itemColumn struct {
 	Name       string
 	Category   string
 	SeriesName string
+	Character  string
 	UnitPrice  float64
 }
 
@@ -431,6 +432,7 @@ func itemColumnsForBlock(currentSheet sheet, kindRow, priceRow, labelCol int, sh
 			Name:       name,
 			Category:   productCategoryForColumn(sheetTitle, categoryByColumn[col]),
 			SeriesName: seriesCodeFromText(categoryByColumn[col]),
+			Character:  characterNameFromItemName(name),
 			UnitPrice:  round2(*price),
 		})
 	}
@@ -520,13 +522,30 @@ func goodsDisplayName(goodsSeriesName string, productCategory string) string {
 	return name + "-" + category
 }
 
-func characterNameFromItemName(itemName string) string {
-	text := strings.ToLower(strings.TrimSpace(itemName))
+type characterParseResult struct {
+	Raw       string
+	Character string
+	Variant   string
+	Exact     bool
+}
+
+func parseCharacterName(itemName string) characterParseResult {
+	raw := cleanText(itemName)
+	text := strings.ToLower(strings.TrimSpace(raw))
 	if text == "" {
-		return ""
+		return characterParseResult{Raw: raw}
 	}
 	if allowedCharacterNames[text] {
-		return text
+		return characterParseResult{Raw: raw, Character: text, Exact: true}
+	}
+	for _, name := range characterNameOrder {
+		if strings.HasSuffix(text, " "+name) {
+			variant := strings.TrimSpace(strings.TrimSuffix(text, name))
+			variant = strings.TrimSpace(strings.TrimRight(variant, "-_/()[]（）【】"))
+			if variant != "" {
+				return characterParseResult{Raw: raw, Character: name, Variant: variant}
+			}
+		}
 	}
 	for _, name := range characterNameOrder {
 		if strings.HasPrefix(text, name) {
@@ -534,12 +553,16 @@ func characterNameFromItemName(itemName string) string {
 			if next != "" {
 				first, _ := utf8.DecodeRuneInString(next)
 				if first < 'a' || first > 'z' {
-					return name
+					return characterParseResult{Raw: raw, Character: name}
 				}
 			}
 		}
 	}
-	return ""
+	return characterParseResult{Raw: raw}
+}
+
+func characterNameFromItemName(itemName string) string {
+	return parseCharacterName(itemName).Character
 }
 
 var characterNameOrder = []string{"meiko", "kaito", "miku", "shiho", "mnr", "airi", "khn", "akt", "toya", "tks", "emu", "nene", "rui", "knd", "mfy", "ena", "mzk", "rin", "len", "luka", "ick", "saki", "hnm", "hrk", "szk", "an"}
@@ -675,12 +698,12 @@ func parseStandardImportSheet(currentSheet sheet, notices []Issue, sheetID strin
 		if itemName == "" || isStandardRolePlaceholder(itemName) {
 			continue
 		}
-		characterName := characterNameFromItemName(itemName)
-		if characterName == "" {
+		character := parseCharacterName(itemName)
+		if character.Character == "" {
 			columnErrors = append(columnErrors, Issue{
 				Level:     IssueLevelRowError,
-				Code:      "invalid_character_name",
-				Message:   fmt.Sprintf("角色名 %q 不在当前 26 个英文简称白名单中，该列不会导入正式明细。", itemName),
+				Code:      "invalid_character_header",
+				Message:   fmt.Sprintf("角色标题 %q 无法识别为 Project SEKAI 角色；如果该列有人填写数量，对应明细不会导入。", itemName),
 				SheetName: currentSheet.Name,
 				Column:    columnName(col + 1),
 				RowNumber: 3,
@@ -693,10 +716,11 @@ func parseStandardImportSheet(currentSheet sheet, notices []Issue, sheetID strin
 		}
 		itemColumns = append(itemColumns, itemColumn{
 			Col:        col,
-			Name:       characterName,
+			Name:       itemName,
 			UnitPrice:  round4(*unitPrice),
 			Category:   categoryByColumn[col],
-			SeriesName: "",
+			SeriesName: character.Variant,
+			Character:  character.Character,
 		})
 	}
 
@@ -782,7 +806,7 @@ func parseStandardImportSheet(currentSheet sheet, notices []Issue, sheetID strin
 				ProductCategory: item.Category,
 				SeriesCode:      item.SeriesName,
 				DisplayName:     goodsDisplayName(goodsSeriesName, item.Category),
-				CharacterName:   characterNameFromItemName(item.Name),
+				CharacterName:   item.Character,
 				Category:        item.Category,
 				SeriesName:      item.SeriesName,
 				ItemName:        item.Name,
