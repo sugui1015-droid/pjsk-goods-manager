@@ -321,21 +321,11 @@ type itemColumn struct {
 }
 
 func itemColumnsForBlock(currentSheet sheet, kindRow, priceRow, labelCol int) []itemColumn {
-	categoryRow := kindRow - 1
+	categoryByColumn := categoryPathsForBlock(currentSheet, kindRow, priceRow, labelCol)
 	var items []itemColumn
-	lastCategory := ""
 	for col := labelCol + 1; col < currentSheet.ColCount; col++ {
-		if col > labelCol+1 && isKindKeyword(currentSheet.cellText(kindRow, col)) && isPriceKeyword(currentSheet.cellText(priceRow, col)) {
+		if isNextMatrixBlock(currentSheet, kindRow, priceRow, labelCol, col) {
 			break
-		}
-		category := ""
-		if categoryRow >= 0 {
-			category = cleanText(currentSheet.cellText(categoryRow, col))
-			if category != "" {
-				lastCategory = category
-			} else {
-				category = lastCategory
-			}
 		}
 
 		name := cleanText(currentSheet.cellText(kindRow, col))
@@ -346,11 +336,86 @@ func itemColumnsForBlock(currentSheet sheet, kindRow, priceRow, labelCol int) []
 		items = append(items, itemColumn{
 			Col:       col,
 			Name:      name,
-			Category:  category,
+			Category:  categoryByColumn[col],
 			UnitPrice: round2(*price),
 		})
 	}
 	return items
+}
+
+func categoryPathsForBlock(currentSheet sheet, kindRow, priceRow, labelCol int) map[int]string {
+	categoryPartsByColumn := map[int][]string{}
+	startRow := kindRow - 4
+	if startRow < 0 {
+		startRow = 0
+	}
+
+	for row := startRow; row < kindRow; row++ {
+		rowValues := inheritedHeaderValues(currentSheet, row, kindRow, priceRow, labelCol)
+		if len(rowValues) == 0 {
+			continue
+		}
+		for col, value := range rowValues {
+			if value == "" || containsString(categoryPartsByColumn[col], value) {
+				continue
+			}
+			categoryPartsByColumn[col] = append(categoryPartsByColumn[col], value)
+		}
+	}
+
+	categoryByColumn := map[int]string{}
+	for col, parts := range categoryPartsByColumn {
+		categoryByColumn[col] = strings.Join(parts, " / ")
+	}
+	return categoryByColumn
+}
+
+func inheritedHeaderValues(currentSheet sheet, row, kindRow, priceRow, labelCol int) map[int]string {
+	values := map[int]string{}
+	lastHeader := ""
+	rowHasItemHeader := false
+	for col := labelCol + 1; col < currentSheet.ColCount; col++ {
+		if isNextMatrixBlock(currentSheet, kindRow, priceRow, labelCol, col) {
+			break
+		}
+		text := cleanCategoryText(currentSheet.cellText(row, col))
+		if text != "" {
+			lastHeader = text
+			rowHasItemHeader = true
+		}
+		if lastHeader != "" {
+			values[col] = lastHeader
+		}
+	}
+	if !rowHasItemHeader {
+		return map[int]string{}
+	}
+	return values
+}
+
+func cleanCategoryText(value string) string {
+	text := cleanText(value)
+	if text == "" || isKindKeyword(text) || isPriceKeyword(text) || isReservedCNLabel(text) || isNumericText(text) {
+		return ""
+	}
+	normalized := normalizeHeader(text)
+	if normalized == "分类" || normalized == "分類" || normalized == "category" {
+		return ""
+	}
+	return text
+}
+
+func isNextMatrixBlock(currentSheet sheet, kindRow, priceRow, labelCol, col int) bool {
+	return col > labelCol+1 && isKindKeyword(currentSheet.cellText(kindRow, col)) && isPriceKeyword(currentSheet.cellText(priceRow, col))
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func priceTypeInfo(currentSheet sheet, row, labelCol int) PriceTypeInfo {

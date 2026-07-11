@@ -45,6 +45,32 @@ func TestParseNormalMatrix(t *testing.T) {
 	}
 }
 
+func TestParseNestedCategoryHeaders(t *testing.T) {
+	data := testWorkbook(t, testSheet{
+		Name: "nested",
+		Rows: [][]any{
+			{"多层分类"},
+			{nil, nil, "扇子", nil, "砖类", nil},
+			{nil, "分类", "圆扇", nil, "钻砖", nil},
+			{nil, "种类", "miku", "rin", "luka", "kaito"},
+			{nil, "单价", 10, 20, 30, 40},
+			{"总金额", "昵称/总数", 1, 1, 1, 1},
+			{100, "Alice", 1, 1, 1, 1},
+		},
+	})
+
+	preview, err := Parse(data, ParseOptions{Filename: "nested.xlsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := preview.Batches[0]
+	if got := batch.Details[0].Category; got != "扇子 / 圆扇" {
+		t.Fatalf("first category = %q", got)
+	}
+	if got := batch.Details[2].Category; got != "砖类 / 钻砖" {
+		t.Fatalf("third category = %q", got)
+	}
+}
 func TestParseHorizontalMultiBlock(t *testing.T) {
 	data := testWorkbook(t, testSheet{
 		Name: "multi",
