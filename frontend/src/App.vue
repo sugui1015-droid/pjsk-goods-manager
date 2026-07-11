@@ -16,11 +16,14 @@ import {
   type ImportHistoryResponse,
   type ImportIssue,
   type ImportPreviewResponse,
+  type OrderDetailResponse,
+  type OrderListResponse,
+  type OrderSummary,
 } from './api/client'
 
 const maxExcelSize = 20 * 1024 * 1024
 
-type RouteName = 'home' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail'
+type RouteName = 'home' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail'
 type IssueFilter = 'all' | 'error' | 'warning' | 'notice'
 
 const fallbackConfig: ConfigResponse = {
@@ -44,6 +47,7 @@ const checkedAt = ref('')
 const activeView = ref<'overview' | 'ops' | 'legacy'>('overview')
 const routeName = ref<RouteName>(routeFromPath(window.location.pathname))
 const routeImportID = ref(importIDFromPath(window.location.pathname))
+const routeOrderID = ref(orderIDFromPath(window.location.pathname))
 
 const admin = ref<Admin | null>(null)
 const authChecked = ref(false)
@@ -70,6 +74,22 @@ const detailLoading = ref(false)
 const detailMessage = ref('')
 const importDetail = ref<ImportDetailResponse | null>(null)
 
+const ordersLoading = ref(false)
+const ordersMessage = ref('')
+const orderItems = ref<OrderSummary[]>([])
+const orderDetailLoading = ref(false)
+const orderDetailMessage = ref('')
+const orderDetail = ref<OrderDetailResponse | null>(null)
+const orderFilters = ref({
+  cn: '',
+  project: '',
+  item: '',
+  importBatchID: '',
+  status: '',
+  createdFrom: '',
+  createdTo: '',
+})
+
 const isBackendOnline = computed(() => health.value?.status === 'ok')
 const readyCount = computed(() => config.value.modules.filter((item) => item.status === 'ready').length)
 const queuedCount = computed(() => config.value.modules.filter((item) => item.status === 'queued').length)
@@ -92,6 +112,8 @@ const allIssues = computed(() => [
 const filteredIssues = computed(() => issueFilter.value === 'all' ? allIssues.value : allIssues.value.filter((item) => item.level === issueFilter.value))
 
 function routeFromPath(path: string): RouteName {
+  if (path === '/admin/orders') return 'admin-orders'
+  if (path.startsWith('/admin/orders/')) return 'admin-order-detail'
   if (path === '/admin/imports/history') return 'admin-import-history'
   if (path.startsWith('/admin/imports/') && path !== '/admin/imports/preview') return 'admin-import-detail'
   if (path === '/admin/imports') return 'admin-imports'
@@ -104,10 +126,16 @@ function importIDFromPath(path: string) {
   return id === 'history' ? '' : id
 }
 
+function orderIDFromPath(path: string) {
+  if (!path.startsWith('/admin/orders/')) return ''
+  return decodeURIComponent(path.replace('/admin/orders/', '').replace(/\/$/, ''))
+}
+
 function navigate(path: string) {
   window.history.pushState(null, '', path)
   routeName.value = routeFromPath(path)
   routeImportID.value = importIDFromPath(path)
+  routeOrderID.value = orderIDFromPath(path)
   void handleRouteEntered()
 }
 
@@ -117,6 +145,8 @@ async function handleRouteEntered() {
   if (!admin.value) return
   if (routeName.value === 'admin-import-history') await loadHistory()
   if (routeName.value === 'admin-import-detail' && routeImportID.value) await loadDetail(routeImportID.value)
+  if (routeName.value === 'admin-orders') await loadOrders()
+  if (routeName.value === 'admin-order-detail' && routeOrderID.value) await loadOrderDetail(routeOrderID.value)
 }
 
 async function load() {
@@ -188,6 +218,8 @@ async function logout() {
   confirmResult.value = null
   importHistory.value = []
   importDetail.value = null
+  orderItems.value = []
+  orderDetail.value = null
 }
 
 function onFileChange(event: Event) {
@@ -301,6 +333,74 @@ async function loadDetail(id: string) {
   }
 }
 
+function orderQueryString() {
+  const query = new URLSearchParams()
+  const filters = orderFilters.value
+  if (filters.cn.trim()) query.set('cn', filters.cn.trim())
+  if (filters.project.trim()) query.set('project', filters.project.trim())
+  if (filters.item.trim()) query.set('item', filters.item.trim())
+  if (filters.importBatchID.trim()) query.set('import_batch_id', filters.importBatchID.trim())
+  if (filters.status.trim()) query.set('status', filters.status.trim())
+  if (filters.createdFrom) query.set('created_from', filters.createdFrom)
+  if (filters.createdTo) query.set('created_to', filters.createdTo)
+  const encoded = query.toString()
+  return encoded ? `?${encoded}` : ''
+}
+
+async function loadOrders() {
+  ordersLoading.value = true
+  ordersMessage.value = ''
+  try {
+    const response = await getJSON<OrderListResponse>(`/api/admin/orders${orderQueryString()}`)
+    orderItems.value = response.items ?? []
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    ordersMessage.value = error instanceof Error ? error.message : '订单列表加载失败'
+  } finally {
+    ordersLoading.value = false
+  }
+}
+
+async function loadOrderDetail(id: string) {
+  orderDetailLoading.value = true
+  orderDetailMessage.value = ''
+  orderDetail.value = null
+  try {
+    orderDetail.value = await getJSON<OrderDetailResponse>(`/api/admin/orders/${encodeURIComponent(id)}`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    orderDetailMessage.value = error instanceof Error ? error.message : '订单详情加载失败'
+  } finally {
+    orderDetailLoading.value = false
+  }
+}
+
+function resetOrderFilters() {
+  orderFilters.value = {
+    cn: '',
+    project: '',
+    item: '',
+    importBatchID: '',
+    status: '',
+    createdFrom: '',
+    createdTo: '',
+  }
+  void loadOrders()
+}
+
+function orderSources(order: OrderSummary) {
+  const filenames = order.import_filenames ?? []
+  if (filenames.length > 0) return filenames.join(' / ')
+  return (order.import_batch_ids ?? []).join(' / ') || '-'
+}
 function toggleBatch(batchId: string) {
   const next = new Set(expandedBatchIds.value)
   if (next.has(batchId)) next.delete(batchId)
@@ -356,6 +456,7 @@ function historyTotalAmount(item: ImportHistoryItem) {
 window.addEventListener('popstate', () => {
   routeName.value = routeFromPath(window.location.pathname)
   routeImportID.value = importIDFromPath(window.location.pathname)
+  routeOrderID.value = orderIDFromPath(window.location.pathname)
   void handleRouteEntered()
 })
 
@@ -387,6 +488,7 @@ onMounted(() => {
       <button :class="{ active: routeName === 'home' }" type="button" @click="navigate('/')">总览</button>
       <button :class="{ active: routeName === 'admin-imports' }" type="button" @click="navigate('/admin/imports')">Excel 导入预览</button>
       <button :class="{ active: routeName === 'admin-import-history' || routeName === 'admin-import-detail' }" type="button" @click="navigate('/admin/imports/history')">导入历史</button>
+      <button :class="{ active: routeName === 'admin-orders' || routeName === 'admin-order-detail' }" type="button" @click="navigate('/admin/orders')">订单查询</button>
     </nav>
 
     <main v-if="isAdminRoute" class="workspace">
@@ -417,6 +519,7 @@ onMounted(() => {
           <div class="action-row">
             <button class="secondary-button" type="button" @click="navigate('/admin/imports')">导入预览</button>
             <button class="secondary-button" type="button" @click="navigate('/admin/imports/history')">导入历史</button>
+            <button class="secondary-button" type="button" @click="navigate('/admin/orders')">订单查询</button>
           </div>
         </section>
 
@@ -494,6 +597,136 @@ onMounted(() => {
           </section>
         </template>
 
+        <template v-else-if="routeName === 'admin-orders'">
+          <section class="panel">
+            <div class="panel__header">
+              <div>
+                <h2>订单只读查询</h2>
+                <p class="muted">查看 Excel 确认导入后的正式订单数据；本页不允许修改、删除或撤销。</p>
+              </div>
+              <button class="secondary-button" type="button" :disabled="ordersLoading" @click="loadOrders">刷新</button>
+            </div>
+
+            <form class="order-filters" @submit.prevent="loadOrders">
+              <label><span>CN</span><input v-model="orderFilters.cn" placeholder="CN 或显示名" /></label>
+              <label><span>项目/批次</span><input v-model="orderFilters.project" placeholder="项目名称或编码" /></label>
+              <label><span>谷子种类</span><input v-model="orderFilters.item" placeholder="商品、分类或角色" /></label>
+              <label><span>导入批次 ID</span><input v-model="orderFilters.importBatchID" placeholder="import_batch_id" /></label>
+              <label>
+                <span>订单状态</span>
+                <select v-model="orderFilters.status">
+                  <option value="">全部</option>
+                  <option value="draft">draft</option>
+                  <option value="submitted">submitted</option>
+                  <option value="partially_paid">partially_paid</option>
+                  <option value="paid">paid</option>
+                  <option value="cancelled">cancelled</option>
+                </select>
+              </label>
+              <label><span>创建时间起</span><input v-model="orderFilters.createdFrom" type="date" /></label>
+              <label><span>创建时间止</span><input v-model="orderFilters.createdTo" type="date" /></label>
+              <div class="filter-actions">
+                <button class="primary-button" type="submit" :disabled="ordersLoading">{{ ordersLoading ? '查询中' : '查询' }}</button>
+                <button class="secondary-button" type="button" @click="resetOrderFilters">重置</button>
+              </div>
+            </form>
+
+            <div v-if="ordersMessage" class="inline-alert">{{ ordersMessage }}</div>
+            <div class="table-scroll history-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>CN</th>
+                    <th>项目</th>
+                    <th>状态</th>
+                    <th>种类数</th>
+                    <th>商品总数</th>
+                    <th>订单总金额</th>
+                    <th>来源导入批次</th>
+                    <th>创建时间</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-if="!ordersLoading && orderItems.length === 0"><td colspan="9">暂无订单数据。</td></tr>
+                  <tr v-for="order in orderItems" :key="order.id">
+                    <td><strong>{{ order.cn_code }}</strong><small>{{ order.display_name || '-' }}</small></td>
+                    <td>{{ order.project_name }}<small>{{ order.order_no }}</small></td>
+                    <td><span class="status-chip" data-state="draft">{{ order.status }}</span></td>
+                    <td>{{ order.item_type_count }}</td>
+                    <td>{{ order.total_quantity }}</td>
+                    <td>{{ formatMoney(order.total_amount) }}</td>
+                    <td class="hash-cell">{{ orderSources(order) }}</td>
+                    <td>{{ formatDate(order.created_at) }}</td>
+                    <td><button class="secondary-button" type="button" @click="navigate(`/admin/orders/${order.id}`)">详情</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-order-detail'">
+          <section class="panel">
+            <div class="panel__header">
+              <div>
+                <h2>订单详情</h2>
+                <p class="muted">{{ routeOrderID }}</p>
+              </div>
+              <button class="secondary-button" type="button" @click="navigate('/admin/orders')">返回订单列表</button>
+            </div>
+            <div v-if="orderDetailMessage" class="inline-alert">{{ orderDetailMessage }}</div>
+            <p v-if="orderDetailLoading" class="muted">正在加载订单详情。</p>
+
+            <template v-if="orderDetail">
+              <div class="summary-grid">
+                <article class="metric-tile"><span>CN</span><strong>{{ orderDetail.order.cn_code }}</strong></article>
+                <article class="metric-tile wide-metric"><span>项目</span><strong>{{ orderDetail.order.project_name }}</strong></article>
+                <article class="metric-tile"><span>状态</span><strong>{{ orderDetail.order.status }}</strong></article>
+                <article class="metric-tile"><span>明细数</span><strong>{{ orderDetail.order.item_count }}</strong></article>
+                <article class="metric-tile"><span>商品总数</span><strong>{{ orderDetail.order.total_quantity }}</strong></article>
+                <article class="metric-tile"><span>订单总额</span><strong>{{ formatMoney(orderDetail.order.total_amount) }}</strong></article>
+                <article class="metric-tile wide-metric"><span>来源</span><strong>{{ orderSources(orderDetail.order) }}</strong></article>
+                <article class="metric-tile"><span>创建时间</span><strong>{{ formatDate(orderDetail.order.created_at) }}</strong></article>
+              </div>
+
+              <section class="panel nested-panel">
+                <div class="panel__header"><h2>谷子明细</h2><span>{{ orderDetail.order.items.length }} items</span></div>
+                <div class="table-scroll detail-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>谷子种类</th>
+                        <th>分类</th>
+                        <th>SKU</th>
+                        <th>数量</th>
+                        <th>单价</th>
+                        <th>小计</th>
+                        <th>付款状态</th>
+                        <th>来源 Excel / 批次</th>
+                        <th>来源位置</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-if="orderDetail.order.items.length === 0"><td colspan="9">无明细。</td></tr>
+                      <tr v-for="item in orderDetail.order.items" :key="item.id">
+                        <td>{{ item.product_name }}</td>
+                        <td>{{ item.category || item.character_name || '-' }}</td>
+                        <td class="hash-cell">{{ item.sku || '-' }}</td>
+                        <td>{{ item.quantity }}</td>
+                        <td>{{ formatMoney(item.unit_price) }}</td>
+                        <td>{{ formatMoney(item.amount) }}</td>
+                        <td>{{ item.payment_status }}</td>
+                        <td class="hash-cell">{{ item.import_filename || item.import_batch_id || '-' }}</td>
+                        <td>{{ item.source_row_key || item.source_sheet || '-' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </template>
+          </section>
+        </template>
         <template v-else-if="routeName === 'admin-import-history'">
           <section class="panel">
             <div class="panel__header"><div><h2>导入历史</h2><p class="muted">只读查看，不提供撤销或修改订单。</p></div><button class="secondary-button" type="button" :disabled="historyLoading" @click="loadHistory">刷新</button></div>

@@ -664,3 +664,49 @@ th {
 .detail-result {
   margin: 14px 0;
 }
+
+.order-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.order-filters label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.order-filters input,
+.order-filters select {
+  min-height: 38px;
+  width: 100%;
+  border: 1px solid #ccd7e0;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #ffffff;
+}
+
+.filter-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+@media (max-width: 1040px) {
+  .order-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .order-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

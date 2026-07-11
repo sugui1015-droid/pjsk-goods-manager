@@ -217,3 +217,50 @@ export type ImportDetailResponse = {
   import: ImportHistoryItem
   preview?: ImportPreviewResponse
 }
+export type OrderSummary = {
+  id: string
+  order_no: string
+  status: string
+  cn_code: string
+  display_name?: string
+  project_id: string
+  project_name: string
+  item_type_count: number
+  item_count: number
+  total_quantity: number
+  total_amount: number
+  import_batch_ids: string[]
+  import_filenames: string[]
+  created_at: string
+  updated_at: string
+}
+
+export type OrderItem = {
+  id: string
+  product_id: string
+  product_name: string
+  character_name?: string
+  category?: string
+  sku?: string
+  quantity: number
+  unit_price: number
+  amount: number
+  payment_status: string
+  import_batch_id?: string
+  import_filename?: string
+  source_sheet?: string
+  source_row_key?: string
+  created_at: string
+}
+
+export type OrderDetail = OrderSummary & {
+  items: OrderItem[]
+}
+
+export type OrderListResponse = {
+  items: OrderSummary[]
+}
+
+export type OrderDetailResponse = {
+  order: OrderDetail
+}

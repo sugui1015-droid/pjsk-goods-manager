@@ -11,6 +11,7 @@ import (
 	"pjsk/backend/internal/admin"
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/importpreview"
+	"pjsk/backend/internal/orders"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -78,6 +79,16 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.Handle(
 		"/api/admin/imports/",
 		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.Detail)),
+	)
+
+	ordersHandler := orders.NewHandler(orders.NewPostgresStore(dbPool))
+	mux.Handle(
+		"/api/admin/orders",
+		adminHandler.RequireAuthentication(http.HandlerFunc(ordersHandler.List)),
+	)
+	mux.Handle(
+		"/api/admin/orders/",
+		adminHandler.RequireAuthentication(http.HandlerFunc(ordersHandler.Detail)),
 	)
 
 	return withCORS(loggingMiddleware(mux), cfg.FrontendOrigins)
