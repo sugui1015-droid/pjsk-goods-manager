@@ -45,7 +45,7 @@ export type ConfigResponse = {
 }
 
 export type ImportIssue = {
-  level: 'error' | 'warning' | 'notice'
+  level: 'row_error' | 'fatal_error' | 'warning' | 'notice'
   code: string
   message: string
   sheet_name?: string
@@ -55,9 +55,18 @@ export type ImportIssue = {
 }
 
 export type ImportDetail = {
+  id: string
+  sheet_id: string
   sheet_name: string
+  sheet_title?: string
   batch_name: string
+  goods_series_name?: string
+  product_category?: string
+  series_code?: string
+  display_name?: string
+  character_name?: string
   category?: string
+  series_name?: string
   item_name: string
   column_index: number
   column_name: string
@@ -73,7 +82,9 @@ export type ImportDetail = {
 
 export type ImportBatch = {
   id: string
+  sheet_id: string
   sheet_name: string
+  sheet_title?: string
   batch_name: string
   template_type: string
   start_row: number
@@ -110,7 +121,9 @@ file: {
     filename_conflict: boolean
   }
   sheets: Array<{
+    id: string
     name: string
+    title: string
     index: number
     template_type: string
     batch_count: number
@@ -175,6 +188,27 @@ export async function postForm<T>(path: string, body: FormData): Promise<T> {
   return parseResponse<T>(response)
 }
 
+
+export type CNExclusionRule = {
+  sheet_id?: string
+  batch_id?: string
+  cn: string
+}
+
+export type CategoryCorrectionRule = {
+  sheet_id?: string
+  batch_id?: string
+  detail_ids?: string[]
+  item_ids?: string[]
+  category: string
+}
+
+export type ConfirmRules = {
+  excluded_sheet_ids?: string[]
+  excluded_cns?: CNExclusionRule[]
+  excluded_item_ids?: string[]
+  category_rules?: CategoryCorrectionRule[]
+}
 export type ImportConfirmResponse = {
   import_batch_id: string
   project_id: string
@@ -187,7 +221,21 @@ export type ImportConfirmResponse = {
   total_amount: number
   warnings_accepted: boolean
   confirmed_at: string
+  skipped_error_count: number
 }
+
+export type ImportRevokeResponse = {
+  import_batch_id: string
+  status: string
+  affected_cn_count: number
+  order_count: number
+  order_item_count: number
+  total_quantity: number
+  total_amount: number
+  revoked_by: string
+  revoked_at: string
+}
+
 export type ImportHistoryItem = {
   id: string
   original_filename: string
@@ -198,15 +246,18 @@ export type ImportHistoryItem = {
   status: string
   uploaded_by?: string
   confirmed_by?: string
+  revoked_by?: string
   created_at: string
   started_at?: string
   confirmed_at?: string
   completed_at?: string
+  revoked_at?: string
   error_count: number
   warning_count: number
   notice_count: number
   warnings_accepted: boolean
   confirm_result?: ImportConfirmResponse
+  revoke_result?: ImportRevokeResponse
 }
 
 export type ImportHistoryResponse = {
@@ -241,6 +292,8 @@ export type OrderItem = {
   product_name: string
   character_name?: string
   category?: string
+  series_code?: string
+  display_name?: string
   sku?: string
   quantity: number
   unit_price: number

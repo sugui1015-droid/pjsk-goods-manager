@@ -14,17 +14,38 @@ import {
   type ImportDetailResponse,
   type ImportHistoryItem,
   type ImportHistoryResponse,
+  type ImportRevokeResponse,
   type ImportIssue,
   type ImportPreviewResponse,
   type OrderDetailResponse,
   type OrderListResponse,
   type OrderSummary,
 } from './api/client'
-
+import {
+  buildConfirmRules as buildImportConfirmRules,
+  cleanCategoryInput,
+  cnRuleKey,
+  defaultPreviewFilters,
+  detailCategory as adjustedDetailCategory,
+  filterRows,
+  flattenPreviewDetails,
+  isRowExcluded,
+  selectedCNSummary,
+  summarizeRows,
+  textFilterSeparator,
+  textFilterTokens,
+  uniqueOptions,
+  type CategoryMap,
+  type CNExclusionMap,
+  type PreviewDetailRow,
+} from './importPreviewTools'
 const maxExcelSize = 20 * 1024 * 1024
+const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
 type RouteName = 'home' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail'
-type IssueFilter = 'all' | 'error' | 'warning' | 'notice'
+type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
+type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
+type QuickFilterGroup = { key: TextFilterKey; label: string; options: string[] }
 
 const fallbackConfig: ConfigResponse = {
   name: 'PJSK Goods Next',
@@ -66,6 +87,19 @@ const confirmMessage = ref('')
 const allowWarnings = ref(false)
 const expandedBatchIds = ref<Set<string>>(new Set())
 const issueFilter = ref<IssueFilter>('all')
+const includedSheetIds = ref<Set<string>>(new Set())
+const excludedCNRules = ref<CNExclusionMap>({})
+const excludedDetailIds = ref<Set<string>>(new Set())
+const categoryOverrides = ref<CategoryMap>({})
+const customCategoryInputs = ref<Record<string, string>>({})
+const previewFilters = ref(defaultPreviewFilters())
+const selectedDetailIds = ref<Set<string>>(new Set())
+const bulkCategoryPreset = ref('')
+const bulkCustomCategory = ref('')
+const bulkMessage = ref('')
+const pendingBulkAction = ref('')
+const openFilterKey = ref<string>('')
+const filterSearches = ref<Record<string, string>>({})
 
 const historyLoading = ref(false)
 const historyMessage = ref('')
@@ -73,6 +107,8 @@ const importHistory = ref<ImportHistoryItem[]>([])
 const detailLoading = ref(false)
 const detailMessage = ref('')
 const importDetail = ref<ImportDetailResponse | null>(null)
+const revokeLoading = ref(false)
+const revokeMessage = ref('')
 
 const ordersLoading = ref(false)
 const ordersMessage = ref('')
@@ -95,14 +131,54 @@ const readyCount = computed(() => config.value.modules.filter((item) => item.sta
 const queuedCount = computed(() => config.value.modules.filter((item) => item.status === 'queued').length)
 const isAdminRoute = computed(() => routeName.value !== 'home')
 const canUpload = computed(() => selectedFile.value !== null && !uploadLoading.value)
+const fatalIssueCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level === 'fatal_error').length)
+const rowErrorCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level !== 'fatal_error').length)
 const canConfirm = computed(() => {
   if (!preview.value?.import_batch_id || confirmLoading.value || confirmResult.value) return false
-  if ((preview.value.errors?.length ?? 0) > 0) return false
+  if (fatalIssueCount.value > 0) return false
   if ((preview.value.warnings?.length ?? 0) > 0 && !allowWarnings.value) return false
-  return true
+  return adjustedImportSummary.value.detailCount > 0
 })
 
 const templateCounts = computed(() => countTemplates(preview.value?.batches ?? []))
+const previewRows = computed(() => flattenPreviewDetails(preview.value))
+const filteredPreviewRows = computed(() => filterRows(previewRows.value, previewFilters.value, includedSheetIds.value, excludedCNRules.value, excludedDetailIds.value, categoryOverrides.value))
+const adjustedImportSummary = computed(() => summarizeRows(previewRows.value.filter((row) => !isRowExcluded(row, includedSheetIds.value, excludedCNRules.value, excludedDetailIds.value)), categoryOverrides.value))
+const filteredImportSummary = computed(() => summarizeRows(filteredPreviewRows.value, categoryOverrides.value))
+const filteredPreviewRowIds = computed(() => new Set(filteredPreviewRows.value.map((row) => row.id)))
+const filteredBatches = computed(() => (preview.value?.batches ?? []).filter((batch) => detailsForBatch(batch).length > 0 || (batch.template_type !== 'matrix' && batchMatchesCurrentFilters(batch))))
+const excludedSheetCount = computed(() => preview.value?.sheets.filter((sheet) => !includedSheetIds.value.has(sheet.id || sheet.name)).length ?? 0)
+const excludedCNCount = computed(() => Object.keys(excludedCNRules.value).length)
+const excludedDetailCount = computed(() => excludedDetailIds.value.size)
+const categoryChangeCount = computed(() => Object.keys(categoryOverrides.value).length)
+const selectedImportSummary = computed(() => selectedCNSummary(previewRows.value, selectedDetailIds.value))
+const filterOptions = computed(() => ({
+  sheets: uniqueOptions(previewRows.value, (row) => row.sheetName),
+  sheetTitles: uniqueOptions(previewRows.value, (row) => row.sheetTitle),
+  batches: uniqueOptions(previewRows.value, (row) => row.batchName),
+  cns: uniqueOptions(previewRows.value, (row) => row.originalCN),
+  categories: uniqueOptions(previewRows.value, (row) => adjustedDetailCategory(row, categoryOverrides.value) || row.category),
+  roles: uniqueOptions(previewRows.value, (row) => row.role),
+  itemNames: uniqueOptions(previewRows.value, (row) => [row.displayName, row.itemName, row.seriesCode].filter(Boolean).join(' ')),
+  sources: uniqueOptions(previewRows.value, (row) => row.sheetName + '!' + row.columnName + row.rowNumber),
+}))
+const quickFilterGroups = computed<QuickFilterGroup[]>(() => [
+  { key: 'sheet', label: 'Sheet', options: filterOptions.value.sheets.slice(0, 80) },
+  { key: 'sheetTitle', label: '大标题', options: filterOptions.value.sheetTitles.slice(0, 80) },
+  { key: 'batch', label: '批次', options: filterOptions.value.batches.slice(0, 80) },
+  { key: 'cn', label: 'CN', options: filterOptions.value.cns.slice(0, 120) },
+  { key: 'category', label: '分类', options: filterOptions.value.categories.slice(0, 100) },
+  { key: 'role', label: '角色', options: filterOptions.value.roles.slice(0, 60) },
+  { key: 'itemName', label: '谷子名称/角色', options: filterOptions.value.itemNames.slice(0, 120) },
+  { key: 'source', label: '来源', options: filterOptions.value.sources.slice(0, 120) },
+])
+const batchQuickFilterGroups = computed<QuickFilterGroup[]>(() => [
+  { key: 'cn', label: 'CN', options: filterOptions.value.cns.slice(0, 120) },
+  { key: 'itemName', label: '谷子名称/角色', options: filterOptions.value.itemNames.slice(0, 120) },
+  { key: 'category', label: '分类', options: filterOptions.value.categories.slice(0, 100) },
+  { key: 'role', label: '角色', options: filterOptions.value.roles.slice(0, 60) },
+  { key: 'source', label: '来源', options: filterOptions.value.sources.slice(0, 120) },
+])
 const detailTemplateCounts = computed(() => countTemplates(importDetail.value?.preview?.batches ?? []))
 const allIssues = computed(() => [
   ...(preview.value?.errors ?? []),
@@ -230,6 +306,7 @@ function onFileChange(event: Event) {
   confirmResult.value = null
   confirmMessage.value = ''
   allowWarnings.value = false
+  resetPreviewAdjustments(null)
 
   if (!file) {
     selectedFile.value = null
@@ -258,6 +335,7 @@ async function uploadPreview() {
   form.append('file', selectedFile.value)
   try {
     preview.value = await postForm<ImportPreviewResponse>('/api/admin/imports/preview', form)
+    resetPreviewAdjustments(preview.value)
     confirmResult.value = null
     confirmMessage.value = ''
     allowWarnings.value = false
@@ -283,6 +361,7 @@ async function confirmImport() {
     confirmResult.value = await postJSON<ImportConfirmResponse>('/api/admin/imports/confirm', {
       import_batch_id: preview.value.import_batch_id,
       allow_warnings: allowWarnings.value,
+      rules: buildConfirmRules(),
     })
     await loadHistory()
   } catch (error) {
@@ -333,6 +412,33 @@ async function loadDetail(id: string) {
   }
 }
 
+
+async function revokeImport() {
+  if (!importDetail.value || revokeLoading.value) return
+  const item = importDetail.value.import
+  const result = item.confirm_result
+  const message = result
+    ? `将撤销本次导入：CN ${result.cn_count} 个，明细 ${result.order_item_count} 条，总件数 ${result.total_quantity}，总金额 ${formatMoney(result.total_amount)}。确认继续吗？`
+    : '将撤销本次导入产生的有效明细，确认继续吗？'
+  if (!window.confirm(message)) return
+  revokeLoading.value = true
+  revokeMessage.value = ''
+  try {
+    const response = await postJSON<ImportRevokeResponse>(`/api/admin/imports/${encodeURIComponent(item.id)}/revert`, {})
+    revokeMessage.value = `已撤销：影响 CN ${response.affected_cn_count} 个，明细 ${response.order_item_count} 条，总金额 ${formatMoney(response.total_amount)}。`
+    await loadDetail(item.id)
+    await loadHistory()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    revokeMessage.value = error instanceof Error ? error.message : '撤销导入失败'
+  } finally {
+    revokeLoading.value = false
+  }
+}
 function orderQueryString() {
   const query = new URLSearchParams()
   const filters = orderFilters.value
@@ -396,6 +502,312 @@ function resetOrderFilters() {
   void loadOrders()
 }
 
+function resetPreviewAdjustments(nextPreview: ImportPreviewResponse | null) {
+  includedSheetIds.value = new Set((nextPreview?.sheets ?? []).map((sheet) => sheet.id || sheet.name))
+  excludedCNRules.value = {}
+  excludedDetailIds.value = new Set()
+  categoryOverrides.value = {}
+  customCategoryInputs.value = {}
+  previewFilters.value = defaultPreviewFilters()
+  selectedDetailIds.value = new Set()
+  bulkCategoryPreset.value = ''
+  bulkCustomCategory.value = ''
+  bulkMessage.value = ''
+  pendingBulkAction.value = ''
+}
+
+function sheetDisplayName(sheet: ImportPreviewResponse['sheets'][number]) {
+  return sheet.title && sheet.title !== sheet.name ? `${sheet.name}（${sheet.title}）` : sheet.name
+}
+
+function batchSheetKey(batch: ImportBatch) {
+  return batch.sheet_id || batch.sheet_name
+}
+
+function goodsDisplayName(goodsSeriesName: string, productCategory: string) {
+  const name = goodsSeriesName.trim()
+  const category = productCategory.trim()
+  if (!category || category === '默认分类') return name
+  if (!name) return category
+  return `${name}-${category}`
+}
+
+function rowForDetail(batch: ImportBatch, detail: NonNullable<ImportBatch['details']>[number]): PreviewDetailRow {
+  return {
+    id: detail.id,
+    batchId: batch.id,
+    sheetId: batchSheetKey(batch),
+    sheetName: batch.sheet_name,
+    sheetTitle: batch.sheet_title || detail.sheet_title || '',
+    batchName: batch.batch_name,
+    goodsSeriesName: detail.goods_series_name ?? detail.sheet_title ?? '',
+    category: detail.product_category ?? detail.category ?? '',
+    seriesCode: detail.series_code ?? detail.series_name ?? '',
+    displayName: detail.display_name ?? goodsDisplayName(detail.goods_series_name ?? detail.sheet_title ?? '', detail.product_category ?? detail.category ?? ''),
+    itemName: detail.item_name,
+    role: detail.character_name ?? detail.item_name,
+    originalCN: detail.original_cn,
+    normalizedCN: detail.normalized_cn,
+    quantity: detail.quantity,
+    unitPrice: detail.unit_price,
+    amount: detail.amount,
+    columnName: detail.column_name,
+    rowNumber: detail.row_number,
+    detail,
+    batch,
+  }
+}
+
+function isBatchIncluded(batch: ImportBatch) {
+  return includedSheetIds.value.has(batchSheetKey(batch))
+}
+
+function setSheetIncluded(sheetId: string, checked: boolean) {
+  const next = new Set(includedSheetIds.value)
+  if (checked) next.add(sheetId)
+  else next.delete(sheetId)
+  includedSheetIds.value = next
+}
+
+function isDetailSelected(detailId: string) {
+  return selectedDetailIds.value.has(detailId)
+}
+
+function setDetailSelected(detailId: string, checked: boolean) {
+  const next = new Set(selectedDetailIds.value)
+  if (checked) next.add(detailId)
+  else next.delete(detailId)
+  selectedDetailIds.value = next
+}
+
+function selectFilteredRows() {
+  const next = new Set(selectedDetailIds.value)
+  for (const row of filteredPreviewRows.value) next.add(row.id)
+  selectedDetailIds.value = next
+}
+
+function unselectFilteredRows() {
+  const filteredIds = new Set(filteredPreviewRows.value.map((row) => row.id))
+  selectedDetailIds.value = new Set(Array.from(selectedDetailIds.value).filter((id) => !filteredIds.has(id)))
+}
+
+function selectAllRows() {
+  selectedDetailIds.value = new Set(previewRows.value.map((row) => row.id))
+}
+
+function clearSelection() {
+  selectedDetailIds.value = new Set()
+}
+
+function isCNExcluded(batch: ImportBatch, detail: NonNullable<ImportBatch['details']>[number]) {
+  const row = rowForDetail(batch, detail)
+  return Boolean(excludedCNRules.value[cnRuleKey(row)])
+}
+
+function isDetailExcluded(batch: ImportBatch, detail: NonNullable<ImportBatch['details']>[number]) {
+  return isRowExcluded(rowForDetail(batch, detail), includedSheetIds.value, excludedCNRules.value, excludedDetailIds.value)
+}
+
+function setCNExcluded(batch: ImportBatch, detail: NonNullable<ImportBatch['details']>[number], checked: boolean) {
+  const row = rowForDetail(batch, detail)
+  const key = cnRuleKey(row)
+  const next = { ...excludedCNRules.value }
+  if (checked) next[key] = { sheet_id: row.sheetId, batch_id: row.batchId, cn: row.originalCN }
+  else delete next[key]
+  excludedCNRules.value = next
+}
+
+function setDetailExcluded(detailId: string, checked: boolean) {
+  const next = new Set(excludedDetailIds.value)
+  if (checked) next.add(detailId)
+  else next.delete(detailId)
+  excludedDetailIds.value = next
+}
+
+function detailCategory(detailOrRow: NonNullable<ImportBatch['details']>[number] | PreviewDetailRow) {
+  if ('detail' in detailOrRow) return adjustedDetailCategory(detailOrRow, categoryOverrides.value)
+  return categoryOverrides.value[detailOrRow.id] ?? detailOrRow.category ?? ''
+}
+
+function setDetailCategory(detailOrRow: NonNullable<ImportBatch['details']>[number] | PreviewDetailRow, value: string) {
+  const id = detailOrRow.id
+  const original = 'detail' in detailOrRow ? detailOrRow.category : detailOrRow.category ?? ''
+  const next = { ...categoryOverrides.value }
+  const clean = cleanCategoryInput(value)
+  if (!clean || clean === original) delete next[id]
+  else next[id] = clean
+  categoryOverrides.value = next
+}
+
+function applyCustomCategory(detail: NonNullable<ImportBatch['details']>[number]) {
+  setDetailCategory(detail, customCategoryInputs.value[detail.id] ?? '')
+}
+
+function applyBulkCategory(source: 'selected' | 'filtered') {
+  const category = cleanCategoryInput(bulkCustomCategory.value || bulkCategoryPreset.value)
+  if (!category) {
+    bulkMessage.value = '请先选择或输入要批量设置的分类。'
+    return
+  }
+  const rows = source === 'selected' ? previewRows.value.filter((row) => selectedDetailIds.value.has(row.id)) : filteredPreviewRows.value
+  const next = { ...categoryOverrides.value }
+  for (const row of rows) next[row.id] = category
+  categoryOverrides.value = next
+  bulkMessage.value = `已把 ${rows.length} 条明细批量设置为「${category}」。`
+}
+
+function restoreBulkCategory(source: 'selected' | 'filtered') {
+  const rows = source === 'selected' ? previewRows.value.filter((row) => selectedDetailIds.value.has(row.id)) : filteredPreviewRows.value
+  const next = { ...categoryOverrides.value }
+  for (const row of rows) delete next[row.id]
+  categoryOverrides.value = next
+  bulkMessage.value = `已恢复 ${rows.length} 条明细到系统识别分类。`
+}
+
+function excludeSelectedCNs() {
+  const rows = previewRows.value.filter((row) => selectedDetailIds.value.has(row.id))
+  if (rows.length >= 20 && !window.confirm(`将按 Sheet 和批次范围排除 ${rows.length} 条已选明细涉及的 CN，继续吗？`)) return
+  const next = { ...excludedCNRules.value }
+  for (const row of rows) next[cnRuleKey(row)] = { sheet_id: row.sheetId, batch_id: row.batchId, cn: row.originalCN }
+  excludedCNRules.value = next
+  bulkMessage.value = `已按范围排除 ${rows.length} 条已选明细涉及的 CN。`
+}
+
+function excludeSelectedDetails() {
+  const rows = previewRows.value.filter((row) => selectedDetailIds.value.has(row.id))
+  if (rows.length >= 20 && !window.confirm(`将只排除 ${rows.length} 条具体明细，继续吗？`)) return
+  const next = new Set(excludedDetailIds.value)
+  for (const row of rows) next.add(row.id)
+  excludedDetailIds.value = next
+  bulkMessage.value = `已排除 ${rows.length} 条具体明细。`
+}
+
+function includeSelectedDetails() {
+  const selected = new Set(selectedDetailIds.value)
+  excludedDetailIds.value = new Set(Array.from(excludedDetailIds.value).filter((id) => !selected.has(id)))
+  bulkMessage.value = '已取消已选明细的明细级排除。'
+}
+
+
+function cleanIntegerInput(value: string) {
+  return value.replace(/[^0-9]/g, '')
+}
+
+function cleanDecimalInput(value: string) {
+  const cleaned = value.replace(/[^0-9.]/g, '')
+  const [integer, ...rest] = cleaned.split('.')
+  const decimal = rest.join('').slice(0, 4)
+  return rest.length > 0 ? `${integer}.${decimal}` : integer
+}
+function clearAllFilters() {
+  previewFilters.value = defaultPreviewFilters()
+}
+
+function filterTokenKey(value: string) {
+  return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+}
+
+function filterDropdownID(scope: string, key: TextFilterKey) {
+  return `${scope}-${key}`
+}
+
+function filterSearch(scope: string, key: TextFilterKey) {
+  return filterSearches.value[filterDropdownID(scope, key)] ?? ''
+}
+
+function setFilterSearch(scope: string, key: TextFilterKey, value: string) {
+  filterSearches.value = { ...filterSearches.value, [filterDropdownID(scope, key)]: value }
+}
+
+function selectedFilterValues(key: TextFilterKey) {
+  return textFilterTokens(previewFilters.value[key])
+}
+
+function selectedFilterCount(key: TextFilterKey) {
+  return selectedFilterValues(key).length
+}
+
+function isFilterOpen(scope: string, key: TextFilterKey) {
+  return openFilterKey.value === filterDropdownID(scope, key)
+}
+
+function toggleFilterMenu(scope: string, key: TextFilterKey) {
+  const id = filterDropdownID(scope, key)
+  openFilterKey.value = openFilterKey.value === id ? '' : id
+}
+
+function closeFilterMenu() {
+  openFilterKey.value = ''
+}
+
+function filteredFilterOptions(group: QuickFilterGroup, scope: string) {
+  const search = filterTokenKey(filterSearch(scope, group.key))
+  if (!search) return group.options
+  return group.options.filter((option) => filterTokenKey(option).includes(search))
+}
+
+function isFilterOptionActive(key: TextFilterKey, value: string) {
+  const target = filterTokenKey(value)
+  return selectedFilterValues(key).some((token) => filterTokenKey(token) === target)
+}
+
+function setFilterValues(key: TextFilterKey, values: string[]) {
+  const deduped: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const clean = value.trim()
+    const normalized = filterTokenKey(clean)
+    if (!clean || seen.has(normalized)) continue
+    seen.add(normalized)
+    deduped.push(clean)
+  }
+  previewFilters.value[key] = deduped.join(textFilterSeparator)
+}
+
+function toggleFilterOption(key: TextFilterKey, value: string) {
+  const target = filterTokenKey(value)
+  const tokens = selectedFilterValues(key)
+  const exists = tokens.some((token) => filterTokenKey(token) === target)
+  setFilterValues(key, exists ? tokens.filter((token) => filterTokenKey(token) !== target) : [...tokens, value])
+}
+
+function selectAllFilterOptions(group: QuickFilterGroup, scope: string) {
+  const visible = filteredFilterOptions(group, scope)
+  setFilterValues(group.key, [...selectedFilterValues(group.key), ...visible])
+}
+
+function invertFilterOptions(group: QuickFilterGroup, scope: string) {
+  const visible = filteredFilterOptions(group, scope)
+  const visibleKeys = new Set(visible.map(filterTokenKey))
+  const current = selectedFilterValues(group.key)
+  const currentKeys = new Set(current.map(filterTokenKey))
+  const kept = current.filter((value) => !visibleKeys.has(filterTokenKey(value)))
+  const added = visible.filter((value) => !currentKeys.has(filterTokenKey(value)))
+  setFilterValues(group.key, [...kept, ...added])
+}
+
+function clearTextFilter(key: TextFilterKey) {
+  previewFilters.value[key] = ''
+}
+
+function buildConfirmRules(): ReturnType<typeof buildImportConfirmRules> {
+  return buildImportConfirmRules(preview.value, includedSheetIds.value, excludedCNRules.value, excludedDetailIds.value, categoryOverrides.value)
+}
+
+function batchMatchesCurrentFilters(batch: ImportBatch) {
+  const rows = previewRows.value.filter((row) => row.batchId === batch.id)
+  if (rows.length > 0) return rows.some((row) => filteredPreviewRowIds.value.has(row.id))
+  const sheetText = `${batch.sheet_name} ${batch.sheet_title ?? ''}`.toLocaleLowerCase()
+  const batchText = batch.batch_name.toLocaleLowerCase()
+  const sheetFilter = previewFilters.value.sheet.trim().toLocaleLowerCase()
+  const titleFilter = previewFilters.value.sheetTitle.trim().toLocaleLowerCase()
+  const batchFilter = previewFilters.value.batch.trim().toLocaleLowerCase()
+  return (!sheetFilter || sheetText.includes(sheetFilter)) && (!titleFilter || sheetText.includes(titleFilter)) && (!batchFilter || batchText.includes(batchFilter))
+}
+
+function detailsForBatch(batch: ImportBatch) {
+  return (batch.details ?? []).filter((detail) => filteredPreviewRowIds.value.has(detail.id))
+}
 function orderSources(order: OrderSummary) {
   const filenames = order.import_filenames ?? []
   if (filenames.length > 0) return filenames.join(' / ')
@@ -435,6 +847,35 @@ function countTemplates(batches: ImportBatch[]) {
   return Array.from(counts.entries()).map(([name, count]) => ({ name, count }))
 }
 
+
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    previewed: '待确认',
+    processing: '处理中',
+    confirmed: '已确认',
+    completed: '已完成',
+    partial: '部分完成',
+    failed: '失败',
+    cancelled: '已取消',
+    reverted: '已撤销',
+    submitted: '已提交',
+    draft: '草稿',
+    paid: '已付款',
+    partially_paid: '部分付款',
+  }
+  return labels[status] ?? status
+}
+
+function issueLevelLabel(level: string) {
+  const labels: Record<string, string> = {
+    row_error: '行级错误',
+    fatal_error: '致命错误',
+    warning: '提醒',
+    notice: '提示',
+    error: '错误',
+  }
+  return labels[level] ?? level
+}
 function issueContext(issue: ImportIssue) {
   const parts = [
     issue.sheet_name ? `工作表 ${issue.sheet_name}` : '',
@@ -537,8 +978,9 @@ onMounted(() => {
                 <input type="file" accept=".xlsx" :disabled="uploadLoading" @change="onFileChange" />
               </label>
               <button class="primary-button" type="button" :disabled="!canUpload" @click="uploadPreview">{{ uploadLoading ? '解析中' : '上传并预览' }}</button>
+              <a class="secondary-button template-download" href="/templates/pjsk-goods-import-template.xlsx" download>下载标准模板</a>
             </div>
-            <p class="muted">文件大小限制 20MB；上传字段为 <code class="inline-code">file</code>。</p>
+            <p class="muted">文件大小限制 20MB；上传字段为 <code class="inline-code">file</code>。标准模板会识别为 <code class="inline-code">standard_import</code>。</p>
             <div v-if="selectedFile" class="file-line">{{ selectedFile.name }} / {{ formatBytes(selectedFile.size) }}</div>
             <div v-if="uploadMessage" class="inline-alert">{{ uploadMessage }}</div>
           </section>
@@ -548,18 +990,108 @@ onMounted(() => {
             <article class="metric-tile wide-metric"><span>SHA-256</span><strong>{{ preview.file.sha256 }}</strong></article>
             <article class="metric-tile"><span>工作表</span><strong>{{ preview.file.sheet_count }}</strong></article>
             <article class="metric-tile"><span>批次</span><strong>{{ preview.batches.length }}</strong></article>
-            <article class="metric-tile"><span>Errors</span><strong>{{ preview.errors?.length ?? 0 }}</strong></article>
+            <article class="metric-tile"><span>行级错误</span><strong>{{ rowErrorCount }}</strong></article><article class="metric-tile"><span>致命错误</span><strong>{{ fatalIssueCount }}</strong></article>
             <article class="metric-tile"><span>Warnings</span><strong>{{ preview.warnings?.length ?? 0 }}</strong></article>
             <article class="metric-tile"><span>Notices</span><strong>{{ preview.notices?.length ?? 0 }}</strong></article>
             <article class="metric-tile wide-metric"><span>模板类型</span><strong>{{ templateCounts.map((item) => `${item.name} ${item.count}`).join(' / ') }}</strong></article>
           </section>
 
+
+          <section v-if="preview" class="panel review-panel">
+            <div class="panel__header">
+              <div>
+                <h2>导入前人工审核</h2>
+                <p class="muted">先筛选，再多选和批量处理。确认导入时只提交规则，数量、单价和金额仍由后端重新计算。</p>
+              </div>
+              <span>最终预计 {{ adjustedImportSummary.detailCount }} 明细</span>
+            </div>
+
+            <div class="summary-grid compact-summary">
+              <article class="metric-tile"><span>最终预计 CN</span><strong>{{ adjustedImportSummary.cnCount }}</strong></article>
+              <article class="metric-tile"><span>最终预计明细</span><strong>{{ adjustedImportSummary.detailCount }}</strong></article>
+              <article class="metric-tile"><span>最终预计件数</span><strong>{{ adjustedImportSummary.totalQuantity }}</strong></article>
+              <article class="metric-tile"><span>最终预计金额</span><strong>{{ formatMoney(adjustedImportSummary.totalAmount) }}</strong></article>
+              <article class="metric-tile"><span>当前筛选 CN</span><strong>{{ filteredImportSummary.cnCount }}</strong></article>
+              <article class="metric-tile"><span>当前筛选明细</span><strong>{{ filteredImportSummary.detailCount }}</strong></article>
+              <article class="metric-tile"><span>当前筛选件数</span><strong>{{ filteredImportSummary.totalQuantity }}</strong></article>
+              <article class="metric-tile"><span>当前筛选金额</span><strong>{{ formatMoney(filteredImportSummary.totalAmount) }}</strong></article>
+              <article class="metric-tile"><span>已选明细</span><strong>{{ selectedImportSummary.detailCount }}</strong></article>
+              <article class="metric-tile"><span>已选 CN</span><strong>{{ selectedImportSummary.cnCount }}</strong></article>
+              <article class="metric-tile"><span>排除 Sheet/CN</span><strong>{{ excludedSheetCount }} / {{ excludedCNCount }}</strong></article>
+              <article class="metric-tile"><span>排除明细/分类修正</span><strong>{{ excludedDetailCount }} / {{ categoryChangeCount }}</strong></article>
+            </div>
+
+            <div class="excel-filter-bar">
+              <div v-for="group in quickFilterGroups" :key="group.key" class="excel-filter">
+                <button class="excel-filter-button" :class="{ active: selectedFilterCount(group.key) > 0 }" type="button" @click="toggleFilterMenu('review', group.key)">
+                  <span>{{ group.label }}</span><strong v-if="selectedFilterCount(group.key) > 0">{{ selectedFilterCount(group.key) }}</strong><span>▾</span>
+                </button>
+                <div v-if="isFilterOpen('review', group.key)" class="excel-filter-menu">
+                  <div class="excel-filter-menu__top"><strong>{{ group.label }}筛选</strong><button type="button" @click="closeFilterMenu">×</button></div>
+                  <input class="excel-filter-search" :value="filterSearch('review', group.key)" placeholder="搜索，空格分隔关键词" @input="setFilterSearch('review', group.key, ($event.target as HTMLInputElement).value)" />
+                  <div class="excel-filter-actions"><button type="button" @click="selectAllFilterOptions(group, 'review')">全选</button><button type="button" @click="invertFilterOptions(group, 'review')">反选</button><button type="button" @click="clearTextFilter(group.key)">清除</button></div>
+                  <div class="excel-filter-options">
+                    <label v-for="option in filteredFilterOptions(group, 'review')" :key="`${group.key}-${option}`" class="excel-filter-option"><input type="checkbox" :checked="isFilterOptionActive(group.key, option)" @change="toggleFilterOption(group.key, option)" /><span>{{ option }}</span></label>
+                    <p v-if="filteredFilterOptions(group, 'review').length === 0" class="muted">没有匹配项。</p>
+                  </div>
+                </div>
+              </div>
+              <label><span>排除状态</span><select v-model="previewFilters.excluded"><option value="">全部</option><option value="no">未排除</option><option value="yes">已排除</option></select></label>
+              <label><span>分类状态</span><select v-model="previewFilters.categoryChanged"><option value="">全部</option><option value="no">未修改</option><option value="yes">已修改</option></select></label>
+              <button class="secondary-button" type="button" @click="clearAllFilters">清除全部筛选</button>
+            </div>
+            <div class="number-filter-grid">
+              <label><span>数量 =</span><input v-model="previewFilters.quantity.eq" type="number" step="1" min="0" @input="previewFilters.quantity.eq = cleanIntegerInput(($event.target as HTMLInputElement).value)" /></label>
+              <label><span>数量范围</span><div class="range-inputs"><input v-model="previewFilters.quantity.min" type="number" step="1" min="0" @input="previewFilters.quantity.min = cleanIntegerInput(($event.target as HTMLInputElement).value)" placeholder="最小" /><input v-model="previewFilters.quantity.max" type="number" step="1" min="0" @input="previewFilters.quantity.max = cleanIntegerInput(($event.target as HTMLInputElement).value)" placeholder="最大" /></div></label>
+              <label><span>价格 =</span><input v-model="previewFilters.unitPrice.eq" type="number" step="0.0001" min="0" @input="previewFilters.unitPrice.eq = cleanDecimalInput(($event.target as HTMLInputElement).value)" /></label>
+              <label><span>价格范围</span><div class="range-inputs"><input v-model="previewFilters.unitPrice.min" type="number" step="0.0001" min="0" @input="previewFilters.unitPrice.min = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最小" /><input v-model="previewFilters.unitPrice.max" type="number" step="0.0001" min="0" @input="previewFilters.unitPrice.max = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最大" /></div></label>
+              <label><span>小计 =</span><input v-model="previewFilters.amount.eq" type="number" step="0.0001" min="0" @input="previewFilters.amount.eq = cleanDecimalInput(($event.target as HTMLInputElement).value)" /></label>
+              <label><span>小计范围</span><div class="range-inputs"><input v-model="previewFilters.amount.min" type="number" step="0.0001" min="0" @input="previewFilters.amount.min = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最小" /><input v-model="previewFilters.amount.max" type="number" step="0.0001" min="0" @input="previewFilters.amount.max = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最大" /></div></label>
+            </div>
+            <div class="bulk-toolbar">
+              <div><strong>已选择 {{ selectedImportSummary.detailCount }} 条明细，涉及 {{ selectedImportSummary.cnCount }} 个 CN</strong><small>筛选不会丢失已选内容。</small></div>
+              <button class="secondary-button" type="button" @click="selectFilteredRows">选择当前筛选结果</button>
+              <button class="secondary-button" type="button" @click="unselectFilteredRows">取消当前筛选选择</button>
+              <button class="secondary-button" type="button" @click="selectAllRows">选择整个预览</button>
+              <button class="secondary-button" type="button" @click="clearSelection">清空选择</button>
+              <button class="secondary-button" type="button" @click="clearAllFilters">清除筛选</button>
+            </div>
+
+            <div class="bulk-toolbar bulk-toolbar--edit">
+              <select v-model="bulkCategoryPreset"><option value="">选择预设分类</option><option v-for="preset in categoryPresets" :key="preset" :value="preset">{{ preset }}</option></select>
+              <input v-model="bulkCustomCategory" maxlength="40" placeholder="或输入自定义分类" />
+              <button class="primary-button" type="button" :disabled="selectedImportSummary.detailCount === 0" @click="applyBulkCategory('selected')">批量改已选分类</button>
+              <button class="secondary-button" type="button" :disabled="filteredImportSummary.detailCount === 0" @click="applyBulkCategory('filtered')">批量改筛选结果</button>
+              <button class="secondary-button" type="button" :disabled="selectedImportSummary.detailCount === 0" @click="restoreBulkCategory('selected')">恢复已选原分类</button>
+              <button class="secondary-button" type="button" :disabled="selectedImportSummary.detailCount === 0" @click="excludeSelectedCNs">批量排除已选 CN</button>
+              <button class="secondary-button" type="button" :disabled="selectedImportSummary.detailCount === 0" @click="excludeSelectedDetails">只排除已选明细</button>
+              <button class="secondary-button" type="button" :disabled="selectedImportSummary.detailCount === 0" @click="includeSelectedDetails">取消已选明细排除</button>
+            </div>
+            <div v-if="bulkMessage" class="inline-alert">{{ bulkMessage }}</div>
+
+            <div class="table-scroll compact-table">
+              <table>
+                <thead><tr><th>是否导入</th><th>Sheet</th><th>大标题</th><th>模板</th><th>批次</th><th>金额差额</th></tr></thead>
+                <tbody>
+                  <tr v-for="sheet in preview.sheets" :key="sheet.id || sheet.name">
+                    <td><input type="checkbox" :checked="includedSheetIds.has(sheet.id || sheet.name)" @change="setSheetIncluded(sheet.id || sheet.name, ($event.target as HTMLInputElement).checked)" /></td>
+                    <td>{{ sheetDisplayName(sheet) }}</td>
+                    <td>{{ sheet.title || '-' }}</td>
+                    <td>{{ sheet.template_type }}</td>
+                    <td>{{ sheet.batch_count }}</td>
+                    <td :class="{ danger: Math.abs(sheet.difference) > 0.01 }">{{ formatMoney(sheet.difference) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           <section v-if="preview" class="panel confirm-panel">
             <div class="panel__header"><div><h2>确认导入</h2><p class="muted">确认时使用服务器保存的预览结果，不信任前端明细。</p></div><span>{{ preview.import_batch_id }}</span></div>
-            <div v-if="(preview.errors?.length ?? 0) > 0" class="inline-alert">存在 error，当前预览禁止确认导入。</div>
+            <div v-if="fatalIssueCount > 0" class="inline-alert">当前预览存在致命错误，无法确认导入。</div><div v-else-if="rowErrorCount > 0" class="inline-alert">发现 {{ rowErrorCount }} 条错误记录，确认导入时将自动跳过；其余 {{ adjustedImportSummary.detailCount }} 条有效明细可以继续导入。</div>
             <label v-if="(preview.warnings?.length ?? 0) > 0" class="confirm-check"><input v-model="allowWarnings" type="checkbox" /><span>我已人工检查 warnings，允许继续确认导入。</span></label>
             <div class="confirm-actions">
-              <button class="primary-button" type="button" :disabled="!canConfirm" @click="confirmImport">{{ confirmLoading ? '确认中' : '确认导入' }}</button>
+              <button class="primary-button" type="button" :disabled="!canConfirm" @click="confirmImport">{{ confirmLoading ? '确认中' : `确认导入 ${adjustedImportSummary.detailCount} 条有效明细` }}</button>
               <span class="muted">不会写入 payments / payment_items。</span>
             </div>
             <div v-if="confirmMessage" class="inline-alert">{{ confirmMessage }}</div>
@@ -571,29 +1103,56 @@ onMounted(() => {
               <span>明细 {{ confirmResult.order_item_count }}</span>
               <span>总件数 {{ confirmResult.total_quantity }}</span>
               <span>总金额 {{ formatMoney(confirmResult.total_amount) }}</span>
-              <span>接受 warnings {{ confirmResult.warnings_accepted ? '是' : '否' }}</span>
+              <span>接受提醒 {{ confirmResult.warnings_accepted ? '是' : '否' }}</span><span>跳过错误 {{ confirmResult.skipped_error_count ?? 0 }}</span>
               <span>{{ formatDate(confirmResult.confirmed_at) }}</span>
             </div>
           </section>
 
           <section v-if="preview" class="panel">
-            <div class="panel__header"><h2>批次列表</h2><span>{{ preview.batches.length }} batches</span></div>
+            <div class="panel__header"><h2>批次列表</h2><span>{{ filteredBatches.length }} / {{ preview.batches.length }} batches</span></div>
+            <div class="excel-filter-bar compact-excel-filter-bar">
+              <div v-for="group in batchQuickFilterGroups" :key="group.key" class="excel-filter">
+                <button class="excel-filter-button" :class="{ active: selectedFilterCount(group.key) > 0 }" type="button" @click="toggleFilterMenu('batch', group.key)">
+                  <span>{{ group.label }}</span><strong v-if="selectedFilterCount(group.key) > 0">{{ selectedFilterCount(group.key) }}</strong><span>▾</span>
+                </button>
+                <div v-if="isFilterOpen('batch', group.key)" class="excel-filter-menu">
+                  <div class="excel-filter-menu__top"><strong>{{ group.label }}筛选</strong><button type="button" @click="closeFilterMenu">×</button></div>
+                  <input class="excel-filter-search" :value="filterSearch('batch', group.key)" placeholder="搜索，空格分隔关键词" @input="setFilterSearch('batch', group.key, ($event.target as HTMLInputElement).value)" />
+                  <div class="excel-filter-actions"><button type="button" @click="selectAllFilterOptions(group, 'batch')">全选</button><button type="button" @click="invertFilterOptions(group, 'batch')">反选</button><button type="button" @click="clearTextFilter(group.key)">清除</button></div>
+                  <div class="excel-filter-options">
+                    <label v-for="option in filteredFilterOptions(group, 'batch')" :key="`${group.key}-${option}`" class="excel-filter-option"><input type="checkbox" :checked="isFilterOptionActive(group.key, option)" @change="toggleFilterOption(group.key, option)" /><span>{{ option }}</span></label>
+                    <p v-if="filteredFilterOptions(group, 'batch').length === 0" class="muted">没有匹配项。</p>
+                  </div>
+                </div>
+              </div>
+              <label><span>排除状态</span><select v-model="previewFilters.excluded"><option value="">全部</option><option value="no">未排除</option><option value="yes">已排除</option></select></label>
+              <label><span>分类状态</span><select v-model="previewFilters.categoryChanged"><option value="">全部</option><option value="no">未修改</option><option value="yes">已修改</option></select></label>
+              <button class="secondary-button" type="button" @click="clearAllFilters">清除筛选</button>
+            </div>
+            <div class="number-filter-grid compact-number-filter-grid">
+              <label><span>数量 =</span><input v-model="previewFilters.quantity.eq" type="number" step="1" min="0" @input="previewFilters.quantity.eq = cleanIntegerInput(($event.target as HTMLInputElement).value)" /></label>
+              <label><span>数量范围</span><div class="range-inputs"><input v-model="previewFilters.quantity.min" type="number" step="1" min="0" @input="previewFilters.quantity.min = cleanIntegerInput(($event.target as HTMLInputElement).value)" placeholder="最小" /><input v-model="previewFilters.quantity.max" type="number" step="1" min="0" @input="previewFilters.quantity.max = cleanIntegerInput(($event.target as HTMLInputElement).value)" placeholder="最大" /></div></label>
+              <label><span>价格 =</span><input v-model="previewFilters.unitPrice.eq" type="number" step="0.0001" min="0" @input="previewFilters.unitPrice.eq = cleanDecimalInput(($event.target as HTMLInputElement).value)" /></label>
+              <label><span>价格范围</span><div class="range-inputs"><input v-model="previewFilters.unitPrice.min" type="number" step="0.0001" min="0" @input="previewFilters.unitPrice.min = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最小" /><input v-model="previewFilters.unitPrice.max" type="number" step="0.0001" min="0" @input="previewFilters.unitPrice.max = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最大" /></div></label>
+              <label><span>小计 =</span><input v-model="previewFilters.amount.eq" type="number" step="0.0001" min="0" @input="previewFilters.amount.eq = cleanDecimalInput(($event.target as HTMLInputElement).value)" /></label>
+              <label><span>小计范围</span><div class="range-inputs"><input v-model="previewFilters.amount.min" type="number" step="0.0001" min="0" @input="previewFilters.amount.min = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最小" /><input v-model="previewFilters.amount.max" type="number" step="0.0001" min="0" @input="previewFilters.amount.max = cleanDecimalInput(($event.target as HTMLInputElement).value)" placeholder="最大" /></div></label>
+            </div>
             <div class="batch-list">
-              <article v-for="batch in preview.batches" :key="batch.id" class="batch-card">
+              <article v-for="batch in filteredBatches" :key="batch.id" class="batch-card">
                 <button class="batch-card__summary" type="button" @click="toggleBatch(batch.id)">
-                  <span>{{ isExpanded(batch.id) ? '▾' : '▸' }}</span><strong>{{ batch.sheet_name }} / {{ batch.batch_name }}</strong><span class="status-chip" data-state="draft">{{ batch.template_type }}</span><span v-if="batch.template_type === 'simple_cn_amount'" class="simple-note">仅预览，不转换为订单项</span>
+                  <span>{{ isExpanded(batch.id) ? '▾' : '▸' }}</span><strong>{{ batch.sheet_title ? `${batch.sheet_name}（${batch.sheet_title}）` : batch.sheet_name }} / {{ batch.batch_name }}</strong><span class="status-chip" data-state="draft">{{ batch.template_type }}</span><span v-if="!isBatchIncluded(batch)" class="simple-note">该 Sheet 已排除</span><span v-else-if="batch.template_type === 'simple_cn_amount'" class="simple-note">仅预览，不转换为订单项</span>
                 </button>
                 <div class="batch-metrics"><span>CN {{ batch.cn_count }}</span><span>种类 {{ batch.item_type_count }}</span><span>总件数 {{ batch.total_quantity }}</span><span>表格 {{ formatMoney(batch.table_amount) }}</span><span>程序 {{ formatMoney(batch.calculated_amount) }}</span><span :class="{ danger: Math.abs(batch.difference) > 0.01 }">差额 {{ formatMoney(batch.difference) }}</span><span>价格 {{ priceTypeLabel(batch) }}</span></div>
                 <div v-if="isExpanded(batch.id)" class="batch-detail">
-                  <div class="table-scroll detail-table"><table><thead><tr><th>原始 CN</th><th>规范 CN</th><th>种类</th><th>分类</th><th>数量</th><th>价格</th><th>小计</th><th>来源</th></tr></thead><tbody><tr v-if="!(batch.details?.length)"><td colspan="8">无订单项明细。</td></tr><tr v-for="detail in batch.details ?? []" :key="`${batch.id}-${detail.row_number}-${detail.column_name}-${detail.original_cn}`"><td>{{ detail.original_cn }}</td><td>{{ detail.normalized_cn }}</td><td>{{ detail.item_name }}</td><td>{{ detail.category || '-' }}</td><td>{{ detail.quantity }}</td><td>{{ formatMoney(detail.unit_price) }}</td><td>{{ formatMoney(detail.amount) }}</td><td>{{ detail.sheet_name }}!{{ detail.column_name }}{{ detail.row_number }}</td></tr></tbody></table></div>
+                                    <div class="table-scroll detail-table"><table><thead><tr><th>选择</th><th>导入</th><th>原始 CN</th><th>谷子名称</th><th>系列编号</th><th>角色/种类</th><th>分类修正</th><th>数量</th><th>价格</th><th>小计</th><th>来源</th></tr></thead><tbody><tr v-if="detailsForBatch(batch).length === 0"><td colspan="11">当前筛选下无订单项明细。</td></tr><tr v-for="detail in detailsForBatch(batch)" :key="detail.id || `${batch.id}-${detail.row_number}-${detail.column_name}-${detail.original_cn}`" :class="{ muted: isDetailExcluded(batch, detail) }"><td><input type="checkbox" :checked="isDetailSelected(detail.id)" @change="setDetailSelected(detail.id, ($event.target as HTMLInputElement).checked)" /></td><td><input type="checkbox" :disabled="!isBatchIncluded(batch)" :checked="isBatchIncluded(batch) && !isCNExcluded(batch, detail)" @change="setCNExcluded(batch, detail, !($event.target as HTMLInputElement).checked)" /></td><td><strong>{{ detail.original_cn }}</strong><small v-if="isCNExcluded(batch, detail)">已排除该范围内 CN</small><small v-if="excludedDetailIds.has(detail.id)">已排除此明细</small><button class="secondary-button tiny-button" type="button" @click="setDetailExcluded(detail.id, !excludedDetailIds.has(detail.id))">{{ excludedDetailIds.has(detail.id) ? '取消明细排除' : '只排除此明细' }}</button></td><td>{{ detail.display_name || detail.sheet_title || '-' }}</td><td>{{ detail.series_code || detail.series_name || '-' }}</td><td>{{ detail.item_name }}</td><td><div class="category-editor"><select :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" :value="detailCategory(detail)" @change="setDetailCategory(detail, ($event.target as HTMLSelectElement).value)"><option value="">保持原分类</option><option v-for="preset in categoryPresets" :key="preset" :value="preset">{{ preset }}</option></select><div class="custom-category"><input v-model="customCategoryInputs[detail.id]" :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" maxlength="40" placeholder="自定义制品" /><button class="secondary-button" type="button" :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" @click="applyCustomCategory(detail)">应用</button></div><small>{{ detailCategory(detail) || detail.product_category || detail.category || '默认分类' }}</small></div></td><td>{{ detail.quantity }}</td><td>{{ formatMoney(detail.unit_price) }}</td><td>{{ formatMoney(detail.amount) }}</td><td>{{ detail.sheet_name }}!{{ detail.column_name }}{{ detail.row_number }}</td></tr></tbody></table></div>
                 </div>
               </article>
             </div>
           </section>
 
           <section v-if="preview" class="panel">
-            <div class="panel__header"><h2>问题列表</h2><div class="filter-buttons"><button :class="{ active: issueFilter === 'all' }" type="button" @click="issueFilter = 'all'">全部</button><button :class="{ active: issueFilter === 'error' }" type="button" @click="issueFilter = 'error'">error</button><button :class="{ active: issueFilter === 'warning' }" type="button" @click="issueFilter = 'warning'">warning</button><button :class="{ active: issueFilter === 'notice' }" type="button" @click="issueFilter = 'notice'">notice</button></div></div>
-            <div class="issue-list"><article v-if="filteredIssues.length === 0" class="issue-row">当前筛选下没有问题。</article><article v-for="issue in filteredIssues" :key="`${issue.level}-${issue.code}-${issue.sheet_name}-${issue.batch_id}-${issue.row_number}-${issue.column}`" class="issue-row" :data-level="issue.level"><strong>{{ issue.level }} / {{ issue.code }}</strong><span>{{ issue.message }}</span><small>{{ issue.code === 'image_formula_ignored' ? '图片公式已忽略 / ' : '' }}{{ issueContext(issue) }}</small></article></div>
+            <div class="panel__header"><h2>问题列表</h2><div class="filter-buttons"><button :class="{ active: issueFilter === 'all' }" type="button" @click="issueFilter = 'all'">全部</button><button :class="{ active: issueFilter === 'row_error' }" type="button" @click="issueFilter = 'row_error'">行级错误</button><button :class="{ active: issueFilter === 'fatal_error' }" type="button" @click="issueFilter = 'fatal_error'">致命错误</button><button :class="{ active: issueFilter === 'warning' }" type="button" @click="issueFilter = 'warning'">提醒</button><button :class="{ active: issueFilter === 'notice' }" type="button" @click="issueFilter = 'notice'">提示</button></div></div>
+            <div class="issue-list"><article v-if="filteredIssues.length === 0" class="issue-row">当前筛选下没有问题。</article><article v-for="issue in filteredIssues" :key="`${issue.level}-${issue.code}-${issue.sheet_name}-${issue.batch_id}-${issue.row_number}-${issue.column}`" class="issue-row" :data-level="issue.level"><strong>{{ issueLevelLabel(issue.level) }} / {{ issue.code }}</strong><span>{{ issue.message }}</span><small>{{ issue.code === 'image_formula_ignored' ? '图片公式已忽略 / ' : '' }}{{ issueContext(issue) }}</small></article></div>
           </section>
         </template>
 
@@ -729,9 +1288,9 @@ onMounted(() => {
         </template>
         <template v-else-if="routeName === 'admin-import-history'">
           <section class="panel">
-            <div class="panel__header"><div><h2>导入历史</h2><p class="muted">只读查看，不提供撤销或修改订单。</p></div><button class="secondary-button" type="button" :disabled="historyLoading" @click="loadHistory">刷新</button></div>
+            <div class="panel__header"><div><h2>导入历史</h2><p class="muted">可查看导入记录，并按导入批次安全软撤销。</p></div><button class="secondary-button" type="button" :disabled="historyLoading" @click="loadHistory">刷新</button></div>
             <div v-if="historyMessage" class="inline-alert">{{ historyMessage }}</div>
-            <div class="table-scroll history-table"><table><thead><tr><th>文件</th><th>SHA-256</th><th>状态</th><th>上传</th><th>确认</th><th>工作表/批次</th><th>问题</th><th>写入结果</th><th>总金额</th><th></th></tr></thead><tbody><tr v-if="!historyLoading && importHistory.length === 0"><td colspan="10">暂无导入记录。</td></tr><tr v-for="item in importHistory" :key="item.id"><td><strong>{{ item.original_filename }}</strong><small>{{ formatBytes(item.file_size) }}</small></td><td class="hash-cell">{{ item.file_hash }}</td><td><span class="status-chip" data-state="draft">{{ item.status }}</span></td><td>{{ item.uploaded_by || '-' }}<small>{{ formatDate(item.created_at) }}</small></td><td>{{ item.confirmed_by || '-' }}<small>{{ formatDate(item.confirmed_at) }}</small></td><td>{{ item.sheet_count }} / {{ item.batch_count }}</td><td>E {{ item.error_count }} / W {{ item.warning_count }} / N {{ item.notice_count }}</td><td>{{ item.confirm_result ? `${item.confirm_result.order_count} 单 / ${item.confirm_result.order_item_count} 明细` : '-' }}</td><td>{{ formatMoney(historyTotalAmount(item)) }}</td><td><button class="secondary-button" type="button" @click="navigate(`/admin/imports/${item.id}`)">详情</button></td></tr></tbody></table></div>
+            <div class="table-scroll history-table"><table><thead><tr><th>文件</th><th>SHA-256</th><th>状态</th><th>上传</th><th>确认</th><th>工作表/批次</th><th>问题</th><th>写入结果</th><th>总金额</th><th></th></tr></thead><tbody><tr v-if="!historyLoading && importHistory.length === 0"><td colspan="10">暂无导入记录。</td></tr><tr v-for="item in importHistory" :key="item.id"><td><strong>{{ item.original_filename }}</strong><small>{{ formatBytes(item.file_size) }}</small></td><td class="hash-cell">{{ item.file_hash }}</td><td><span class="status-chip" :data-state="item.status">{{ statusLabel(item.status) }}</span><small v-if="item.revoked_at">{{ formatDate(item.revoked_at) }}</small></td><td>{{ item.uploaded_by || '-' }}<small>{{ formatDate(item.created_at) }}</small></td><td>{{ item.confirmed_by || '-' }}<small>{{ formatDate(item.confirmed_at) }}</small></td><td>{{ item.sheet_count }} / {{ item.batch_count }}</td><td>E {{ item.error_count }} / W {{ item.warning_count }} / N {{ item.notice_count }}</td><td>{{ item.confirm_result ? `${item.confirm_result.order_count} 单 / ${item.confirm_result.order_item_count} 明细` : '-' }}<small v-if="item.revoke_result">已撤销 {{ item.revoke_result.order_item_count }} 明细</small></td><td>{{ formatMoney(historyTotalAmount(item)) }}</td><td><button class="secondary-button" type="button" @click="navigate(`/admin/imports/${item.id}`)">详情</button></td></tr></tbody></table></div>
           </section>
         </template>
 
@@ -744,17 +1303,27 @@ onMounted(() => {
               <div class="summary-grid">
                 <article class="metric-tile wide-metric"><span>文件名</span><strong>{{ importDetail.import.original_filename }}</strong></article>
                 <article class="metric-tile wide-metric"><span>SHA-256</span><strong>{{ importDetail.import.file_hash }}</strong></article>
-                <article class="metric-tile"><span>状态</span><strong>{{ importDetail.import.status }}</strong></article>
+                <article class="metric-tile"><span>状态</span><strong>{{ statusLabel(importDetail.import.status) }}</strong></article>
                 <article class="metric-tile"><span>工作表</span><strong>{{ importDetail.import.sheet_count }}</strong></article>
                 <article class="metric-tile"><span>批次</span><strong>{{ importDetail.import.batch_count }}</strong></article>
                 <article class="metric-tile"><span>问题</span><strong>E {{ importDetail.import.error_count }} / W {{ importDetail.import.warning_count }} / N {{ importDetail.import.notice_count }}</strong></article>
-                <article class="metric-tile"><span>接受 warnings</span><strong>{{ importDetail.import.warnings_accepted ? '是' : '否' }}</strong></article>
+                <article class="metric-tile"><span>接受提醒</span><strong>{{ importDetail.import.warnings_accepted ? '是' : '否' }}</strong></article>
                 <article class="metric-tile"><span>确认管理员</span><strong>{{ importDetail.import.confirmed_by || '-' }}</strong></article>
-                <article class="metric-tile"><span>确认时间</span><strong>{{ formatDate(importDetail.import.confirmed_at) }}</strong></article>
+                <article class="metric-tile"><span>确认时间</span><strong>{{ formatDate(importDetail.import.confirmed_at) }}</strong></article><article class="metric-tile"><span>撤销管理员</span><strong>{{ importDetail.import.revoked_by || '-' }}</strong></article><article class="metric-tile"><span>撤销时间</span><strong>{{ formatDate(importDetail.import.revoked_at) }}</strong></article>
               </div>
 
               <section v-if="importDetail.import.confirm_result" class="confirm-result detail-result">
-                <strong>写入结果</strong><span>CN {{ importDetail.import.confirm_result.cn_count }}</span><span>商品 {{ importDetail.import.confirm_result.product_count }}</span><span>订单 {{ importDetail.import.confirm_result.order_count }}</span><span>明细 {{ importDetail.import.confirm_result.order_item_count }}</span><span>总件数 {{ importDetail.import.confirm_result.total_quantity }}</span><span>总金额 {{ formatMoney(importDetail.import.confirm_result.total_amount) }}</span>
+                <strong>写入结果</strong><span>CN {{ importDetail.import.confirm_result.cn_count }}</span><span>商品 {{ importDetail.import.confirm_result.product_count }}</span><span>订单 {{ importDetail.import.confirm_result.order_count }}</span><span>明细 {{ importDetail.import.confirm_result.order_item_count }}</span><span>跳过错误 {{ importDetail.import.confirm_result.skipped_error_count ?? 0 }}</span><span>总件数 {{ importDetail.import.confirm_result.total_quantity }}</span><span>总金额 {{ formatMoney(importDetail.import.confirm_result.total_amount) }}</span>
+              </section>
+
+              <section v-if="importDetail.import.revoke_result" class="confirm-result detail-result">
+                <strong>撤销结果</strong><span>CN {{ importDetail.import.revoke_result.affected_cn_count }}</span><span>订单 {{ importDetail.import.revoke_result.order_count }}</span><span>明细 {{ importDetail.import.revoke_result.order_item_count }}</span><span>总件数 {{ importDetail.import.revoke_result.total_quantity }}</span><span>总金额 {{ formatMoney(importDetail.import.revoke_result.total_amount) }}</span><span>{{ formatDate(importDetail.import.revoke_result.revoked_at) }}</span>
+              </section>
+
+              <section v-if="importDetail.import.status === 'confirmed' && importDetail.import.confirm_result" class="panel nested-panel danger-panel">
+                <div class="panel__header"><div><h2>安全撤销</h2><p class="muted">软撤销本次导入产生的订单明细，不影响其他导入批次里的相同 CN。</p></div><button class="secondary-button" type="button" :disabled="revokeLoading" @click="revokeImport">{{ revokeLoading ? '撤销中' : '撤销本次导入' }}</button></div>
+                <p class="muted">将影响 CN {{ importDetail.import.confirm_result.cn_count }} 个，明细 {{ importDetail.import.confirm_result.order_item_count }} 条，总件数 {{ importDetail.import.confirm_result.total_quantity }}，总金额 {{ formatMoney(importDetail.import.confirm_result.total_amount) }}。</p>
+                <div v-if="revokeMessage" class="inline-alert">{{ revokeMessage }}</div>
               </section>
 
               <section v-if="importDetail.preview" class="panel nested-panel">
@@ -764,7 +1333,7 @@ onMounted(() => {
 
               <section v-if="importDetail.preview" class="panel nested-panel">
                 <div class="panel__header"><h2>问题</h2><span>{{ (importDetail.preview.errors?.length ?? 0) + (importDetail.preview.warnings?.length ?? 0) + (importDetail.preview.notices?.length ?? 0) }}</span></div>
-                <div class="issue-list"><article v-for="issue in [...(importDetail.preview.errors ?? []), ...(importDetail.preview.warnings ?? []), ...(importDetail.preview.notices ?? [])]" :key="`${issue.level}-${issue.code}-${issue.sheet_name}-${issue.batch_id}-${issue.row_number}-${issue.column}`" class="issue-row" :data-level="issue.level"><strong>{{ issue.level }} / {{ issue.code }}</strong><span>{{ issue.message }}</span><small>{{ issueContext(issue) }}</small></article><article v-if="!((importDetail.preview.errors?.length ?? 0) + (importDetail.preview.warnings?.length ?? 0) + (importDetail.preview.notices?.length ?? 0))" class="issue-row">无问题。</article></div>
+                <div class="issue-list"><article v-for="issue in [...(importDetail.preview.errors ?? []), ...(importDetail.preview.warnings ?? []), ...(importDetail.preview.notices ?? [])]" :key="`${issue.level}-${issue.code}-${issue.sheet_name}-${issue.batch_id}-${issue.row_number}-${issue.column}`" class="issue-row" :data-level="issue.level"><strong>{{ issueLevelLabel(issue.level) }} / {{ issue.code }}</strong><span>{{ issue.message }}</span><small>{{ issueContext(issue) }}</small></article><article v-if="!((importDetail.preview.errors?.length ?? 0) + (importDetail.preview.warnings?.length ?? 0) + (importDetail.preview.notices?.length ?? 0))" class="issue-row">无问题。</article></div>
               </section>
             </template>
           </section>

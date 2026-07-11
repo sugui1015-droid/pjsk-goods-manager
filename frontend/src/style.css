@@ -360,6 +360,16 @@ h2 {
   background: #eaf3fb;
 }
 
+
+.status-chip[data-state="reverted"] {
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
+.status-chip[data-state="confirmed"] {
+  background: #ecfdf3;
+  color: #067647;
+}
 .endpoint-list {
   display: grid;
   gap: 10px;
@@ -472,9 +482,17 @@ th {
 }
 
 .batch-issues span[data-level="error"],
-.issue-row[data-level="error"] {
+.issue-row[data-level="error"],
+.batch-issues span[data-level="row_error"],
+.issue-row[data-level="row_error"] {
   color: #8b1e1e;
   background: #fff0f0;
+}
+
+.batch-issues span[data-level="fatal_error"],
+.issue-row[data-level="fatal_error"] {
+  color: #7f1d1d;
+  background: #fee2e2;
 }
 
 .batch-issues span[data-level="warning"],
@@ -709,4 +727,274 @@ th {
     align-items: stretch;
     flex-direction: column;
   }
+}
+
+.review-panel .compact-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.category-editor {
+  display: grid;
+  gap: 6px;
+  min-width: 190px;
+}
+
+.category-editor select,
+.category-editor input {
+  min-height: 34px;
+  border: 1px solid #cbd6df;
+  border-radius: 6px;
+  padding: 0 8px;
+}
+
+.custom-category {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto;
+  gap: 6px;
+}
+
+.detail-table tr.muted {
+  opacity: 0.55;
+}
+
+.detail-table td small {
+  display: block;
+  margin-top: 4px;
+  color: #667085;
+}
+
+.bulk-toolbar > div {
+  display: grid;
+  gap: 5px;
+}
+
+.bulk-toolbar input,
+.bulk-toolbar select {
+  min-height: 34px;
+  border: 1px solid #cbd6df;
+  border-radius: 6px;
+  padding: 0 8px;
+}
+
+.bulk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  margin: 12px 0;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+  background: #f7fafc;
+}
+
+.bulk-toolbar--edit {
+  background: #ffffff;
+}
+
+.bulk-toolbar small {
+  color: #667085;
+}
+
+.tiny-button {
+  min-height: 28px;
+  padding: 0 8px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.range-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.excel-filter-bar {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+  background: #f7fafc;
+  overflow: visible;
+  z-index: 12;
+}
+
+.compact-excel-filter-bar {
+  margin-bottom: 10px;
+}
+
+.excel-filter {
+  position: relative;
+}
+
+.excel-filter-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid #cbd6df;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2937;
+  padding: 0 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.excel-filter-button.active {
+  border-color: #0f8f63;
+  background: #eaf8f1;
+  color: #076044;
+}
+
+.excel-filter-button strong {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #0f8f63;
+  color: #fff;
+  font-size: 11px;
+}
+
+.excel-filter-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(420px, calc(100vw - 32px));
+  max-height: 520px;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(120px, 1fr);
+  border: 1px solid #d5dbe5;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.18);
+  z-index: 80;
+  overflow: hidden;
+}
+
+.excel-filter-menu__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  background: #f0f2f5;
+  border-bottom: 1px solid #dde3eb;
+}
+
+.excel-filter-menu__top button {
+  border: 0;
+  background: transparent;
+  color: #475569;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.excel-filter-search {
+  margin: 12px 14px 8px;
+  min-height: 36px;
+  border: 1px solid #ccd5df;
+  border-radius: 8px;
+  padding: 0 10px;
+}
+
+.excel-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 10px;
+  border-bottom: 1px solid #edf1f5;
+}
+
+.excel-filter-actions button {
+  border: 0;
+  background: transparent;
+  color: #0f766e;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.excel-filter-options {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 12px 14px 14px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.excel-filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.excel-filter-option input {
+  width: 16px;
+  height: 16px;
+  accent-color: #10a672;
+}
+
+.excel-filter-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.number-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.number-filter-grid label,
+.excel-filter-bar > label {
+  display: grid;
+  gap: 5px;
+  min-width: 120px;
+}
+
+.number-filter-grid input,
+.number-filter-grid select,
+.excel-filter-bar select {
+  min-height: 34px;
+  border: 1px solid #cbd6df;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #fff;
+}
+
+@media (max-width: 980px) {
+  .number-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .excel-filter-menu {
+    position: fixed;
+    top: 72px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+  }
+}
+
+.danger-panel {
+  border-color: #fecaca;
+  background: #fff7f7;
 }

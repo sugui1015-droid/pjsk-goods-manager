@@ -31,9 +31,10 @@ type Handler struct {
 type Store interface {
 	FindImportFile(context.Context, string, string) (ImportFileState, error)
 	SavePreview(context.Context, Preview, string) (PreviewState, error)
-	ConfirmImport(context.Context, string, string, bool) (ConfirmResult, error)
+	ConfirmImport(context.Context, string, string, bool, ConfirmRules) (ConfirmResult, error)
 	ListImports(context.Context) (ImportHistoryResponse, error)
 	GetImport(context.Context, string) (ImportDetailResponse, error)
+	RevokeImport(context.Context, string, string) (RevokeResult, error)
 }
 
 type ImportFileState struct {
@@ -48,8 +49,9 @@ type PreviewState struct {
 }
 
 type confirmRequest struct {
-	ImportBatchID string `json:"import_batch_id"`
-	AllowWarnings bool   `json:"allow_warnings"`
+	ImportBatchID string       `json:"import_batch_id"`
+	AllowWarnings bool         `json:"allow_warnings"`
+	Rules         ConfirmRules `json:"rules"`
 }
 
 func NewHandler(store Store) *Handler {
@@ -64,25 +66,25 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 
 	account, ok := admin.CurrentAdmin(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		writeError(w, http.StatusUnauthorized, "请先登录管理员账号")
 		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxPreviewFileSize+1)
 	if err := r.ParseMultipartForm(maxPreviewFileSize); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid multipart file upload")
+		writeError(w, http.StatusBadRequest, "上传表单格式不正确")
 		return
 	}
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "xlsx file field is required")
+		writeError(w, http.StatusBadRequest, "请选择要上传的 xlsx 文件")
 		return
 	}
 	defer file.Close()
 
 	if !strings.EqualFold(filepath.Ext(header.Filename), ".xlsx") {
-		writeError(w, http.StatusBadRequest, "only .xlsx files are supported")
+		writeError(w, http.StatusBadRequest, "仅支持 .xlsx 文件")
 		return
 	}
 
@@ -100,7 +102,7 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Printf("parse xlsx preview: %v", err)
-		writeError(w, http.StatusBadRequest, "xlsx file could not be parsed")
+		writeError(w, http.StatusBadRequest, "无法解析该 xlsx 文件")
 		return
 	}
 
@@ -109,7 +111,7 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	state, err := h.store.SavePreview(ctx, preview, account.ID)
 	if err != nil {
 		log.Printf("save import preview: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
 	preview.ImportBatchID = state.ImportBatchID
@@ -117,16 +119,16 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	preview.File.FilenameConflict = state.FilenameConflict
 	if state.DuplicateFile {
 		preview.Warnings = append(preview.Warnings, Issue{
-			Level:   "warning",
+			Level:   IssueLevelWarning,
 			Code:    "duplicate_file",
-			Message: "A previous import batch has the same file SHA-256.",
+			Message: "已经存在 SHA-256 完全相同的导入记录，请确认是否重复上传。",
 		})
 	}
 	if state.FilenameConflict {
 		preview.Warnings = append(preview.Warnings, Issue{
-			Level:   "warning",
+			Level:   IssueLevelWarning,
 			Code:    "same_filename_different_content",
-			Message: "A previous import batch has the same filename but a different file SHA-256; treat it as a possible updated version.",
+			Message: "存在同名但内容不同的历史导入，请确认是否为更新版本。",
 		})
 	}
 
@@ -141,39 +143,41 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 
 	account, ok := admin.CurrentAdmin(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		writeError(w, http.StatusUnauthorized, "请先登录管理员账号")
 		return
 	}
 
 	var request confirmRequest
 	if err := decodeJSON(w, r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request")
+		writeError(w, http.StatusBadRequest, "请求内容格式不正确")
 		return
 	}
 	request.ImportBatchID = strings.TrimSpace(request.ImportBatchID)
 	if request.ImportBatchID == "" {
-		writeError(w, http.StatusBadRequest, "import_batch_id is required")
+		writeError(w, http.StatusBadRequest, "缺少导入批次 ID")
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	result, err := h.store.ConfirmImport(ctx, request.ImportBatchID, account.ID, request.AllowWarnings)
+	result, err := h.store.ConfirmImport(ctx, request.ImportBatchID, account.ID, request.AllowWarnings, request.Rules)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrImportNotFound):
-			writeError(w, http.StatusNotFound, "import preview not found")
+			writeError(w, http.StatusNotFound, "找不到导入预览记录")
 		case errors.Is(err, ErrImportAlreadyConfirmed):
-			writeError(w, http.StatusConflict, "import batch has already been confirmed")
-		case errors.Is(err, ErrImportHasErrors):
-			writeError(w, http.StatusBadRequest, "import preview has errors and cannot be confirmed")
+			writeError(w, http.StatusConflict, "该导入批次已经确认过，不能重复确认")
+		case errors.Is(err, ErrImportHasFatalErrors):
+			writeError(w, http.StatusBadRequest, "当前预览存在致命错误，无法确认导入")
 		case errors.Is(err, ErrWarningsNeedApproval):
-			writeError(w, http.StatusConflict, "import preview has warnings; confirm again with allow_warnings=true")
+			writeError(w, http.StatusConflict, "当前预览存在提醒，请勾选人工确认后再继续")
 		case errors.Is(err, ErrNoOrderItems):
-			writeError(w, http.StatusBadRequest, "import preview has no order items to confirm")
+			writeError(w, http.StatusBadRequest, "当前预览没有可导入的有效明细")
+		case errors.Is(err, ErrInvalidImportRules):
+			writeError(w, http.StatusBadRequest, "导入调整规则不合法")
 		default:
 			log.Printf("confirm import: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		}
 		return
 	}
@@ -192,7 +196,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	response, err := h.store.ListImports(ctx)
 	if err != nil {
 		log.Printf("list imports: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
 
@@ -200,27 +204,67 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/imports/"), "/")
+	if path == "" || path == "history" {
+		writeError(w, http.StatusNotFound, "找不到导入批次")
+		return
+	}
+
+	if strings.HasSuffix(path, "/revert") {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+			return
+		}
+		importBatchID := strings.TrimSuffix(path, "/revert")
+		if importBatchID == "" || strings.Contains(importBatchID, "/") {
+			writeError(w, http.StatusNotFound, "找不到导入批次")
+			return
+		}
+		account, ok := admin.CurrentAdmin(r.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "请先登录管理员账号")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		result, err := h.store.RevokeImport(ctx, importBatchID, account.ID)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrImportNotFound):
+				writeError(w, http.StatusNotFound, "找不到导入批次")
+			case errors.Is(err, ErrImportAlreadyReverted):
+				writeError(w, http.StatusConflict, "该导入批次已经撤销过，不能重复撤销")
+			case errors.Is(err, ErrImportNotConfirmed):
+				writeError(w, http.StatusConflict, "只有已确认导入的批次才能撤销")
+			default:
+				log.Printf("revoke import: %v", err)
+				writeError(w, http.StatusInternalServerError, "服务器内部错误")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
 		return
 	}
-
-	importBatchID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/imports/"), "/")
-	if importBatchID == "" || importBatchID == "history" || strings.Contains(importBatchID, "/") {
-		writeError(w, http.StatusNotFound, "import batch not found")
+	if strings.Contains(path, "/") {
+		writeError(w, http.StatusNotFound, "找不到导入批次")
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	response, err := h.store.GetImport(ctx, importBatchID)
+	response, err := h.store.GetImport(ctx, path)
 	if err != nil {
 		if errors.Is(err, ErrImportNotFound) {
-			writeError(w, http.StatusNotFound, "import batch not found")
+			writeError(w, http.StatusNotFound, "找不到导入批次")
 			return
 		}
 		log.Printf("get import detail: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
 
@@ -230,13 +274,13 @@ func readUploadedFile(file multipart.File, limit int64) ([]byte, error) {
 	reader := io.LimitReader(file, limit+1)
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, errors.New("could not read uploaded file")
+		return nil, errors.New("读取上传文件失败")
 	}
 	if int64(len(data)) > limit {
-		return nil, errors.New("xlsx file is too large")
+		return nil, errors.New("xlsx 文件超过 20MB 限制")
 	}
 	if len(data) == 0 {
-		return nil, errors.New("xlsx file is empty")
+		return nil, errors.New("xlsx 文件为空")
 	}
 	return data, nil
 }
@@ -395,10 +439,14 @@ func (s *PostgresStore) ListImports(ctx context.Context) (ImportHistoryResponse,
 			b.warning_count,
 			b.notice_count,
 			b.warnings_accepted,
-			coalesce(b.confirm_result::text, '')
+			coalesce(b.confirm_result::text, ''),
+			coalesce(revoker.username, ''),
+			coalesce(to_char(b.revoked_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(b.revoke_result::text, '')
 		from import_batches b
 		left join admins importer on importer.id = b.imported_by
 		left join admins confirmer on confirmer.id = b.confirmed_by
+		left join admins revoker on revoker.id = b.revoked_by
 		order by b.created_at desc
 		limit 100
 	`)
@@ -442,10 +490,14 @@ func (s *PostgresStore) GetImport(ctx context.Context, importBatchID string) (Im
 			b.notice_count,
 			b.warnings_accepted,
 			coalesce(b.confirm_result::text, ''),
+			coalesce(revoker.username, ''),
+			coalesce(to_char(b.revoked_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(b.revoke_result::text, ''),
 			coalesce(b.preview_payload::text, '')
 		from import_batches b
 		left join admins importer on importer.id = b.imported_by
 		left join admins confirmer on confirmer.id = b.confirmed_by
+		left join admins revoker on revoker.id = b.revoked_by
 		where b.id = $1::uuid
 	`, importBatchID)
 
@@ -484,6 +536,7 @@ func scanImportDetail(scanner importHistoryScanner) (ImportHistoryItem, string, 
 func scanImportHistoryFields(scanner importHistoryScanner, includePreview bool) (ImportHistoryItem, string, error) {
 	var item ImportHistoryItem
 	var confirmPayload string
+	var revokePayload string
 	var previewPayload string
 	dest := []any{
 		&item.ID,
@@ -504,6 +557,9 @@ func scanImportHistoryFields(scanner importHistoryScanner, includePreview bool) 
 		&item.NoticeCount,
 		&item.WarningsAccepted,
 		&confirmPayload,
+		&item.RevokedBy,
+		&item.RevokedAt,
+		&revokePayload,
 	}
 	if includePreview {
 		dest = append(dest, &previewPayload)
@@ -518,18 +574,27 @@ func scanImportHistoryFields(scanner importHistoryScanner, includePreview bool) 
 		}
 		item.ConfirmResult = &result
 	}
+	if revokePayload != "" {
+		var result RevokeResult
+		if err := json.Unmarshal([]byte(revokePayload), &result); err != nil {
+			return ImportHistoryItem{}, "", err
+		}
+		item.RevokeResult = &result
+	}
 	return item, previewPayload, nil
 }
 
 var (
-	ErrImportNotFound         = errors.New("import preview not found")
+	ErrImportNotFound         = errors.New("找不到导入预览记录")
 	ErrImportAlreadyConfirmed = errors.New("import already confirmed")
-	ErrImportHasErrors        = errors.New("import has errors")
+	ErrImportHasFatalErrors   = errors.New("import has fatal errors")
 	ErrWarningsNeedApproval   = errors.New("warnings need approval")
 	ErrNoOrderItems           = errors.New("no order items")
+	ErrImportAlreadyReverted  = errors.New("import already reverted")
+	ErrImportNotConfirmed     = errors.New("import not confirmed")
 )
 
-func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string, adminID string, allowWarnings bool) (ConfirmResult, error) {
+func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string, adminID string, allowWarnings bool, rules ConfirmRules) (ConfirmResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ConfirmResult{}, err
@@ -566,8 +631,12 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 	if err := json.Unmarshal(payload, &preview); err != nil {
 		return ConfirmResult{}, err
 	}
-	if len(preview.Errors) > 0 {
-		return ConfirmResult{}, ErrImportHasErrors
+	preview, err = applyImportRules(preview, rules)
+	if err != nil {
+		return ConfirmResult{}, err
+	}
+	if hasFatalIssues(preview.Errors) {
+		return ConfirmResult{}, ErrImportHasFatalErrors
 	}
 	if len(preview.Warnings) > 0 && !allowWarnings {
 		return ConfirmResult{}, ErrWarningsNeedApproval
@@ -650,6 +719,7 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 				select sum(amount)
 				from order_items
 				where order_id = $1::uuid
+				  and revoked_at is null
 			), 0),
 				status = 'submitted',
 				updated_at = now()
@@ -661,17 +731,18 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 
 	confirmedAt := time.Now().UTC()
 	result := ConfirmResult{
-		ImportBatchID:    importBatchID,
-		ProjectID:        projectID,
-		Status:           "confirmed",
-		CNCount:          len(userIDs),
-		ProductCount:     productCount,
-		OrderCount:       len(orderIDs),
-		OrderItemCount:   orderItemCount,
-		TotalQuantity:    totalQuantity,
-		TotalAmount:      round2(totalAmount),
-		WarningsAccepted: allowWarnings,
-		ConfirmedAt:      confirmedAt.Format(time.RFC3339),
+		ImportBatchID:     importBatchID,
+		ProjectID:         projectID,
+		Status:            "confirmed",
+		CNCount:           len(userIDs),
+		ProductCount:      productCount,
+		OrderCount:        len(orderIDs),
+		OrderItemCount:    orderItemCount,
+		TotalQuantity:     totalQuantity,
+		TotalAmount:       round2(totalAmount),
+		WarningsAccepted:  allowWarnings,
+		ConfirmedAt:       confirmedAt.Format(time.RFC3339),
+		SkippedErrorCount: len(preview.Errors),
 	}
 	resultPayload, err := json.Marshal(result)
 	if err != nil {
@@ -682,7 +753,7 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 		update import_batches
 		set status = 'confirmed',
 			success_rows = $2,
-			failed_rows = 0,
+			failed_rows = $8,
 			completed_at = $3,
 			confirmed_by = $4::uuid,
 			confirmed_at = $3,
@@ -690,12 +761,159 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 			confirm_result = $6::jsonb,
 			warnings_accepted = $7
 		where id = $1::uuid
-	`, importBatchID, orderItemCount, confirmedAt, adminID, projectID, resultPayload, allowWarnings); err != nil {
+	`, importBatchID, orderItemCount, confirmedAt, adminID, projectID, resultPayload, allowWarnings, len(preview.Errors)); err != nil {
 		return ConfirmResult{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return ConfirmResult{}, err
+	}
+	return result, nil
+}
+
+func hasFatalIssues(issues []Issue) bool {
+	for _, issue := range issues {
+		if issue.Level == IssueLevelFatalError {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *PostgresStore) RevokeImport(ctx context.Context, importBatchID string, adminID string) (RevokeResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	err = tx.QueryRow(ctx, `
+		select status
+		from import_batches
+		where id = $1::uuid
+		for update
+	`, importBatchID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RevokeResult{}, ErrImportNotFound
+	}
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	if status == "reverted" || status == "cancelled" {
+		return RevokeResult{}, ErrImportAlreadyReverted
+	}
+	if status != "confirmed" {
+		return RevokeResult{}, ErrImportNotConfirmed
+	}
+
+	var result RevokeResult
+	err = tx.QueryRow(ctx, `
+		select
+			count(distinct o.user_id)::int,
+			count(distinct oi.order_id)::int,
+			count(oi.id)::int,
+			coalesce(sum(oi.quantity), 0)::int,
+			coalesce(sum(oi.amount), 0)::float8
+		from order_items oi
+		join orders o on o.id = oi.order_id
+		where oi.import_batch_id = $1::uuid
+		  and oi.revoked_at is null
+	`, importBatchID).Scan(
+		&result.AffectedCNCount,
+		&result.OrderCount,
+		&result.OrderItemCount,
+		&result.TotalQuantity,
+		&result.TotalAmount,
+	)
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	if result.OrderItemCount == 0 {
+		return RevokeResult{}, ErrImportAlreadyReverted
+	}
+
+	rows, err := tx.Query(ctx, `
+		select distinct order_id::text
+		from order_items
+		where import_batch_id = $1::uuid
+		  and revoked_at is null
+	`, importBatchID)
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	orderIDs := []string{}
+	for rows.Next() {
+		var orderID string
+		if err := rows.Scan(&orderID); err != nil {
+			rows.Close()
+			return RevokeResult{}, err
+		}
+		orderIDs = append(orderIDs, orderID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return RevokeResult{}, err
+	}
+	rows.Close()
+
+	revokedAt := time.Now().UTC()
+	if _, err := tx.Exec(ctx, `
+		update order_items
+		set revoked_at = $2,
+			revoked_by = $3::uuid,
+			revoke_reason = '管理员撤销导入批次'
+		where import_batch_id = $1::uuid
+		  and revoked_at is null
+	`, importBatchID, revokedAt, adminID); err != nil {
+		return RevokeResult{}, err
+	}
+
+	for _, orderID := range orderIDs {
+		if _, err := tx.Exec(ctx, `
+			update orders
+			set total_amount = coalesce((
+				select sum(amount)
+				from order_items
+				where order_id = $1::uuid
+				  and revoked_at is null
+			), 0),
+				status = case when exists (
+					select 1
+					from order_items
+					where order_id = $1::uuid
+					  and revoked_at is null
+				) then status else 'cancelled' end,
+				updated_at = now()
+			where id = $1::uuid
+		`, orderID); err != nil {
+			return RevokeResult{}, err
+		}
+	}
+
+	result.ImportBatchID = importBatchID
+	result.Status = "reverted"
+	result.TotalAmount = round2(result.TotalAmount)
+	result.RevokedBy = adminID
+	result.RevokedAt = revokedAt.Format(time.RFC3339)
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		update import_batches
+		set status = 'reverted',
+			revoked_by = $2::uuid,
+			revoked_at = $3,
+			revoke_result = $4::jsonb,
+			completed_at = $3
+		where id = $1::uuid
+	`, importBatchID, adminID, revokedAt, payload); err != nil {
+		return RevokeResult{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return RevokeResult{}, err
 	}
 	return result, nil
 }
@@ -736,8 +954,10 @@ func upsertUser(ctx context.Context, tx dbTx, normalizedCN string, originalCN st
 func productKey(batch BatchPreview, detail DetailPreview) string {
 	parts := []string{
 		batch.ID,
-		detail.Category,
-		detail.ItemName,
+		productNameForDetail(batch, detail),
+		detail.ProductCategory,
+		detail.SeriesCode,
+		detail.CharacterName,
 		detail.ColumnName,
 		detail.PriceType,
 		fmt.Sprintf("%.2f", detail.UnitPrice),
@@ -745,23 +965,45 @@ func productKey(batch BatchPreview, detail DetailPreview) string {
 	return hashStrings(parts...)
 }
 
+func productNameForDetail(batch BatchPreview, detail DetailPreview) string {
+	name := strings.TrimSpace(detail.GoodsSeriesName)
+	if name != "" {
+		return name
+	}
+	name = strings.TrimSpace(batch.SheetTitle)
+	if name != "" {
+		return name
+	}
+	name = strings.TrimSpace(batch.BatchName)
+	if name != "" {
+		return name
+	}
+	return detail.ItemName
+}
+
 func upsertProduct(ctx context.Context, tx dbTx, projectID string, sku string, batch BatchPreview, detail DetailPreview) (string, error) {
-	category := strings.TrimSpace(batch.BatchName)
-	if detail.Category != "" {
-		category += " / " + detail.Category
+	productName := productNameForDetail(batch, detail)
+	characterName := detail.CharacterName
+	if characterName == "" {
+		characterName = characterNameFromItemName(detail.ItemName)
+	}
+	category := detail.ProductCategory
+	if category == "" {
+		category = detail.Category
 	}
 	var productID string
 	err := tx.QueryRow(ctx, `
-		insert into products (project_id, sku, name, character_name, category, unit_price, status, sort_order)
-		values ($1::uuid, $2, $3, $4, $5, $6, 'active', $7)
+		insert into products (project_id, sku, name, character_name, category, series_code, unit_price, status, sort_order)
+		values ($1::uuid, $2, $3, $4, $5, $6, $7, 'active', $8)
 		on conflict (project_id, sku) do update
 		set name = excluded.name,
 			character_name = excluded.character_name,
 			category = excluded.category,
+			series_code = excluded.series_code,
 			unit_price = excluded.unit_price,
 			updated_at = now()
 		returning id::text
-	`, projectID, sku, detail.ItemName, detail.ItemName, category, detail.UnitPrice, detail.ColumnIndex).Scan(&productID)
+	`, projectID, sku, productName, characterName, category, detail.SeriesCode, detail.UnitPrice, detail.ColumnIndex).Scan(&productID)
 	return productID, err
 }
 

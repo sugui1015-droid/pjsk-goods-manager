@@ -10,6 +10,75 @@ import (
 	"testing"
 )
 
+func TestParseStandardImportTemplate(t *testing.T) {
+	goodsSeries := "\u4e09\u4e3d\u9e25"
+	category := "\u8272\u7eb8"
+	secondCategory := "\u5fbd\u7ae0"
+	data := testWorkbook(t, testSheet{
+		Name: "standard",
+		Rows: [][]any{
+			{"\u3010" + goodsSeries + "\u3011\u6c47\u603b\u8be6\u60c5\uff0c\u5236\u8868\u65f6\u95f4\uff1a\u7531\u5bfc\u51fa\u7a0b\u5e8f\u81ea\u52a8\u751f\u6210"},
+			{nil, "\u5206\u7c7b", category, nil, secondCategory},
+			{nil, "\u79cd\u7c7b", "miku", "rin", "len", "notrole"},
+			{nil, "\u5355\u4ef7", 40, 50, 60, 70},
+			{"\u603b\u91d1\u989d", "\u6635\u79f0/\u603b\u6570", 1, 1, 1, 1},
+			{150, "Succ", 1, 1, 1, 1},
+			{150, "succ", 1, 1, 1, 1},
+		},
+	})
+
+	preview, err := Parse(data, ParseOptions{Filename: "standard.xlsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Batches) != 1 {
+		t.Fatalf("batches = %d, want 1", len(preview.Batches))
+	}
+	batch := preview.Batches[0]
+	if batch.TemplateType != templateStandardImport {
+		t.Fatalf("template = %s", batch.TemplateType)
+	}
+	if batch.SheetTitle != goodsSeries || batch.BatchName != goodsSeries+"-"+category {
+		t.Fatalf("title/batch = %q / %q", batch.SheetTitle, batch.BatchName)
+	}
+	if batch.CNCount != 1 || batch.TotalQuantity != 3 || len(batch.Details) != 3 {
+		t.Fatalf("summary cn=%d qty=%d details=%d", batch.CNCount, batch.TotalQuantity, len(batch.Details))
+	}
+	if got := batch.Details[0].GoodsSeriesName; got != goodsSeries {
+		t.Fatalf("goods series = %q", got)
+	}
+	if got := batch.Details[0].ProductCategory; got != category {
+		t.Fatalf("product category = %q", got)
+	}
+	if got := batch.Details[1].ProductCategory; got != category {
+		t.Fatalf("continued product category = %q", got)
+	}
+	if got := batch.Details[2].ProductCategory; got != secondCategory {
+		t.Fatalf("second product category = %q", got)
+	}
+	if got := batch.Details[0].DisplayName; got != goodsSeries+"-"+category {
+		t.Fatalf("display name = %q", got)
+	}
+	if got := batch.Details[0].CharacterName; got != "miku" {
+		t.Fatalf("character = %q", got)
+	}
+	if len(batch.Errors) == 0 || batch.Errors[0].Code != "invalid_character_name" {
+		t.Fatalf("expected invalid character error, got %#v", batch.Errors)
+	}
+	if len(batch.Warnings) == 0 || batch.Warnings[0].Code != "duplicate_cn_in_standard_sheet" {
+		t.Fatalf("expected duplicate CN warning, got %#v", batch.Warnings)
+	}
+}
+
+func TestGoodsDisplayNameSkipsDefaultCategory(t *testing.T) {
+	if got := goodsDisplayName("\u4e09\u4e3d\u9e25\u8272\u7eb8", "\u9ed8\u8ba4\u5206\u7c7b"); got != "\u4e09\u4e3d\u9e25\u8272\u7eb8" {
+		t.Fatalf("display name = %q", got)
+	}
+	if got := goodsDisplayName("\u751f\u65e5\u7fbd\u6392", "\u5fbd\u7ae0"); got != "\u751f\u65e5\u7fbd\u6392-\u5fbd\u7ae0" {
+		t.Fatalf("display name = %q", got)
+	}
+}
+
 func TestParseNormalMatrix(t *testing.T) {
 	data := testWorkbook(t, testSheet{
 		Name: "normal",

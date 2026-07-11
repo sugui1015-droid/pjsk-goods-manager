@@ -59,6 +59,8 @@ type OrderItem struct {
 	ProductName    string  `json:"product_name"`
 	CharacterName  string  `json:"character_name,omitempty"`
 	Category       string  `json:"category,omitempty"`
+	SeriesCode     string  `json:"series_code,omitempty"`
+	DisplayName    string  `json:"display_name,omitempty"`
 	SKU            string  `json:"sku,omitempty"`
 	Quantity       float64 `json:"quantity"`
 	UnitPrice      float64 `json:"unit_price"`
@@ -189,11 +191,11 @@ func (s *PostgresStore) ListOrders(ctx context.Context, filters OrderFilters) (O
 	}
 	if filters.Item != "" {
 		placeholder := addArg("%" + filters.Item + "%")
-		conditions = append(conditions, "exists (select 1 from order_items oi_filter join products pr_filter on pr_filter.id = oi_filter.product_id where oi_filter.order_id = o.id and (pr_filter.name ilike "+placeholder+" or coalesce(pr_filter.category, '') ilike "+placeholder+" or coalesce(pr_filter.character_name, '') ilike "+placeholder+"))")
+		conditions = append(conditions, "exists (select 1 from order_items oi_filter join products pr_filter on pr_filter.id = oi_filter.product_id where oi_filter.order_id = o.id and oi_filter.revoked_at is null and (pr_filter.name ilike "+placeholder+" or coalesce(pr_filter.category, '') ilike "+placeholder+" or coalesce(pr_filter.series_code, '') ilike "+placeholder+" or coalesce(pr_filter.character_name, '') ilike "+placeholder+"))")
 	}
 	if filters.ImportBatchID != "" {
 		placeholder := addArg(filters.ImportBatchID)
-		conditions = append(conditions, "exists (select 1 from order_items oi_import where oi_import.order_id = o.id and oi_import.import_batch_id = "+placeholder+"::uuid)")
+		conditions = append(conditions, "exists (select 1 from order_items oi_import where oi_import.order_id = o.id and oi_import.revoked_at is null and oi_import.import_batch_id = "+placeholder+"::uuid)")
 	}
 	if filters.Status != "" {
 		placeholder := addArg(filters.Status)
@@ -229,7 +231,7 @@ func (s *PostgresStore) ListOrders(ctx context.Context, filters OrderFilters) (O
 		from orders o
 		join users u on u.id = o.user_id
 		join projects p on p.id = o.project_id
-		left join order_items oi on oi.order_id = o.id
+		left join order_items oi on oi.order_id = o.id and oi.revoked_at is null
 		left join products product on product.id = oi.product_id
 		left join import_batches ib on ib.id = oi.import_batch_id
 		where ` + strings.Join(conditions, " and ") + `
@@ -294,7 +296,7 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 		from orders o
 		join users u on u.id = o.user_id
 		join projects p on p.id = o.project_id
-		left join order_items oi on oi.order_id = o.id
+		left join order_items oi on oi.order_id = o.id and oi.revoked_at is null
 		left join products product on product.id = oi.product_id
 		left join import_batches ib on ib.id = oi.import_batch_id
 		where o.id = $1::uuid
@@ -332,6 +334,8 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 			product.name,
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
+			coalesce(product.series_code, ''),
+			case when coalesce(product.category, '') = '' or product.category = '默认分类' then product.name else product.name || '-' || product.category end,
 			coalesce(product.sku, ''),
 			oi.quantity::float8,
 			oi.unit_price::float8,
@@ -346,6 +350,7 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 		join products product on product.id = oi.product_id
 		left join import_batches ib on ib.id = oi.import_batch_id
 		where oi.order_id = $1::uuid
+		  and oi.revoked_at is null
 		order by product.sort_order, product.name, oi.created_at, oi.id
 	`, orderID)
 	if err != nil {
@@ -362,6 +367,8 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 			&item.ProductName,
 			&item.CharacterName,
 			&item.Category,
+			&item.SeriesCode,
+			&item.DisplayName,
 			&item.SKU,
 			&item.Quantity,
 			&item.UnitPrice,
