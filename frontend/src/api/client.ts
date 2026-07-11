@@ -317,3 +317,48 @@ export type OrderListResponse = {
 export type OrderDetailResponse = {
   order: OrderDetail
 }
+
+
+export type QueryUser = {
+  id: string
+  cn_code: string
+  display_name?: string
+}
+
+export type QueryLoginResponse = {
+  user: QueryUser
+}
+
+export type QueryOrderItem = {
+  id: string
+  goods_name: string
+  category?: string
+  character_name?: string
+  display_name: string
+  quantity: number
+  unit_price: number
+  amount: number
+  payment_status: string
+  import_batch_id?: string
+  import_filename?: string
+  source_sheet?: string
+}
+
+export type QueryOrder = {
+  id: string
+  order_no: string
+  status: string
+  project_name: string
+  total_quantity: number
+  total_amount: number
+  created_at: string
+  import_filenames: string[]
+  items: QueryOrderItem[]
+}
+
+export type QueryOrdersResponse = {
+  user: QueryUser
+  orders: QueryOrder[]
+  total_quantity: number
+  total_amount: number
+}

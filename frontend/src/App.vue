@@ -20,6 +20,9 @@ import {
   type OrderDetailResponse,
   type OrderListResponse,
   type OrderSummary,
+  type QueryLoginResponse,
+  type QueryOrdersResponse,
+  type QueryUser,
 } from './api/client'
 import {
   buildConfirmRules as buildImportConfirmRules,
@@ -42,7 +45,7 @@ import {
 const maxExcelSize = 20 * 1024 * 1024
 const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
-type RouteName = 'home' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail'
+type RouteName = 'home' | 'query' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail'
 type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
 type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
 type QuickFilterGroup = { key: TextFilterKey; label: string; options: string[] }
@@ -126,10 +129,17 @@ const orderFilters = ref({
   createdTo: '',
 })
 
+const queryCN = ref('')
+const queryCode = ref('')
+const queryUser = ref<QueryUser | null>(null)
+const queryOrders = ref<QueryOrdersResponse | null>(null)
+const queryLoading = ref(false)
+const queryMessage = ref('')
+
 const isBackendOnline = computed(() => health.value?.status === 'ok')
 const readyCount = computed(() => config.value.modules.filter((item) => item.status === 'ready').length)
 const queuedCount = computed(() => config.value.modules.filter((item) => item.status === 'queued').length)
-const isAdminRoute = computed(() => routeName.value !== 'home')
+const isAdminRoute = computed(() => routeName.value !== 'home' && routeName.value !== 'query')
 const canUpload = computed(() => selectedFile.value !== null && !uploadLoading.value)
 const fatalIssueCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level === 'fatal_error').length)
 const rowErrorCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level !== 'fatal_error').length)
@@ -188,6 +198,7 @@ const allIssues = computed(() => [
 const filteredIssues = computed(() => issueFilter.value === 'all' ? allIssues.value : allIssues.value.filter((item) => item.level === issueFilter.value))
 
 function routeFromPath(path: string): RouteName {
+  if (path === '/query') return 'query'
   if (path === '/admin/orders') return 'admin-orders'
   if (path.startsWith('/admin/orders/')) return 'admin-order-detail'
   if (path === '/admin/imports/history') return 'admin-import-history'
@@ -212,7 +223,8 @@ function navigate(path: string) {
   routeName.value = routeFromPath(path)
   routeImportID.value = importIDFromPath(path)
   routeOrderID.value = orderIDFromPath(path)
-  void handleRouteEntered()
+  if (isAdminRoute.value) void handleRouteEntered()
+  else void handlePublicRouteEntered()
 }
 
 async function handleRouteEntered() {
@@ -223,6 +235,10 @@ async function handleRouteEntered() {
   if (routeName.value === 'admin-import-detail' && routeImportID.value) await loadDetail(routeImportID.value)
   if (routeName.value === 'admin-orders') await loadOrders()
   if (routeName.value === 'admin-order-detail' && routeOrderID.value) await loadOrderDetail(routeOrderID.value)
+}
+
+async function handlePublicRouteEntered() {
+  if (routeName.value === 'query') await loadQueryOrders(false)
 }
 
 async function load() {
@@ -500,6 +516,62 @@ function resetOrderFilters() {
     createdTo: '',
   }
   void loadOrders()
+}
+
+
+async function loginQuery() {
+  queryLoading.value = true
+  queryMessage.value = ''
+  try {
+    const response = await postJSON<QueryLoginResponse>('/api/query/login', {
+      cn: queryCN.value,
+      query_code: queryCode.value,
+    })
+    queryUser.value = response.user
+    queryCode.value = ''
+    await loadQueryOrders(true)
+  } catch (error) {
+    queryOrders.value = null
+    queryUser.value = null
+    queryMessage.value = error instanceof Error ? error.message : '查询登录失败'
+  } finally {
+    queryLoading.value = false
+  }
+}
+
+async function loadQueryOrders(showMessage = true) {
+  queryLoading.value = true
+  if (showMessage) queryMessage.value = ''
+  try {
+    const response = await getJSON<QueryOrdersResponse>('/api/query/orders')
+    queryOrders.value = response
+    queryUser.value = response.user
+    queryCN.value = response.user.cn_code
+  } catch (error) {
+    queryOrders.value = null
+    queryUser.value = null
+    if (showMessage || !(error instanceof ApiError && error.status === 401)) {
+      queryMessage.value = error instanceof Error ? error.message : '查询订单失败'
+    }
+  } finally {
+    queryLoading.value = false
+  }
+}
+
+async function logoutQuery() {
+  queryLoading.value = true
+  queryMessage.value = ''
+  try {
+    await postJSON<void>('/api/query/logout', {})
+    queryUser.value = null
+    queryOrders.value = null
+    queryCode.value = ''
+    queryMessage.value = '已退出查询。'
+  } catch (error) {
+    queryMessage.value = error instanceof Error ? error.message : '退出失败'
+  } finally {
+    queryLoading.value = false
+  }
 }
 
 function resetPreviewAdjustments(nextPreview: ImportPreviewResponse | null) {
@@ -808,6 +880,10 @@ function batchMatchesCurrentFilters(batch: ImportBatch) {
 function detailsForBatch(batch: ImportBatch) {
   return (batch.details ?? []).filter((detail) => filteredPreviewRowIds.value.has(detail.id))
 }
+function queryOrderSources(order: { import_filenames?: string[] }) {
+  return (order.import_filenames ?? []).join(' / ') || '-'
+}
+
 function orderSources(order: OrderSummary) {
   const filenames = order.import_filenames ?? []
   if (filenames.length > 0) return filenames.join(' / ')
@@ -866,6 +942,15 @@ function statusLabel(status: string) {
   return labels[status] ?? status
 }
 
+function queryPaymentStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    unpaid: '未付款',
+    partial: '部分付款',
+    paid: '已付款',
+  }
+  return labels[status] ?? status
+}
+
 function issueLevelLabel(level: string) {
   const labels: Record<string, string> = {
     row_error: '行级错误',
@@ -904,7 +989,10 @@ window.addEventListener('popstate', () => {
 onMounted(() => {
   void load()
   if (isAdminRoute.value) void handleRouteEntered()
-  else authChecked.value = true
+  else {
+    authChecked.value = true
+    void handlePublicRouteEntered()
+  }
 })
 </script>
 
@@ -1342,6 +1430,65 @@ onMounted(() => {
     </main>
 
     <main v-else class="workspace">
+      <template v-if="routeName === 'query'">
+        <section class="panel query-panel">
+          <div class="panel__header">
+            <div>
+              <h2>CN 查询</h2>
+              <p class="muted">输入 CN 和查询码后，只能查看当前 CN 自己的订单明细。</p>
+            </div>
+            <button v-if="queryUser" class="secondary-button" type="button" :disabled="queryLoading" @click="logoutQuery">退出查询</button>
+          </div>
+          <form v-if="!queryUser" class="login-form query-login" @submit.prevent="loginQuery">
+            <label><span>CN</span><input v-model="queryCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
+            <label><span>查询码</span><input v-model="queryCode" type="password" autocomplete="current-password" required placeholder="管理员提供的查询码" /></label>
+            <button class="primary-button" type="submit" :disabled="queryLoading">{{ queryLoading ? '查询中' : '查询订单' }}</button>
+          </form>
+          <div v-if="queryMessage" class="inline-alert">{{ queryMessage }}</div>
+        </section>
+
+        <template v-if="queryOrders">
+          <section class="summary-grid">
+            <article class="metric-tile"><span>CN</span><strong>{{ queryOrders.user.cn_code }}</strong></article>
+            <article class="metric-tile"><span>订单数</span><strong>{{ queryOrders.orders.length }}</strong></article>
+            <article class="metric-tile"><span>总件数</span><strong>{{ queryOrders.total_quantity }}</strong></article>
+            <article class="metric-tile"><span>总金额</span><strong>{{ formatMoney(queryOrders.total_amount) }}</strong></article>
+          </section>
+
+          <section v-for="order in queryOrders.orders" :key="order.id" class="panel query-order-card">
+            <div class="panel__header">
+              <div>
+                <h2>{{ order.project_name }}</h2>
+                <p class="muted">{{ order.order_no }} / {{ formatDate(order.created_at) }}</p>
+              </div>
+              <div class="query-order-total"><strong>{{ formatMoney(order.total_amount) }}</strong><span>{{ order.total_quantity }} 件</span></div>
+            </div>
+            <p class="muted">来源：{{ queryOrderSources(order) }}</p>
+            <div class="table-scroll detail-table">
+              <table>
+                <thead>
+                  <tr><th>谷子名称</th><th>分类</th><th>角色</th><th>数量</th><th>单价</th><th>小计</th><th>付款状态</th><th>所属批次</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in order.items" :key="item.id">
+                    <td>{{ item.display_name || item.goods_name }}</td>
+                    <td>{{ item.category || '-' }}</td>
+                    <td>{{ item.character_name || '-' }}</td>
+                    <td>{{ item.quantity }}</td>
+                    <td>{{ formatMoney(item.unit_price) }}</td>
+                    <td>{{ formatMoney(item.amount) }}</td>
+                    <td>{{ queryPaymentStatusLabel(item.payment_status) }}</td>
+                    <td>{{ item.import_filename || item.import_batch_id || '-' }}<small>{{ item.source_sheet || '' }}</small></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section v-if="queryOrders.orders.length === 0" class="panel"><p class="muted">当前 CN 暂无可查询订单。</p></section>
+        </template>
+      </template>
+
+      <template v-else>
       <section class="metrics" aria-label="运行指标">
         <article class="metric-tile"><span>可用模块</span><strong>{{ readyCount }}</strong></article>
         <article class="metric-tile"><span>待接入模块</span><strong>{{ queuedCount }}</strong></article>
@@ -1352,6 +1499,7 @@ onMounted(() => {
       <section v-if="activeView === 'overview'" class="panel"><div class="panel__header"><h2>模块状态</h2><span>{{ config.stage }}</span></div><div v-if="errorMessage" class="inline-alert">{{ errorMessage }}</div><div class="module-table"><div class="module-row module-row--head"><span>模块</span><span>状态</span><span>说明</span></div><div v-for="item in config.modules" :key="item.key" class="module-row"><strong>{{ item.title }}</strong><span class="status-chip" :data-state="item.status">{{ item.status }}</span><span>{{ item.description }}</span></div></div></section>
       <section v-else-if="activeView === 'ops'" class="workspace workspace--two"><div class="panel"><div class="panel__header"><h2>后端接口</h2><span>{{ isBackendOnline ? 'online' : 'offline' }}</span></div><div class="endpoint-list"><div><code>GET /health</code><span>{{ health?.status ?? 'waiting' }}</span></div><div><code>GET /api/config</code><span>{{ isBackendOnline ? 'ready' : 'waiting' }}</span></div><div><code>POST /api/admin/imports/preview</code><span>admin only</span></div><div><code>POST /api/admin/imports/confirm</code><span>admin only</span></div><div><code>GET /api/admin/imports</code><span>admin only</span></div></div></div><div class="panel"><div class="panel__header"><h2>下一步</h2><span>history first</span></div><ol class="task-list"><li>验收确认导入幂等保护。</li><li>查看导入历史和详情。</li><li>再进入订单只读管理。</li></ol></div></section>
       <section v-else class="workspace workspace--two"><div class="panel"><div class="panel__header"><h2>Streamlit 管理端</h2><span>port {{ config.legacyAdminPort }}</span></div><code>cd legacy-streamlit && python -m streamlit run main.py --server.port {{ config.legacyAdminPort }}</code></div><div class="panel"><div class="panel__header"><h2>Streamlit 用户端</h2><span>port {{ config.legacyUserPort }}</span></div><code>cd legacy-streamlit && python -m streamlit run user.py --server.port {{ config.legacyUserPort }}</code></div></section>
+      </template>
     </main>
   </div>
 </template>

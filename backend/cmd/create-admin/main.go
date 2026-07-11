@@ -92,5 +92,5 @@ func readPassword(prompt string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read password: %w", err)
 	}
-	return string(value), nil
+	return strings.TrimRight(string(value), "\r\n"), nil
 }
