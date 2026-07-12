@@ -1,4 +1,4 @@
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+﻿const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
 export class ApiError extends Error {
   status: number
@@ -316,6 +316,63 @@ export type OrderListResponse = {
 
 export type OrderDetailResponse = {
   order: OrderDetail
+}
+export type PaymentSummary = {
+  total_amount: number
+  paid_amount: number
+  remaining_amount: number
+  item_count: number
+  unpaid_count: number
+  partial_count: number
+  paid_count: number
+}
+
+export type PaymentItemRow = {
+  id: string
+  order_id: string
+  order_no: string
+  project_name: string
+  product_name: string
+  character_name?: string
+  category?: string
+  series_code?: string
+  display_name?: string
+  sku?: string
+  quantity: number
+  unit_price: number
+  amount: number
+  paid_amount: number
+  remaining_amount: number
+  payment_status: string
+  import_filename?: string
+  source_sheet?: string
+  source_row_key?: string
+}
+
+export type PaymentRecord = {
+  id: string
+  amount: number
+  payment_method?: string
+  note?: string
+  status: string
+  paid_at: string
+  created_by?: string
+  created_at: string
+}
+
+export type CNPaymentResponse = {
+  user: QueryUser
+  summary: PaymentSummary
+  items: PaymentItemRow[]
+  payments: PaymentRecord[]
+}
+
+export type CreatePaymentResponse = {
+  payment_id: string
+  status: string
+  duplicate: boolean
+  summary: PaymentSummary
+  items: PaymentItemRow[]
 }
 
 

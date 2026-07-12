@@ -8,6 +8,8 @@ import {
   type Admin,
   type AuthResponse,
   type ConfigResponse,
+  type CNPaymentResponse,
+  type CreatePaymentResponse,
   type HealthResponse,
   type ImportBatch,
   type ImportConfirmResponse,
@@ -20,6 +22,7 @@ import {
   type OrderDetailResponse,
   type OrderListResponse,
   type OrderSummary,
+  type PaymentItemRow,
   type QueryLoginResponse,
   type QueryOrdersResponse,
   type QueryUser,
@@ -128,6 +131,15 @@ const orderFilters = ref({
   createdFrom: '',
   createdTo: '',
 })
+const cnPayment = ref<CNPaymentResponse | null>(null)
+const cnPaymentLoading = ref(false)
+const cnPaymentMessage = ref('')
+const selectedPaymentItemIds = ref<Set<string>>(new Set())
+const paymentAmounts = ref<Record<string, string>>({})
+const paymentMethod = ref('Alipay')
+const paymentPaidAt = ref(localDateTimeInputValue())
+const paymentNote = ref('')
+const paymentSaving = ref(false)
 
 const queryCN = ref('')
 const queryCode = ref('')
@@ -149,6 +161,10 @@ const canConfirm = computed(() => {
   if ((preview.value.warnings?.length ?? 0) > 0 && !allowWarnings.value) return false
   return adjustedImportSummary.value.detailCount > 0
 })
+const selectedPaymentItems = computed(() => (cnPayment.value?.items ?? []).filter((item) => selectedPaymentItemIds.value.has(item.id)))
+const selectedPaymentTotal = computed(() => selectedPaymentItems.value.reduce((sum, item) => roundMoney(sum + paymentAmountValue(item.id)), 0))
+const hasInvalidPaymentAmount = computed(() => selectedPaymentItems.value.some(paymentAmountInvalid))
+const canSavePayment = computed(() => selectedPaymentItems.value.length > 0 && selectedPaymentTotal.value > 0 && !hasInvalidPaymentAmount.value && !paymentSaving.value)
 
 const templateCounts = computed(() => countTemplates(preview.value?.batches ?? []))
 const previewRows = computed(() => flattenPreviewDetails(preview.value))
@@ -502,6 +518,100 @@ async function loadOrderDetail(id: string) {
     orderDetailMessage.value = error instanceof Error ? error.message : '订单详情加载失败'
   } finally {
     orderDetailLoading.value = false
+  }
+}
+
+async function loadCNPayment(preserveMessage = false) {
+  const cn = orderFilters.value.cn.trim()
+  if (!cn) {
+    cnPaymentMessage.value = 'Enter one CN first.'
+    return
+  }
+  cnPaymentLoading.value = true
+  if (!preserveMessage) cnPaymentMessage.value = ''
+  try {
+    cnPayment.value = await getJSON<CNPaymentResponse>(`/api/admin/payments/cn?cn=${encodeURIComponent(cn)}`)
+    resetPaymentDraft()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = 'Login expired. Please log in again.'
+      return
+    }
+    cnPayment.value = null
+    cnPaymentMessage.value = error instanceof Error ? error.message : 'Payment details failed to load'
+  } finally {
+    cnPaymentLoading.value = false
+  }
+}
+
+function resetPaymentDraft() {
+  selectedPaymentItemIds.value = new Set()
+  paymentAmounts.value = {}
+  paymentPaidAt.value = localDateTimeInputValue()
+  paymentNote.value = ''
+}
+
+function setPaymentItemSelected(item: PaymentItemRow, checked: boolean) {
+  const next = new Set(selectedPaymentItemIds.value)
+  if (checked) {
+    next.add(item.id)
+    paymentAmounts.value = { ...paymentAmounts.value, [item.id]: formatMoney(item.remaining_amount) }
+  } else {
+    next.delete(item.id)
+  }
+  selectedPaymentItemIds.value = next
+}
+
+function paymentAmountNumber(itemID: string) {
+  const raw = String(paymentAmounts.value[itemID] ?? '').trim()
+  if (raw === '') return null
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : null
+}
+
+function paymentAmountValue(itemID: string) {
+  const value = paymentAmountNumber(itemID)
+  return value === null ? 0 : roundMoney(value)
+}
+
+function paymentAmountInvalid(item: PaymentItemRow) {
+  if (!selectedPaymentItemIds.value.has(item.id)) return false
+  const value = paymentAmountNumber(item.id)
+  return value === null || value <= 0 || value - item.remaining_amount > 0.005
+}
+
+async function savePayment() {
+  if (!cnPayment.value || !canSavePayment.value) return
+  const invalidItem = selectedPaymentItems.value.find(paymentAmountInvalid)
+  if (invalidItem) {
+    cnPaymentMessage.value = 'Amount must be greater than 0 and not exceed remaining amount.'
+    return
+  }
+  paymentSaving.value = true
+  cnPaymentMessage.value = ''
+  try {
+    const submittedTotal = selectedPaymentTotal.value
+    const response = await postJSON<CreatePaymentResponse>('/api/admin/payments', {
+      cn: cnPayment.value.user.cn_code,
+      payment_method: paymentMethod.value.trim(),
+      paid_at: paymentPaidAt.value,
+      note: paymentNote.value.trim(),
+      idempotency_key: newIdempotencyKey(),
+      items: selectedPaymentItems.value.map((item) => ({ order_item_id: item.id, amount: paymentAmountValue(item.id) })),
+    })
+    cnPayment.value = { ...cnPayment.value, summary: response.summary, items: response.items }
+    await loadCNPayment(true)
+    cnPaymentMessage.value = response.duplicate ? '检测到重复提交，未新增付款记录。' : `已保存付款 ${formatMoney(submittedTotal)}。`
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = 'Login expired. Please log in again.'
+      return
+    }
+    cnPaymentMessage.value = error instanceof Error ? error.message : 'Payment save failed'
+  } finally {
+    paymentSaving.value = false
   }
 }
 
@@ -900,6 +1010,21 @@ function isExpanded(batchId: string) {
   return expandedBatchIds.value.has(batchId)
 }
 
+function roundMoney(value: number) {
+  return Math.round(value * 100) / 100
+}
+
+function localDateTimeInputValue() {
+  const date = new Date()
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset())
+  return date.toISOString().slice(0, 16)
+}
+
+function newIdempotencyKey() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
 function formatMoney(value: number | null | undefined) {
   return Number(value ?? 0).toFixed(2)
 }
@@ -1282,6 +1407,17 @@ onMounted(() => {
                 <button class="secondary-button" type="button" @click="resetOrderFilters">重置</button>
               </div>
             </form>
+
+            <section class="panel nested-panel payment-entry-panel">
+              <div class="panel__header"><div><h2>Payment entry</h2><p class="muted">Load one CN, select order items, and save full or partial payment.</p></div><button class="secondary-button" type="button" :disabled="cnPaymentLoading" @click="() => loadCNPayment()">{{ cnPaymentLoading ? 'Loading' : 'Load CN payments' }}</button></div>
+              <div v-if="cnPaymentMessage" class="inline-alert">{{ cnPaymentMessage }}</div>
+              <template v-if="cnPayment">
+                <div class="summary-grid compact-summary payment-summary"><article class="metric-tile"><span>CN</span><strong>{{ cnPayment.user.cn_code }}</strong></article><article class="metric-tile"><span>Total</span><strong>{{ formatMoney(cnPayment.summary.total_amount) }}</strong></article><article class="metric-tile"><span>Paid</span><strong>{{ formatMoney(cnPayment.summary.paid_amount) }}</strong></article><article class="metric-tile"><span>Remaining</span><strong>{{ formatMoney(cnPayment.summary.remaining_amount) }}</strong></article><article class="metric-tile"><span>Items U/P/F</span><strong>{{ cnPayment.summary.unpaid_count }} / {{ cnPayment.summary.partial_count }} / {{ cnPayment.summary.paid_count }}</strong></article></div>
+                <div class="payment-form"><label><span>Method</span><input v-model="paymentMethod" placeholder="Alipay / WeChat / Bank" /></label><label><span>Paid at</span><input v-model="paymentPaidAt" type="datetime-local" /></label><label class="payment-note"><span>Note</span><input v-model="paymentNote" maxlength="200" placeholder="Optional" /></label><div class="payment-actions"><span>{{ selectedPaymentItems.length }} items / {{ formatMoney(selectedPaymentTotal) }}</span><button class="primary-button" type="button" :disabled="!canSavePayment" @click="savePayment">{{ paymentSaving ? 'Saving' : 'Save payment' }}</button></div></div>
+                <div class="table-scroll detail-table payment-table"><table><thead><tr><th>Select</th><th>Project / Order</th><th>Item</th><th>Qty</th><th>Due</th><th>Paid</th><th>Remain</th><th>This payment</th><th>Status</th><th>Source</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="10">No payable order items.</td></tr><tr v-for="item in cnPayment.items" :key="item.id" :class="{ muted: item.remaining_amount <= 0 }"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.project_name }}<small>{{ item.order_no }}</small></td><td>{{ item.display_name || item.product_name }}<small>{{ item.category || item.character_name || '-' }}</small></td><td>{{ item.quantity }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div>
+                <section class="panel nested-panel payment-history-panel"><div class="panel__header"><h2>Payment history</h2><span>{{ cnPayment.payments.length }} records</span></div><div class="table-scroll compact-table"><table><thead><tr><th>Amount</th><th>Method</th><th>Paid at</th><th>Admin</th><th>Note</th><th>Status</th></tr></thead><tbody><tr v-if="cnPayment.payments.length === 0"><td colspan="6">No payment records.</td></tr><tr v-for="payment in cnPayment.payments" :key="payment.id"><td>{{ formatMoney(payment.amount) }}</td><td>{{ payment.payment_method || '-' }}</td><td>{{ formatDate(payment.paid_at) }}</td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.note || '-' }}</td><td>{{ payment.status }}</td></tr></tbody></table></div></section>
+              </template>
+            </section>
 
             <div v-if="ordersMessage" class="inline-alert">{{ ordersMessage }}</div>
             <div class="table-scroll history-table">
