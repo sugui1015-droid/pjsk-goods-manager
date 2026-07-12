@@ -129,6 +129,30 @@ func TestCreateMapsValidationErrors(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsEmptyIdempotencyKey(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		createPayment: func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error) {
+			return CreatePaymentResponse{}, ErrIdempotencyKey
+		},
+	})
+	body := bytes.NewBufferString(`{"cn":"CN001","idempotency_key":"","items":[{"order_item_id":"item-1","amount":10}]}`)
+	request := authenticatedRequest(http.MethodPost, "/api/admin/payments", body)
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Create).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	var payload errorResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Error != ErrIdempotencyKey.Error() {
+		t.Fatalf("error = %q, want %q", payload.Error, ErrIdempotencyKey.Error())
+	}
+}
+
 func TestCreateRejectsInvalidPaidAt(t *testing.T) {
 	handler := NewHandler(fakeStore{
 		createPayment: func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error) {
