@@ -33,6 +33,7 @@ type Handler struct {
 	cookieSecure bool
 	now          func() time.Time
 	random       io.Reader
+	limiter      *loginLimiter
 }
 
 type Store interface {
@@ -61,10 +62,26 @@ type loginResponse struct {
 }
 
 type OrdersResponse struct {
-	User          User    `json:"user"`
-	Orders        []Order `json:"orders"`
-	TotalQuantity float64 `json:"total_quantity"`
-	TotalAmount   float64 `json:"total_amount"`
+	User            User            `json:"user"`
+	Orders          []Order         `json:"orders"`
+	Payments        []PaymentRecord `json:"payments"`
+	TotalQuantity   float64         `json:"total_quantity"`
+	TotalAmount     float64         `json:"total_amount"`
+	PaidAmount      float64         `json:"paid_amount"`
+	RemainingAmount float64         `json:"remaining_amount"`
+}
+
+// PaymentRecord is the user-facing view of a payment. It intentionally
+// excludes admin usernames, notes, and void reasons.
+type PaymentRecord struct {
+	ID              string  `json:"id"`
+	PrincipalAmount float64 `json:"principal_amount"`
+	FeeAmount       float64 `json:"fee_amount"`
+	TotalAmount     float64 `json:"total_amount"`
+	PaymentMethod   string  `json:"payment_method,omitempty"`
+	Status          string  `json:"status"`
+	PaidAt          string  `json:"paid_at"`
+	VoidedAt        string  `json:"voided_at,omitempty"`
 }
 
 type Order struct {
@@ -74,25 +91,29 @@ type Order struct {
 	ProjectName     string      `json:"project_name"`
 	TotalQuantity   float64     `json:"total_quantity"`
 	TotalAmount     float64     `json:"total_amount"`
+	PaidAmount      float64     `json:"paid_amount"`
+	RemainingAmount float64     `json:"remaining_amount"`
 	CreatedAt       string      `json:"created_at"`
 	ImportFilenames []string    `json:"import_filenames"`
 	Items           []OrderItem `json:"items"`
 }
 
 type OrderItem struct {
-	ID             string  `json:"id"`
-	GoodsName      string  `json:"goods_name"`
-	Category       string  `json:"category,omitempty"`
-	CharacterName  string  `json:"character_name,omitempty"`
-	SeriesCode     string  `json:"series_code,omitempty"`
-	DisplayName    string  `json:"display_name"`
-	Quantity       float64 `json:"quantity"`
-	UnitPrice      float64 `json:"unit_price"`
-	Amount         float64 `json:"amount"`
-	PaymentStatus  string  `json:"payment_status"`
-	ImportBatchID  string  `json:"import_batch_id,omitempty"`
-	ImportFilename string  `json:"import_filename,omitempty"`
-	SourceSheet    string  `json:"source_sheet,omitempty"`
+	ID              string  `json:"id"`
+	GoodsName       string  `json:"goods_name"`
+	Category        string  `json:"category,omitempty"`
+	CharacterName   string  `json:"character_name,omitempty"`
+	SeriesCode      string  `json:"series_code,omitempty"`
+	DisplayName     string  `json:"display_name"`
+	Quantity        float64 `json:"quantity"`
+	UnitPrice       float64 `json:"unit_price"`
+	Amount          float64 `json:"amount"`
+	PaidAmount      float64 `json:"paid_amount"`
+	RemainingAmount float64 `json:"remaining_amount"`
+	PaymentStatus   string  `json:"payment_status"`
+	ImportBatchID   string  `json:"import_batch_id,omitempty"`
+	ImportFilename  string  `json:"import_filename,omitempty"`
+	SourceSheet     string  `json:"source_sheet,omitempty"`
 }
 
 type errorResponse struct {
@@ -110,6 +131,7 @@ func NewHandler(store Store, sessionTTL time.Duration, cookieSecure bool) *Handl
 		cookieSecure: cookieSecure,
 		now:          time.Now,
 		random:       rand.Reader,
+		limiter:      newLoginLimiter(),
 	}
 }
 
@@ -134,6 +156,12 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := clientIP(r)
+	if !h.limiter.allow(ip, cn, h.now()) {
+		writeError(w, http.StatusTooManyRequests, "尝试次数过多，请稍后再试")
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	user, err := h.store.FindUserByCN(ctx, cn)
@@ -147,12 +175,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if err == nil && user.QueryCodeHash != nil && *user.QueryCodeHash != "" {
 		passwordHash = []byte(*user.QueryCodeHash)
 	} else if err == nil {
+		h.limiter.recordFailure(ip, cn, h.now())
 		writeError(w, http.StatusUnauthorized, "该 CN 尚未设置查询码，请联系管理员")
 		return
 	}
 
 	matches := bcrypt.CompareHashAndPassword(passwordHash, []byte(request.QueryCode)) == nil
 	if errors.Is(err, ErrNotFound) || user.Status != "active" || !matches {
+		h.limiter.recordFailure(ip, cn, h.now())
 		writeError(w, http.StatusUnauthorized, "CN 或查询码不正确")
 		return
 	}
@@ -170,6 +200,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.limiter.recordSuccess(ip, cn)
 	h.setSessionCookie(w, token, expiresAt)
 	user.QueryCodeHash = nil
 	writeJSON(w, http.StatusOK, loginResponse{User: user})
@@ -315,7 +346,7 @@ func (s *PostgresStore) ListOrdersForUser(ctx context.Context, userID string) (O
 	}
 	defer rows.Close()
 
-	response := OrdersResponse{Orders: []Order{}}
+	response := OrdersResponse{Orders: []Order{}, Payments: []PaymentRecord{}}
 	for rows.Next() {
 		var order Order
 		if err := rows.Scan(
@@ -335,15 +366,38 @@ func (s *PostgresStore) ListOrdersForUser(ctx context.Context, userID string) (O
 			return OrdersResponse{}, err
 		}
 		order.Items = items
+		for _, item := range items {
+			order.PaidAmount = round2(order.PaidAmount + item.PaidAmount)
+			order.RemainingAmount = round2(order.RemainingAmount + item.RemainingAmount)
+		}
 		response.TotalQuantity += order.TotalQuantity
 		response.TotalAmount = round2(response.TotalAmount + order.TotalAmount)
+		response.PaidAmount = round2(response.PaidAmount + order.PaidAmount)
+		response.RemainingAmount = round2(response.RemainingAmount + order.RemainingAmount)
 		response.Orders = append(response.Orders, order)
 	}
-	return response, rows.Err()
+	if err := rows.Err(); err != nil {
+		return OrdersResponse{}, err
+	}
+
+	payments, err := s.listPaymentsForUser(ctx, userID)
+	if err != nil {
+		return OrdersResponse{}, err
+	}
+	response.Payments = payments
+	return response, nil
 }
 
 func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]OrderItem, error) {
 	rows, err := s.pool.Query(ctx, `
+		with paid_by_item as (
+			select
+				pi.order_item_id,
+				coalesce(sum(pi.applied_amount) filter (where p.status = 'approved'), 0) as paid_amount
+			from payment_items pi
+			join payments p on p.id = pi.payment_id
+			group by pi.order_item_id
+		)
 		select
 			oi.id::text,
 			product.name,
@@ -354,6 +408,8 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			oi.quantity::float8,
 			oi.unit_price::float8,
 			oi.amount::float8,
+			least(coalesce(paid.paid_amount, 0), oi.amount)::float8,
+			greatest(oi.amount - coalesce(paid.paid_amount, 0), 0)::float8,
 			oi.payment_status,
 			coalesce(oi.import_batch_id::text, ''),
 			coalesce(ib.original_filename, ''),
@@ -361,6 +417,7 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 		from order_items oi
 		join products product on product.id = oi.product_id
 		left join import_batches ib on ib.id = oi.import_batch_id
+		left join paid_by_item paid on paid.order_item_id = oi.id
 		where oi.order_id = $1::uuid
 		  and oi.revoked_at is null
 		order by product.sort_order, product.name, product.character_name, oi.created_at, oi.id
@@ -383,6 +440,8 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			&item.Quantity,
 			&item.UnitPrice,
 			&item.Amount,
+			&item.PaidAmount,
+			&item.RemainingAmount,
 			&item.PaymentStatus,
 			&item.ImportBatchID,
 			&item.ImportFilename,
@@ -390,9 +449,56 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 		); err != nil {
 			return nil, err
 		}
+		item.Amount = round2(item.Amount)
+		item.PaidAmount = round2(item.PaidAmount)
+		item.RemainingAmount = round2(item.RemainingAmount)
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) ([]PaymentRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		select
+			p.id::text,
+			p.submitted_amount::float8,
+			p.fee_amount::float8,
+			p.payable_amount::float8,
+			coalesce(p.payment_method, ''),
+			p.status,
+			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(to_char(p.voided_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
+		from payments p
+		where p.user_id = $1::uuid
+		order by coalesce(p.paid_at, p.approved_at, p.submitted_at) desc, p.created_at desc, p.id desc
+		limit 100
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := []PaymentRecord{}
+	for rows.Next() {
+		var record PaymentRecord
+		if err := rows.Scan(
+			&record.ID,
+			&record.PrincipalAmount,
+			&record.FeeAmount,
+			&record.TotalAmount,
+			&record.PaymentMethod,
+			&record.Status,
+			&record.PaidAt,
+			&record.VoidedAt,
+		); err != nil {
+			return nil, err
+		}
+		record.PrincipalAmount = round2(record.PrincipalAmount)
+		record.FeeAmount = round2(record.FeeAmount)
+		record.TotalAmount = round2(record.TotalAmount)
+		records = append(records, record)
+	}
+	return records, rows.Err()
 }
 
 func normalizeCN(value string) string {

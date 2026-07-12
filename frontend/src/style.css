@@ -1153,6 +1153,15 @@ th {
   opacity: 0.64;
 }
 
+.voided-row td {
+  color: #98a2b3;
+  text-decoration: line-through;
+}
+
+.voided-row td:last-child {
+  text-decoration: none;
+}
+
 .payment-history-panel {
   background: #ffffff;
 }

@@ -1885,6 +1885,8 @@ onMounted(() => {
             <article class="metric-tile"><span>订单数</span><strong>{{ queryOrders.orders.length }}</strong></article>
             <article class="metric-tile"><span>总件数</span><strong>{{ queryOrders.total_quantity }}</strong></article>
             <article class="metric-tile"><span>总金额</span><strong>{{ formatMoney(queryOrders.total_amount) }}</strong></article>
+            <article class="metric-tile"><span>已付金额</span><strong>{{ formatMoney(queryOrders.paid_amount) }}</strong></article>
+            <article class="metric-tile"><span>未付金额</span><strong class="danger">{{ formatMoney(queryOrders.remaining_amount) }}</strong></article>
           </section>
 
           <section v-for="order in queryOrders.orders" :key="order.id" class="panel query-order-card">
@@ -1893,13 +1895,13 @@ onMounted(() => {
                 <h2>{{ order.project_name }}</h2>
                 <p class="muted">{{ order.order_no }} / {{ formatDate(order.created_at) }}</p>
               </div>
-              <div class="query-order-total"><strong>{{ formatMoney(order.total_amount) }}</strong><span>{{ order.total_quantity }} 件</span></div>
+              <div class="query-order-total"><strong>{{ formatMoney(order.total_amount) }}</strong><span>{{ order.total_quantity }} 件 / 已付 {{ formatMoney(order.paid_amount) }} / 未付 {{ formatMoney(order.remaining_amount) }}</span></div>
             </div>
             <p class="muted">来源：{{ queryOrderSources(order) }}</p>
             <div class="table-scroll detail-table">
               <table>
                 <thead>
-                  <tr><th>谷子名称</th><th>分类</th><th>角色</th><th>数量</th><th>单价</th><th>小计</th><th>付款状态</th><th>所属批次</th></tr>
+                  <tr><th>谷子名称</th><th>分类</th><th>角色</th><th>数量</th><th>单价</th><th>小计</th><th>已付</th><th>剩余未付</th><th>付款状态</th><th>所属批次</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="item in order.items" :key="item.id">
@@ -1909,6 +1911,8 @@ onMounted(() => {
                     <td>{{ item.quantity }}</td>
                     <td>{{ formatMoney(item.unit_price) }}</td>
                     <td>{{ formatMoney(item.amount) }}</td>
+                    <td>{{ formatMoney(item.paid_amount) }}</td>
+                    <td :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</td>
                     <td>{{ queryPaymentStatusLabel(item.payment_status) }}</td>
                     <td>{{ item.import_filename || item.import_batch_id || '-' }}<small>{{ item.source_sheet || '' }}</small></td>
                   </tr>
@@ -1917,6 +1921,27 @@ onMounted(() => {
             </div>
           </section>
           <section v-if="queryOrders.orders.length === 0" class="panel"><p class="muted">当前 CN 暂无可查询订单。</p></section>
+
+          <section v-if="queryOrders.payments.length > 0" class="panel query-payments-card">
+            <div class="panel__header"><div><h2>付款历史</h2><p class="muted">已撤销的付款不计入有效已付款金额。</p></div></div>
+            <div class="table-scroll history-table">
+              <table>
+                <thead>
+                  <tr><th>付款时间</th><th>本金</th><th>手续费</th><th>实付金额</th><th>付款方式</th><th>状态</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="payment in queryOrders.payments" :key="payment.id" :class="{ 'voided-row': payment.status === 'voided' }">
+                    <td>{{ formatDate(payment.paid_at) }}</td>
+                    <td>{{ formatMoney(payment.principal_amount) }}</td>
+                    <td>{{ formatMoney(payment.fee_amount) }}</td>
+                    <td>{{ formatMoney(payment.total_amount) }}</td>
+                    <td>{{ paymentMethodLabel(payment.payment_method || '') }}</td>
+                    <td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </template>
       </template>
 

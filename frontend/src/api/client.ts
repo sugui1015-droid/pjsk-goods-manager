@@ -457,6 +457,8 @@ export type QueryOrderItem = {
   quantity: number
   unit_price: number
   amount: number
+  paid_amount: number
+  remaining_amount: number
   payment_status: string
   import_batch_id?: string
   import_filename?: string
@@ -470,14 +472,30 @@ export type QueryOrder = {
   project_name: string
   total_quantity: number
   total_amount: number
+  paid_amount: number
+  remaining_amount: number
   created_at: string
   import_filenames: string[]
   items: QueryOrderItem[]
 }
 
+export type QueryPaymentRecord = {
+  id: string
+  principal_amount: number
+  fee_amount: number
+  total_amount: number
+  payment_method?: string
+  status: string
+  paid_at: string
+  voided_at?: string
+}
+
 export type QueryOrdersResponse = {
   user: QueryUser
   orders: QueryOrder[]
+  payments: QueryPaymentRecord[]
   total_quantity: number
   total_amount: number
+  paid_amount: number
+  remaining_amount: number
 }
