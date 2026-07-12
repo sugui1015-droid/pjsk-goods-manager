@@ -376,6 +376,52 @@ export type CreatePaymentResponse = {
 }
 
 
+export type PaymentListItem = {
+  id: string
+  cn_code: string
+  display_name?: string
+  amount: number
+  payment_method?: string
+  status: string
+  paid_at: string
+  created_by?: string
+  note?: string
+  payment_item_count: number
+  created_at: string
+}
+
+export type PaymentListResponse = {
+  items: PaymentListItem[]
+}
+
+export type PaymentDetailItem = {
+  id: string
+  order_item_id: string
+  order_id: string
+  order_no: string
+  project_name: string
+  product_name: string
+  character_name?: string
+  category?: string
+  series_code?: string
+  display_name?: string
+  sku?: string
+  applied_amount: number
+  payment_status: string
+  import_filename?: string
+  source_sheet?: string
+  source_row_key?: string
+}
+
+export type PaymentDetail = PaymentListItem & {
+  user_id: string
+  items: PaymentDetailItem[]
+}
+
+export type PaymentDetailResponse = {
+  payment: PaymentDetail
+}
+
 export type QueryUser = {
   id: string
   cn_code: string

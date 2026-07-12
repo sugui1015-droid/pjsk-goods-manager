@@ -19,14 +19,15 @@ import (
 )
 
 var (
-	ErrCNRequired     = errors.New("cn is required")
-	ErrUserNotFound   = errors.New("cn not found")
-	ErrNoPaymentItems = errors.New("payment items are required")
-	ErrInvalidAmount  = errors.New("payment amount must be greater than 0")
-	ErrOverPayment    = errors.New("payment amount exceeds remaining amount")
-	ErrItemMismatch   = errors.New("order item does not belong to this cn")
-	ErrIdempotencyKey = errors.New("idempotency key is required")
-	ErrPaymentTime    = errors.New("payment time is invalid")
+	ErrCNRequired      = errors.New("cn is required")
+	ErrUserNotFound    = errors.New("cn not found")
+	ErrNoPaymentItems  = errors.New("payment items are required")
+	ErrInvalidAmount   = errors.New("payment amount must be greater than 0")
+	ErrOverPayment     = errors.New("payment amount exceeds remaining amount")
+	ErrItemMismatch    = errors.New("order item does not belong to this cn")
+	ErrIdempotencyKey  = errors.New("idempotency key is required")
+	ErrPaymentTime     = errors.New("payment time is invalid")
+	ErrPaymentNotFound = errors.New("payment not found")
 )
 
 type Handler struct {
@@ -36,6 +37,8 @@ type Handler struct {
 type Store interface {
 	GetCNPayment(context.Context, string) (CNPaymentResponse, error)
 	CreatePayment(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error)
+	ListPaymentRecords(context.Context, PaymentFilters) (PaymentListResponse, error)
+	GetPaymentDetail(context.Context, string) (PaymentDetailResponse, error)
 }
 
 type CNPaymentResponse struct {
@@ -116,12 +119,128 @@ type CreatePaymentResponse struct {
 	Items     []PaymentItemRow `json:"items"`
 }
 
+type PaymentFilters struct {
+	CN            string
+	PaymentMethod string
+	Status        string
+	PaidFrom      string
+	PaidTo        string
+	Limit         int
+}
+
+type PaymentListItem struct {
+	ID               string  `json:"id"`
+	CNCode           string  `json:"cn_code"`
+	DisplayName      string  `json:"display_name,omitempty"`
+	Amount           float64 `json:"amount"`
+	PaymentMethod    string  `json:"payment_method,omitempty"`
+	Status           string  `json:"status"`
+	PaidAt           string  `json:"paid_at"`
+	CreatedBy        string  `json:"created_by,omitempty"`
+	Note             string  `json:"note,omitempty"`
+	PaymentItemCount int     `json:"payment_item_count"`
+	CreatedAt        string  `json:"created_at"`
+}
+
+type PaymentListResponse struct {
+	Items []PaymentListItem `json:"items"`
+}
+
+type PaymentDetailResponse struct {
+	Payment PaymentDetail `json:"payment"`
+}
+
+type PaymentDetail struct {
+	PaymentListItem
+	UserID string              `json:"user_id"`
+	Items  []PaymentDetailItem `json:"items"`
+}
+
+type PaymentDetailItem struct {
+	ID             string  `json:"id"`
+	OrderItemID    string  `json:"order_item_id"`
+	OrderID        string  `json:"order_id"`
+	OrderNo        string  `json:"order_no"`
+	ProjectName    string  `json:"project_name"`
+	ProductName    string  `json:"product_name"`
+	CharacterName  string  `json:"character_name,omitempty"`
+	Category       string  `json:"category,omitempty"`
+	SeriesCode     string  `json:"series_code,omitempty"`
+	DisplayName    string  `json:"display_name,omitempty"`
+	SKU            string  `json:"sku,omitempty"`
+	AppliedAmount  float64 `json:"applied_amount"`
+	PaymentStatus  string  `json:"payment_status"`
+	ImportFilename string  `json:"import_filename,omitempty"`
+	SourceSheet    string  `json:"source_sheet,omitempty"`
+	SourceRowKey   string  `json:"source_row_key,omitempty"`
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
 }
 
 func NewHandler(store Store) *Handler {
 	return &Handler{store: store}
+}
+
+func (h *Handler) Collection(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.List(w, r)
+	case http.MethodPost:
+		h.Create(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+	}
+}
+
+func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	filters, err := paymentFiltersFromRequest(r)
+	if err != nil {
+		writePaymentError(w, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	response, err := h.store.ListPaymentRecords(ctx, filters)
+	if err != nil {
+		log.Printf("list payments: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	paymentID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/payments/"), "/")
+	if paymentID == "" || strings.Contains(paymentID, "/") {
+		writeError(w, http.StatusNotFound, "payment not found")
+		return
+	}
+	if !isUUIDLike(paymentID) {
+		writeError(w, http.StatusBadRequest, "payment id is invalid")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	response, err := h.store.GetPaymentDetail(ctx, paymentID)
+	if err != nil {
+		writePaymentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) CN(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +286,67 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func paymentFiltersFromRequest(r *http.Request) (PaymentFilters, error) {
+	query := r.URL.Query()
+	limit, _ := strconv.Atoi(strings.TrimSpace(query.Get("limit")))
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	paidFrom := strings.TrimSpace(query.Get("paid_from"))
+	paidTo := strings.TrimSpace(query.Get("paid_to"))
+	if err := validateOptionalPaymentTime(paidFrom); err != nil {
+		return PaymentFilters{}, err
+	}
+	if err := validateOptionalPaymentTime(paidTo); err != nil {
+		return PaymentFilters{}, err
+	}
+	return PaymentFilters{
+		CN:            strings.TrimSpace(query.Get("cn")),
+		PaymentMethod: strings.TrimSpace(query.Get("payment_method")),
+		Status:        strings.TrimSpace(query.Get("status")),
+		PaidFrom:      paidFrom,
+		PaidTo:        paidTo,
+		Limit:         limit,
+	}, nil
+}
+
+func validateOptionalPaymentTime(value string) error {
+	if value == "" {
+		return nil
+	}
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02T15:04",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if _, err := time.Parse(layout, value); err == nil {
+			return nil
+		}
+	}
+	return ErrPaymentTime
+}
+
+func isUUIDLike(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 type PostgresStore struct {
@@ -329,6 +509,166 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePayment
 		return CreatePaymentResponse{}, err
 	}
 	return CreatePaymentResponse{PaymentID: paymentID, Status: "approved", Summary: summary, Items: items}, nil
+}
+
+func (s *PostgresStore) ListPaymentRecords(ctx context.Context, filters PaymentFilters) (PaymentListResponse, error) {
+	conditions := []string{"1 = 1"}
+	args := []any{}
+	addArg := func(value any) string {
+		args = append(args, value)
+		return "$" + strconv.Itoa(len(args))
+	}
+
+	if filters.CN != "" {
+		placeholder := addArg("%" + filters.CN + "%")
+		conditions = append(conditions, "(u.cn_code ilike "+placeholder+" or coalesce(u.display_name, '') ilike "+placeholder+")")
+	}
+	if filters.PaymentMethod != "" {
+		placeholder := addArg("%" + filters.PaymentMethod + "%")
+		conditions = append(conditions, "coalesce(p.payment_method, '') ilike "+placeholder)
+	}
+	if filters.Status != "" {
+		placeholder := addArg(filters.Status)
+		conditions = append(conditions, "p.status = "+placeholder)
+	}
+	if filters.PaidFrom != "" {
+		placeholder := addArg(filters.PaidFrom)
+		conditions = append(conditions, "coalesce(p.paid_at, p.approved_at, p.submitted_at) >= "+placeholder+"::timestamptz")
+	}
+	if filters.PaidTo != "" {
+		placeholder := addArg(filters.PaidTo)
+		conditions = append(conditions, "coalesce(p.paid_at, p.approved_at, p.submitted_at) < "+placeholder+"::timestamptz")
+	}
+	limitPlaceholder := addArg(filters.Limit)
+
+	rows, err := s.pool.Query(ctx, `
+		select
+			p.id::text,
+			u.cn_code,
+			coalesce(u.display_name, ''),
+			p.submitted_amount::float8,
+			coalesce(p.payment_method, ''),
+			p.status,
+			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(a.username, ''),
+			coalesce(p.note, ''),
+			count(pi.id)::int,
+			to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		from payments p
+		join users u on u.id = p.user_id
+		left join admins a on a.id = coalesce(p.created_by, p.approved_by)
+		left join payment_items pi on pi.payment_id = p.id
+		where `+strings.Join(conditions, " and ")+`
+		group by p.id, u.cn_code, u.display_name, p.submitted_amount, p.payment_method, p.status, p.paid_at, p.approved_at, p.submitted_at, a.username, p.note, p.created_at
+		order by coalesce(p.paid_at, p.approved_at, p.submitted_at) desc, p.created_at desc, p.id desc
+		limit `+limitPlaceholder, args...)
+	if err != nil {
+		return PaymentListResponse{}, err
+	}
+	defer rows.Close()
+
+	response := PaymentListResponse{Items: []PaymentListItem{}}
+	for rows.Next() {
+		var item PaymentListItem
+		if err := rows.Scan(&item.ID, &item.CNCode, &item.DisplayName, &item.Amount, &item.PaymentMethod, &item.Status, &item.PaidAt, &item.CreatedBy, &item.Note, &item.PaymentItemCount, &item.CreatedAt); err != nil {
+			return PaymentListResponse{}, err
+		}
+		item.Amount = round2(item.Amount)
+		response.Items = append(response.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return PaymentListResponse{}, err
+	}
+	return response, nil
+}
+
+func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) (PaymentDetailResponse, error) {
+	var detail PaymentDetail
+	err := s.pool.QueryRow(ctx, `
+		select
+			p.id::text,
+			p.user_id::text,
+			u.cn_code,
+			coalesce(u.display_name, ''),
+			p.submitted_amount::float8,
+			coalesce(p.payment_method, ''),
+			p.status,
+			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(a.username, ''),
+			coalesce(p.note, ''),
+			(select count(*)::int from payment_items pi_count where pi_count.payment_id = p.id),
+			to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		from payments p
+		join users u on u.id = p.user_id
+		left join admins a on a.id = coalesce(p.created_by, p.approved_by)
+		where p.id = $1::uuid
+	`, paymentID).Scan(
+		&detail.ID,
+		&detail.UserID,
+		&detail.CNCode,
+		&detail.DisplayName,
+		&detail.Amount,
+		&detail.PaymentMethod,
+		&detail.Status,
+		&detail.PaidAt,
+		&detail.CreatedBy,
+		&detail.Note,
+		&detail.PaymentItemCount,
+		&detail.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentDetailResponse{}, ErrPaymentNotFound
+	}
+	if err != nil {
+		return PaymentDetailResponse{}, err
+	}
+	detail.Amount = round2(detail.Amount)
+
+	rows, err := s.pool.Query(ctx, `
+		select
+			pi.id::text,
+			oi.id::text,
+			o.id::text,
+			o.order_no,
+			project.name,
+			product.name,
+			coalesce(product.character_name, ''),
+			coalesce(product.category, ''),
+			coalesce(product.series_code, ''),
+			case when coalesce(product.category, '') = '' then product.name else product.name || '-' || product.category end,
+			coalesce(product.sku, ''),
+			pi.applied_amount::float8,
+			oi.payment_status,
+			coalesce(ib.original_filename, ''),
+			coalesce(oi.source_sheet, ''),
+			coalesce(oi.source_row_key, '')
+		from payment_items pi
+		join order_items oi on oi.id = pi.order_item_id
+		join orders o on o.id = oi.order_id
+		join projects project on project.id = o.project_id
+		join products product on product.id = oi.product_id
+		left join import_batches ib on ib.id = oi.import_batch_id
+		where pi.payment_id = $1::uuid
+		order by o.order_no, product.sort_order, product.name, oi.created_at, pi.id
+	`, paymentID)
+	if err != nil {
+		return PaymentDetailResponse{}, err
+	}
+	defer rows.Close()
+
+	detail.Items = []PaymentDetailItem{}
+	for rows.Next() {
+		var item PaymentDetailItem
+		if err := rows.Scan(&item.ID, &item.OrderItemID, &item.OrderID, &item.OrderNo, &item.ProjectName, &item.ProductName, &item.CharacterName, &item.Category, &item.SeriesCode, &item.DisplayName, &item.SKU, &item.AppliedAmount, &item.PaymentStatus, &item.ImportFilename, &item.SourceSheet, &item.SourceRowKey); err != nil {
+			return PaymentDetailResponse{}, err
+		}
+		item.AppliedAmount = round2(item.AppliedAmount)
+		detail.Items = append(detail.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return PaymentDetailResponse{}, err
+	}
+	return PaymentDetailResponse{Payment: detail}, nil
 }
 
 func (s *PostgresStore) findUser(ctx context.Context, cn string) (PaymentUser, error) {
@@ -677,7 +1017,7 @@ func writePaymentError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrIdempotencyKey),
 		errors.Is(err, ErrPaymentTime):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, ErrUserNotFound):
+	case errors.Is(err, ErrUserNotFound), errors.Is(err, ErrPaymentNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	default:
 		log.Printf("payment handler error: %v", err)

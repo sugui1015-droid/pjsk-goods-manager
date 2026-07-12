@@ -22,7 +22,10 @@ import {
   type OrderDetailResponse,
   type OrderListResponse,
   type OrderSummary,
+  type PaymentDetailResponse,
   type PaymentItemRow,
+  type PaymentListItem,
+  type PaymentListResponse,
   type QueryLoginResponse,
   type QueryOrdersResponse,
   type QueryUser,
@@ -48,7 +51,7 @@ import {
 const maxExcelSize = 20 * 1024 * 1024
 const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
-type RouteName = 'home' | 'query' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail'
+type RouteName = 'home' | 'query' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail' | 'admin-payments' | 'admin-payment-detail'
 type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
 type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
 type QuickFilterGroup = { key: TextFilterKey; label: string; options: string[] }
@@ -75,6 +78,7 @@ const activeView = ref<'overview' | 'ops' | 'legacy'>('overview')
 const routeName = ref<RouteName>(routeFromPath(window.location.pathname))
 const routeImportID = ref(importIDFromPath(window.location.pathname))
 const routeOrderID = ref(orderIDFromPath(window.location.pathname))
+const routePaymentID = ref(paymentIDFromPath(window.location.pathname))
 
 const admin = ref<Admin | null>(null)
 const authChecked = ref(false)
@@ -140,6 +144,20 @@ const paymentMethod = ref('Alipay')
 const paymentPaidAt = ref(localDateTimeInputValue())
 const paymentNote = ref('')
 const paymentSaving = ref(false)
+
+const paymentRecordsLoading = ref(false)
+const paymentRecordsMessage = ref('')
+const paymentRecords = ref<PaymentListItem[]>([])
+const paymentDetailLoading = ref(false)
+const paymentDetailMessage = ref('')
+const paymentDetail = ref<PaymentDetailResponse | null>(null)
+const paymentFilters = ref({
+  cn: '',
+  paymentMethod: '',
+  status: '',
+  paidFrom: '',
+  paidTo: '',
+})
 
 const queryCN = ref('')
 const queryCode = ref('')
@@ -217,6 +235,8 @@ function routeFromPath(path: string): RouteName {
   if (path === '/query') return 'query'
   if (path === '/admin/orders') return 'admin-orders'
   if (path.startsWith('/admin/orders/')) return 'admin-order-detail'
+  if (path === '/admin/payments') return 'admin-payments'
+  if (path.startsWith('/admin/payments/')) return 'admin-payment-detail'
   if (path === '/admin/imports/history') return 'admin-import-history'
   if (path.startsWith('/admin/imports/') && path !== '/admin/imports/preview') return 'admin-import-detail'
   if (path === '/admin/imports') return 'admin-imports'
@@ -234,11 +254,17 @@ function orderIDFromPath(path: string) {
   return decodeURIComponent(path.replace('/admin/orders/', '').replace(/\/$/, ''))
 }
 
+function paymentIDFromPath(path: string) {
+  if (!path.startsWith('/admin/payments/')) return ''
+  return decodeURIComponent(path.replace('/admin/payments/', '').replace(/\/$/, ''))
+}
+
 function navigate(path: string) {
   window.history.pushState(null, '', path)
   routeName.value = routeFromPath(path)
   routeImportID.value = importIDFromPath(path)
   routeOrderID.value = orderIDFromPath(path)
+  routePaymentID.value = paymentIDFromPath(path)
   if (isAdminRoute.value) void handleRouteEntered()
   else void handlePublicRouteEntered()
 }
@@ -251,6 +277,8 @@ async function handleRouteEntered() {
   if (routeName.value === 'admin-import-detail' && routeImportID.value) await loadDetail(routeImportID.value)
   if (routeName.value === 'admin-orders') await loadOrders()
   if (routeName.value === 'admin-order-detail' && routeOrderID.value) await loadOrderDetail(routeOrderID.value)
+  if (routeName.value === 'admin-payments') await loadPaymentRecords()
+  if (routeName.value === 'admin-payment-detail' && routePaymentID.value) await loadPaymentDetail(routePaymentID.value)
 }
 
 async function handlePublicRouteEntered() {
@@ -328,6 +356,8 @@ async function logout() {
   importDetail.value = null
   orderItems.value = []
   orderDetail.value = null
+  paymentRecords.value = []
+  paymentDetail.value = null
 }
 
 function onFileChange(event: Event) {
@@ -501,6 +531,65 @@ async function loadOrders() {
   } finally {
     ordersLoading.value = false
   }
+}
+
+function paymentQueryString() {
+  const query = new URLSearchParams()
+  const filters = paymentFilters.value
+  if (filters.cn.trim()) query.set('cn', filters.cn.trim())
+  if (filters.paymentMethod.trim()) query.set('payment_method', filters.paymentMethod.trim())
+  if (filters.status.trim()) query.set('status', filters.status.trim())
+  if (filters.paidFrom) query.set('paid_from', filters.paidFrom)
+  if (filters.paidTo) query.set('paid_to', filters.paidTo)
+  const encoded = query.toString()
+  return encoded ? '?' + encoded : ''
+}
+
+async function loadPaymentRecords() {
+  paymentRecordsLoading.value = true
+  paymentRecordsMessage.value = ''
+  try {
+    const response = await getJSON<PaymentListResponse>('/api/admin/payments' + paymentQueryString())
+    paymentRecords.value = response.items ?? []
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = 'Login expired. Please log in again.'
+      return
+    }
+    paymentRecordsMessage.value = error instanceof Error ? error.message : 'Payment records failed to load'
+  } finally {
+    paymentRecordsLoading.value = false
+  }
+}
+
+async function loadPaymentDetail(id: string) {
+  paymentDetailLoading.value = true
+  paymentDetailMessage.value = ''
+  paymentDetail.value = null
+  try {
+    paymentDetail.value = await getJSON<PaymentDetailResponse>('/api/admin/payments/' + encodeURIComponent(id))
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = 'Login expired. Please log in again.'
+      return
+    }
+    paymentDetailMessage.value = error instanceof Error ? error.message : 'Payment detail failed to load'
+  } finally {
+    paymentDetailLoading.value = false
+  }
+}
+
+function resetPaymentFilters() {
+  paymentFilters.value = {
+    cn: '',
+    paymentMethod: '',
+    status: '',
+    paidFrom: '',
+    paidTo: '',
+  }
+  void loadPaymentRecords()
 }
 
 async function loadOrderDetail(id: string) {
@@ -1113,6 +1202,7 @@ window.addEventListener('popstate', () => {
   routeName.value = routeFromPath(window.location.pathname)
   routeImportID.value = importIDFromPath(window.location.pathname)
   routeOrderID.value = orderIDFromPath(window.location.pathname)
+  routePaymentID.value = paymentIDFromPath(window.location.pathname)
   void handleRouteEntered()
 })
 
@@ -1148,6 +1238,7 @@ onMounted(() => {
       <button :class="{ active: routeName === 'admin-imports' }" type="button" @click="navigate('/admin/imports')">Excel 导入预览</button>
       <button :class="{ active: routeName === 'admin-import-history' || routeName === 'admin-import-detail' }" type="button" @click="navigate('/admin/imports/history')">导入历史</button>
       <button :class="{ active: routeName === 'admin-orders' || routeName === 'admin-order-detail' }" type="button" @click="navigate('/admin/orders')">订单查询</button>
+      <button :class="{ active: routeName === 'admin-payments' || routeName === 'admin-payment-detail' }" type="button" @click="navigate('/admin/payments')">付款记录</button>
     </nav>
 
     <main v-if="isAdminRoute" class="workspace">
@@ -1371,6 +1462,23 @@ onMounted(() => {
           <section v-if="preview" class="panel">
             <div class="panel__header"><h2>问题列表</h2><div class="filter-buttons"><button :class="{ active: issueFilter === 'all' }" type="button" @click="issueFilter = 'all'">全部</button><button :class="{ active: issueFilter === 'row_error' }" type="button" @click="issueFilter = 'row_error'">行级错误</button><button :class="{ active: issueFilter === 'fatal_error' }" type="button" @click="issueFilter = 'fatal_error'">致命错误</button><button :class="{ active: issueFilter === 'warning' }" type="button" @click="issueFilter = 'warning'">提醒</button><button :class="{ active: issueFilter === 'notice' }" type="button" @click="issueFilter = 'notice'">提示</button></div></div>
             <div class="issue-list"><article v-if="filteredIssues.length === 0" class="issue-row">当前筛选下没有问题。</article><article v-for="issue in filteredIssues" :key="`${issue.level}-${issue.code}-${issue.sheet_name}-${issue.batch_id}-${issue.row_number}-${issue.column}`" class="issue-row" :data-level="issue.level"><strong>{{ issueLevelLabel(issue.level) }} / {{ issue.code }}</strong><span>{{ issue.message }}</span><small>{{ issue.code === 'image_formula_ignored' ? '图片公式已忽略 / ' : '' }}{{ issueContext(issue) }}</small></article></div>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-payments'">
+          <section class="panel">
+            <div class="panel__header"><div><h2>付款记录</h2><p class="muted">只读查看付款流水和关联明细；本页不提供删除、作废或冲正。</p></div><button class="secondary-button" type="button" :disabled="paymentRecordsLoading" @click="loadPaymentRecords">{{ paymentRecordsLoading ? '加载中' : '刷新' }}</button></div>
+            <form class="order-filters" @submit.prevent="loadPaymentRecords"><label><span>CN</span><input v-model="paymentFilters.cn" placeholder="CN 或显示名" /></label><label><span>付款方式</span><input v-model="paymentFilters.paymentMethod" placeholder="Alipay / WeChat / Bank" /></label><label><span>付款状态</span><select v-model="paymentFilters.status"><option value="">全部</option><option value="approved">approved</option><option value="submitted">submitted</option><option value="rejected">rejected</option><option value="voided">voided</option></select></label><label><span>付款开始时间</span><input v-model="paymentFilters.paidFrom" type="datetime-local" /></label><label><span>付款结束时间</span><input v-model="paymentFilters.paidTo" type="datetime-local" /></label><div class="filter-actions"><button class="primary-button" type="submit" :disabled="paymentRecordsLoading">查询</button><button class="secondary-button" type="button" @click="resetPaymentFilters">重置</button></div></form>
+            <div v-if="paymentRecordsMessage" class="inline-alert">{{ paymentRecordsMessage }}</div>
+            <div class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th>CN</th><th>付款金额</th><th>付款方式</th><th>状态</th><th>操作管理员</th><th>备注</th><th>关联明细数量</th><th></th></tr></thead><tbody><tr v-if="!paymentRecordsLoading && paymentRecords.length === 0"><td colspan="9">暂无付款记录。</td></tr><tr v-for="payment in paymentRecords" :key="payment.id"><td>{{ formatDate(payment.paid_at) }}</td><td><strong>{{ payment.cn_code }}</strong><small>{{ payment.display_name || '-' }}</small></td><td>{{ formatMoney(payment.amount) }}</td><td>{{ payment.payment_method || '-' }}</td><td><span class="status-chip" :data-state="payment.status">{{ statusLabel(payment.status) }}</span></td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.note || '-' }}</td><td>{{ payment.payment_item_count }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-payment-detail'">
+          <section class="panel">
+            <div class="panel__header"><div><h2>付款详情</h2><p class="muted">{{ routePaymentID }}</p></div><button class="secondary-button" type="button" @click="navigate('/admin/payments')">返回付款记录</button></div>
+            <div v-if="paymentDetailMessage" class="inline-alert">{{ paymentDetailMessage }}</div><p v-if="paymentDetailLoading" class="muted">正在加载付款详情。</p>
+            <template v-if="paymentDetail"><div class="summary-grid"><article class="metric-tile"><span>CN</span><strong>{{ paymentDetail.payment.cn_code }}</strong></article><article class="metric-tile"><span>付款金额</span><strong>{{ formatMoney(paymentDetail.payment.amount) }}</strong></article><article class="metric-tile"><span>付款方式</span><strong>{{ paymentDetail.payment.payment_method || '-' }}</strong></article><article class="metric-tile"><span>状态</span><strong>{{ statusLabel(paymentDetail.payment.status) }}</strong></article><article class="metric-tile"><span>操作管理员</span><strong>{{ paymentDetail.payment.created_by || '-' }}</strong></article><article class="metric-tile"><span>付款时间</span><strong>{{ formatDate(paymentDetail.payment.paid_at) }}</strong></article><article class="metric-tile"><span>关联明细</span><strong>{{ paymentDetail.payment.payment_item_count }}</strong></article><article class="metric-tile wide-metric"><span>备注</span><strong>{{ paymentDetail.payment.note || '-' }}</strong></article></div><section class="panel nested-panel"><div class="panel__header"><h2>关联付款明细</h2><span>{{ paymentDetail.payment.items.length }} items</span></div><div class="table-scroll detail-table"><table><thead><tr><th>订单号</th><th>项目名</th><th>谷子名称</th><th>本次分配金额</th><th>当前付款状态</th><th>来源</th></tr></thead><tbody><tr v-if="paymentDetail.payment.items.length === 0"><td colspan="6">无关联明细。</td></tr><tr v-for="item in paymentDetail.payment.items" :key="item.id"><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}<small>{{ item.category || item.character_name || item.series_code || '-' }}</small></td><td>{{ formatMoney(item.applied_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div></section></template>
           </section>
         </template>
 

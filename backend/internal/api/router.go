@@ -99,8 +99,12 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.CN)),
 	)
 	mux.Handle(
+		"/api/admin/payments/",
+		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Detail)),
+	)
+	mux.Handle(
 		"/api/admin/payments",
-		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Create)),
+		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Collection)),
 	)
 
 	queryHandler := query.NewHandler(
