@@ -358,6 +358,9 @@ export type PaymentRecord = {
   paid_at: string
   created_by?: string
   created_at: string
+  voided_at?: string
+  voided_by?: string
+  void_reason?: string
 }
 
 export type CNPaymentResponse = {
@@ -388,6 +391,9 @@ export type PaymentListItem = {
   note?: string
   payment_item_count: number
   created_at: string
+  voided_at?: string
+  voided_by?: string
+  void_reason?: string
 }
 
 export type PaymentListResponse = {

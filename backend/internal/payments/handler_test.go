@@ -18,6 +18,7 @@ type fakeStore struct {
 	createPayment      func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error)
 	listPaymentRecords func(context.Context, PaymentFilters) (PaymentListResponse, error)
 	getPaymentDetail   func(context.Context, string) (PaymentDetailResponse, error)
+	voidPayment        func(context.Context, VoidPaymentRequest, string) (PaymentDetailResponse, error)
 }
 
 func (s fakeStore) GetCNPayment(ctx context.Context, cn string) (CNPaymentResponse, error) {
@@ -46,6 +47,12 @@ func (s fakeStore) GetPaymentDetail(ctx context.Context, paymentID string) (Paym
 		return PaymentDetailResponse{}, nil
 	}
 	return s.getPaymentDetail(ctx, paymentID)
+}
+func (s fakeStore) VoidPayment(ctx context.Context, request VoidPaymentRequest, adminID string) (PaymentDetailResponse, error) {
+	if s.voidPayment == nil {
+		return PaymentDetailResponse{}, nil
+	}
+	return s.voidPayment(ctx, request, adminID)
 }
 
 func TestCNRequiresCN(t *testing.T) {

@@ -258,7 +258,8 @@ h2 {
 }
 
 .primary-button,
-.secondary-button {
+.secondary-button,
+.danger-button {
   min-height: 38px;
   padding: 0 14px;
   border-radius: 6px;
@@ -274,6 +275,12 @@ h2 {
 .secondary-button {
   color: #27384a;
   background: #ffffff;
+}
+
+.danger-button {
+  color: #ffffff;
+  background: #b42318;
+  border-color: #b42318;
 }
 
 .login-form,

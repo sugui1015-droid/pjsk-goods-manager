@@ -151,6 +151,7 @@ const paymentRecords = ref<PaymentListItem[]>([])
 const paymentDetailLoading = ref(false)
 const paymentDetailMessage = ref('')
 const paymentDetail = ref<PaymentDetailResponse | null>(null)
+const paymentVoiding = ref(false)
 const paymentFilters = ref({
   cn: '',
   paymentMethod: '',
@@ -578,6 +579,32 @@ async function loadPaymentDetail(id: string) {
     paymentDetailMessage.value = error instanceof Error ? error.message : 'Payment detail failed to load'
   } finally {
     paymentDetailLoading.value = false
+  }
+}
+
+async function voidPayment() {
+  if (!paymentDetail.value || paymentDetail.value.payment.status !== 'approved' || paymentVoiding.value) return
+  const reason = window.prompt('请输入撤销原因')?.trim()
+  if (!reason) {
+    paymentDetailMessage.value = '撤销原因不能为空。'
+    return
+  }
+  if (!window.confirm('确认撤销这笔付款？撤销后将回滚关联订单明细付款状态。')) return
+  paymentVoiding.value = true
+  paymentDetailMessage.value = ''
+  try {
+    paymentDetail.value = await postJSON<PaymentDetailResponse>('/api/admin/payments/' + encodeURIComponent(paymentDetail.value.payment.id) + '/void', { reason })
+    paymentDetailMessage.value = '付款已撤销，订单状态已回滚。'
+    await loadPaymentRecords()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = 'Login expired. Please log in again.'
+      return
+    }
+    paymentDetailMessage.value = error instanceof Error ? error.message : 'Payment void failed'
+  } finally {
+    paymentVoiding.value = false
   }
 }
 
@@ -1152,6 +1179,8 @@ function statusLabel(status: string) {
     draft: '草稿',
     paid: '已付款',
     partially_paid: '部分付款',
+    approved: 'approved',
+    voided: 'voided',
   }
   return labels[status] ?? status
 }
@@ -1478,7 +1507,35 @@ onMounted(() => {
           <section class="panel">
             <div class="panel__header"><div><h2>付款详情</h2><p class="muted">{{ routePaymentID }}</p></div><button class="secondary-button" type="button" @click="navigate('/admin/payments')">返回付款记录</button></div>
             <div v-if="paymentDetailMessage" class="inline-alert">{{ paymentDetailMessage }}</div><p v-if="paymentDetailLoading" class="muted">正在加载付款详情。</p>
-            <template v-if="paymentDetail"><div class="summary-grid"><article class="metric-tile"><span>CN</span><strong>{{ paymentDetail.payment.cn_code }}</strong></article><article class="metric-tile"><span>付款金额</span><strong>{{ formatMoney(paymentDetail.payment.amount) }}</strong></article><article class="metric-tile"><span>付款方式</span><strong>{{ paymentDetail.payment.payment_method || '-' }}</strong></article><article class="metric-tile"><span>状态</span><strong>{{ statusLabel(paymentDetail.payment.status) }}</strong></article><article class="metric-tile"><span>操作管理员</span><strong>{{ paymentDetail.payment.created_by || '-' }}</strong></article><article class="metric-tile"><span>付款时间</span><strong>{{ formatDate(paymentDetail.payment.paid_at) }}</strong></article><article class="metric-tile"><span>关联明细</span><strong>{{ paymentDetail.payment.payment_item_count }}</strong></article><article class="metric-tile wide-metric"><span>备注</span><strong>{{ paymentDetail.payment.note || '-' }}</strong></article></div><section class="panel nested-panel"><div class="panel__header"><h2>关联付款明细</h2><span>{{ paymentDetail.payment.items.length }} items</span></div><div class="table-scroll detail-table"><table><thead><tr><th>订单号</th><th>项目名</th><th>谷子名称</th><th>本次分配金额</th><th>当前付款状态</th><th>来源</th></tr></thead><tbody><tr v-if="paymentDetail.payment.items.length === 0"><td colspan="6">无关联明细。</td></tr><tr v-for="item in paymentDetail.payment.items" :key="item.id"><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}<small>{{ item.category || item.character_name || item.series_code || '-' }}</small></td><td>{{ formatMoney(item.applied_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div></section></template>
+            <template v-if="paymentDetail">
+              <div class="summary-grid">
+                <article class="metric-tile"><span>CN</span><strong>{{ paymentDetail.payment.cn_code }}</strong></article>
+                <article class="metric-tile"><span>付款金额</span><strong>{{ formatMoney(paymentDetail.payment.amount) }}</strong></article>
+                <article class="metric-tile"><span>付款方式</span><strong>{{ paymentDetail.payment.payment_method || '-' }}</strong></article>
+                <article class="metric-tile"><span>状态</span><strong>{{ statusLabel(paymentDetail.payment.status) }}</strong></article>
+                <article class="metric-tile"><span>操作管理员</span><strong>{{ paymentDetail.payment.created_by || '-' }}</strong></article>
+                <article class="metric-tile"><span>付款时间</span><strong>{{ formatDate(paymentDetail.payment.paid_at) }}</strong></article>
+                <article class="metric-tile"><span>关联明细</span><strong>{{ paymentDetail.payment.payment_item_count }}</strong></article>
+                <article class="metric-tile wide-metric"><span>备注</span><strong>{{ paymentDetail.payment.note || '-' }}</strong></article>
+                <article v-if="paymentDetail.payment.voided_at" class="metric-tile"><span>撤销时间</span><strong>{{ formatDate(paymentDetail.payment.voided_at) }}</strong></article>
+                <article v-if="paymentDetail.payment.voided_by" class="metric-tile"><span>撤销管理员</span><strong>{{ paymentDetail.payment.voided_by }}</strong></article>
+                <article v-if="paymentDetail.payment.void_reason" class="metric-tile wide-metric"><span>撤销原因</span><strong>{{ paymentDetail.payment.void_reason }}</strong></article>
+              </div>
+              <section v-if="paymentDetail.payment.status === 'approved'" class="panel nested-panel danger-panel">
+                <div class="panel__header">
+                  <div><h2>撤销付款</h2><p class="muted">撤销后该付款不再计入有效已付款金额，相关订单状态会重新计算。</p></div>
+                  <button class="danger-button" type="button" :disabled="paymentVoiding" @click="voidPayment">{{ paymentVoiding ? '撤销中' : '撤销付款' }}</button>
+                </div>
+              </section>
+              <section v-if="paymentDetail.payment.status === 'voided'" class="panel nested-panel danger-panel">
+                <div class="panel__header"><h2>已撤销</h2><span>{{ formatDate(paymentDetail.payment.voided_at) }}</span></div>
+                <p class="muted">{{ paymentDetail.payment.voided_by || '-' }} / {{ paymentDetail.payment.void_reason || '-' }}</p>
+              </section>
+              <section class="panel nested-panel">
+                <div class="panel__header"><h2>关联付款明细</h2><span>{{ paymentDetail.payment.items.length }} items</span></div>
+                <div class="table-scroll detail-table"><table><thead><tr><th>订单号</th><th>项目名</th><th>谷子名称</th><th>本次分配金额</th><th>当前付款状态</th><th>来源</th></tr></thead><tbody><tr v-if="paymentDetail.payment.items.length === 0"><td colspan="6">无关联明细。</td></tr><tr v-for="item in paymentDetail.payment.items" :key="item.id"><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}<small>{{ item.category || item.character_name || item.series_code || '-' }}</small></td><td>{{ formatMoney(item.applied_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div>
+              </section>
+            </template>
           </section>
         </template>
 
