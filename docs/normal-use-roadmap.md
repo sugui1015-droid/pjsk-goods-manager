@@ -1,72 +1,34 @@
-﻿# Normal Use Roadmap
+# Normal Use Roadmap
 
-The app shell is now runnable. To become a real replacement for the Streamlit version, the next steps should happen in this order.
+This reflects the actual state of the code, APIs, and tests in this repository as of this update — not the original plan. See [HANDOVER.md](../HANDOVER.md) for a fuller technical handover.
 
-## 1. Local Running Baseline
+## Done
 
-Goal: frontend and backend both run locally.
+- **Admin login and session** — `POST /api/admin/login`, `GET /api/admin/me`, `POST /api/admin/logout` in [backend/internal/admin](../backend/internal/admin). HttpOnly session cookie, token hash stored in PostgreSQL.
+- **Excel preview and confirm import** — `POST /api/admin/imports/preview`, `POST /api/admin/imports/confirm` in [backend/internal/importpreview](../backend/internal/importpreview), matrix-summary and detail-table parsing per [docs/excel-import-rules.md](excel-import-rules.md).
+- **Import history and import revert** — `GET /api/admin/imports`, `GET /api/admin/imports/{id}`, revert support (migration `0007_import_revert.sql`).
+- **Admin order query** — `GET /api/admin/orders`, `GET /api/admin/orders/{id}` in [backend/internal/orders](../backend/internal/orders).
+- **Regular user CN + query-code lookup** — `POST /api/query/login`, `GET /api/query/orders`, `POST /api/query/logout` in [backend/internal/query](../backend/internal/query). Query code is bcrypt-hashed; session cookie separate from admin session.
+- **Admin unpaid-balance query** — `GET /api/admin/payments/unpaid?cn=`, `GET /api/admin/payments/cn?cn=` in [backend/internal/payments](../backend/internal/payments).
+- **Manual payment entry** — `POST /api/admin/payments`, created directly as `approved`, idempotency-key protected.
+- **WeChat fee handling** — 0.1% of principal, rounded up to the cent (see [docs/payment-workflow.md](payment-workflow.md)).
+- **Partial payment** — one order item can be paid across multiple payments; `payment_status` recalculated per item and per order.
+- **Payment detail** — `GET /api/admin/payments/{id}` returns principal/fee/total and the order items it covers.
+- **Payment void and audit** — `POST /api/admin/payments/{id}/void`, requires a reason, records `voided_at` / `voided_by` / `void_reason`, rolls back item/order payment status.
 
-Status:
+## Not done / still needed
 
-- `frontend\run.cmd` starts the Vue app on `http://localhost:5173`.
-- `backend\run.cmd` starts the Go API on `http://localhost:8080`.
-- `GET /health` returns `ok`.
-- `GET /api/config` feeds the frontend status panel.
+- Full admin user management (create/disable/reset other admin accounts beyond `cmd/create-admin`).
+- CN merge (combining duplicate CN records for the same real person).
+- Diff-based re-import (importing an updated sheet and only applying the delta instead of a fresh batch).
+- Backend maintenance UI for the character (`role`) and category dictionaries — corrections currently happen through import rules, not a standalone admin screen.
+- Data export (CSV/Excel export of orders, payments, or query results).
+- A unified admin audit log across modules (payments has void audit fields; imports/orders/admin actions do not share one audit log table yet).
+- Role-based permission tiers — every authenticated admin currently has the same access.
+- Frontend component and route decomposition — [frontend/src/App.vue](../frontend/src/App.vue) is a single large component with hand-rolled path routing; no `vue-router`.
+- CI (no automated pipeline runs `go test` / `pnpm run build` on push yet).
+- Production deployment, domain, HTTPS, and backup strategy.
 
-## 2. Database Baseline
+## Explicitly out of scope for now
 
-Goal: Supabase PostgreSQL has the new tables before business APIs are written.
-
-Needed:
-
-- Create `backend/migrations`.
-- Add tables for admins, batches, goods_records, payments, payment_items, import_jobs, and audit_logs.
-- Keep the old `records` and `payment_records` untouched until migration is verified.
-- Put real `DATABASE_URL` and Supabase values in a local `.env`, never in Git.
-
-## 3. Admin Login
-
-Goal: one admin can log in and call protected APIs.
-
-Needed:
-
-- Seed first admin.
-- Store password hashes with bcrypt.
-- Issue JWT tokens from Go.
-- Add Vue login view and token storage.
-
-## 4. Goods Query
-
-Goal: normal users can query their own goods.
-
-Needed:
-
-- Use `CN + query code` first.
-- Backend validates query code hash.
-- Frontend shows goods records with filtering and selection.
-
-## 5. Payment Draft And Review
-
-Goal: users can submit payment proof and admins can approve or reject it.
-
-Needed:
-
-- Create payment from selected goods records.
-- Backend recalculates total amount.
-- Upload screenshots to Supabase Storage.
-- Admin approval updates payments and related goods_records in one transaction.
-
-## 6. Excel Import
-
-Goal: Go parser matches legacy Python parser before replacing import flow.
-
-Needed:
-
-- Keep using `testdata/excel/manifest.csv` as expected results.
-- Implement Go parser with Excelize.
-- Compare parsed row count, CN count, sheet count, and total amount against legacy parser.
-- Only then connect import to database writes.
-
-## Current User Flow
-
-Right now you can open `http://localhost:5173` and use the new shell/status page. It is not yet a full business replacement. The old Streamlit app remains the production fallback until database, login, query, and payment review are connected.
+- User-submitted payment screenshots and a `submitted / approved / rejected` review flow — see [docs/payment-workflow.md](payment-workflow.md) for why this is listed as a future option, not a current feature.

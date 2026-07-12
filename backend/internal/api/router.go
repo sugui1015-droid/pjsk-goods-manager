@@ -188,14 +188,14 @@ func (s *server) configHandler(w http.ResponseWriter, r *http.Request) {
 			{
 				Key:         "excel-import",
 				Title:       "Excel import",
-				Status:      "queued",
-				Description: "Parser and validation will be implemented after the data models are stable.",
+				Status:      "ready",
+				Description: "Admins can preview, confirm, list, and revert Excel imports.",
 			},
 			{
 				Key:         "payment-workflow",
 				Title:       "Payment workflow",
-				Status:      "queued",
-				Description: "Payment submission and audit APIs will follow after the data models settle.",
+				Status:      "ready",
+				Description: "Admins review unpaid CN balances and record payments manually, with partial payments, WeChat fee calculation, payment detail, and void with audit trail.",
 			},
 		},
 	}
