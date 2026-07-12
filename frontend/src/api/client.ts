@@ -499,3 +499,53 @@ export type QueryOrdersResponse = {
   paid_amount: number
   remaining_amount: number
 }
+
+export type AdminUserListItem = {
+  id: string
+  cn_code: string
+  display_name?: string
+  has_query_code: boolean
+  status: string
+  order_count: number
+  total_amount: number
+  paid_amount: number
+  remaining_amount: number
+  created_at: string
+}
+
+export type AdminUserListResponse = {
+  items: AdminUserListItem[]
+}
+
+export type AdminUserDetailOrder = {
+  id: string
+  order_no: string
+  status: string
+  project_name: string
+  item_count: number
+  total_amount: number
+  paid_amount: number
+  remaining_amount: number
+  created_at: string
+}
+
+export type AdminUserDetailPayment = {
+  id: string
+  principal_amount: number
+  fee_amount: number
+  total_amount: number
+  payment_method?: string
+  status: string
+  paid_at: string
+  created_by?: string
+  voided_at?: string
+  voided_by?: string
+  void_reason?: string
+}
+
+export type AdminUserDetailResponse = {
+  user: AdminUserListItem
+  orders: AdminUserDetailOrder[]
+  payments: AdminUserDetailPayment[]
+  import_filenames: string[]
+}

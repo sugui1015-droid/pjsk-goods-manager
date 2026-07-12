@@ -6,6 +6,9 @@ import {
   postForm,
   postJSON,
   type Admin,
+  type AdminUserDetailResponse,
+  type AdminUserListItem,
+  type AdminUserListResponse,
   type AuthResponse,
   type ConfigResponse,
   type CNPaymentResponse,
@@ -51,7 +54,7 @@ import {
 const maxExcelSize = 20 * 1024 * 1024
 const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
-type RouteName = 'home' | 'query' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail' | 'admin-payments' | 'admin-payment-detail'
+type RouteName = 'home' | 'query' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail' | 'admin-payments' | 'admin-payment-detail' | 'admin-users' | 'admin-user-detail'
 type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
 type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
 type QuickFilterGroup = { key: TextFilterKey; label: string; options: string[] }
@@ -79,6 +82,15 @@ const routeName = ref<RouteName>(routeFromPath(window.location.pathname))
 const routeImportID = ref(importIDFromPath(window.location.pathname))
 const routeOrderID = ref(orderIDFromPath(window.location.pathname))
 const routePaymentID = ref(paymentIDFromPath(window.location.pathname))
+const routeUserID = ref(userIDFromPath(window.location.pathname))
+
+const adminUsers = ref<AdminUserListItem[]>([])
+const adminUsersLoading = ref(false)
+const adminUsersMessage = ref('')
+const adminUserFilters = ref({ cn: '', status: '' })
+const adminUserDetail = ref<AdminUserDetailResponse | null>(null)
+const adminUserDetailLoading = ref(false)
+const adminUserDetailMessage = ref('')
 
 const admin = ref<Admin | null>(null)
 const authChecked = ref(false)
@@ -247,6 +259,8 @@ const filteredIssues = computed(() => issueFilter.value === 'all' ? allIssues.va
 
 function routeFromPath(path: string): RouteName {
   if (path === '/query') return 'query'
+  if (path === '/admin/users') return 'admin-users'
+  if (path.startsWith('/admin/users/')) return 'admin-user-detail'
   if (path === '/admin/orders') return 'admin-orders'
   if (path.startsWith('/admin/orders/')) return 'admin-order-detail'
   if (path === '/admin/payments') return 'admin-payments'
@@ -273,12 +287,18 @@ function paymentIDFromPath(path: string) {
   return decodeURIComponent(path.replace('/admin/payments/', '').replace(/\/$/, ''))
 }
 
+function userIDFromPath(path: string) {
+  if (!path.startsWith('/admin/users/')) return ''
+  return decodeURIComponent(path.replace('/admin/users/', '').replace(/\/$/, ''))
+}
+
 function navigate(path: string) {
   window.history.pushState(null, '', path)
   routeName.value = routeFromPath(path)
   routeImportID.value = importIDFromPath(path)
   routeOrderID.value = orderIDFromPath(path)
   routePaymentID.value = paymentIDFromPath(path)
+  routeUserID.value = userIDFromPath(path)
   if (isAdminRoute.value) void handleRouteEntered()
   else void handlePublicRouteEntered()
 }
@@ -293,6 +313,8 @@ async function handleRouteEntered() {
   if (routeName.value === 'admin-order-detail' && routeOrderID.value) await loadOrderDetail(routeOrderID.value)
   if (routeName.value === 'admin-payments') await loadPaymentRecords()
   if (routeName.value === 'admin-payment-detail' && routePaymentID.value) await loadPaymentDetail(routePaymentID.value)
+  if (routeName.value === 'admin-users') await loadAdminUsers()
+  if (routeName.value === 'admin-user-detail' && routeUserID.value) await loadAdminUserDetail(routeUserID.value)
 }
 
 async function handlePublicRouteEntered() {
@@ -642,6 +664,52 @@ function resetPaymentFilters() {
     paidTo: '',
   }
   void loadPaymentRecords()
+}
+
+async function loadAdminUsers() {
+  adminUsersLoading.value = true
+  adminUsersMessage.value = ''
+  try {
+    const params = new URLSearchParams()
+    if (adminUserFilters.value.cn.trim()) params.set('cn', adminUserFilters.value.cn.trim())
+    if (adminUserFilters.value.status) params.set('status', adminUserFilters.value.status)
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    const response = await getJSON<AdminUserListResponse>('/api/admin/users' + suffix)
+    adminUsers.value = response.items ?? []
+    if (adminUsers.value.length === 0) adminUsersMessage.value = '没有符合条件的用户。'
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    adminUsersMessage.value = error instanceof Error ? error.message : '用户列表加载失败'
+  } finally {
+    adminUsersLoading.value = false
+  }
+}
+
+function resetAdminUserFilters() {
+  adminUserFilters.value = { cn: '', status: '' }
+  void loadAdminUsers()
+}
+
+async function loadAdminUserDetail(id: string) {
+  adminUserDetailLoading.value = true
+  adminUserDetailMessage.value = ''
+  adminUserDetail.value = null
+  try {
+    adminUserDetail.value = await getJSON<AdminUserDetailResponse>('/api/admin/users/' + encodeURIComponent(id))
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    adminUserDetailMessage.value = error instanceof Error ? error.message : '用户详情加载失败'
+  } finally {
+    adminUserDetailLoading.value = false
+  }
 }
 
 async function loadOrderDetail(id: string) {
@@ -1308,6 +1376,7 @@ window.addEventListener('popstate', () => {
   routeImportID.value = importIDFromPath(window.location.pathname)
   routeOrderID.value = orderIDFromPath(window.location.pathname)
   routePaymentID.value = paymentIDFromPath(window.location.pathname)
+  routeUserID.value = userIDFromPath(window.location.pathname)
   void handleRouteEntered()
 })
 
@@ -1343,6 +1412,7 @@ onMounted(() => {
       <button :class="{ active: routeName === 'admin-imports' }" type="button" @click="navigate('/admin/imports')">Excel 导入预览</button>
       <button :class="{ active: routeName === 'admin-import-history' || routeName === 'admin-import-detail' }" type="button" @click="navigate('/admin/imports/history')">导入历史</button>
       <button :class="{ active: routeName === 'admin-orders' || routeName === 'admin-order-detail' }" type="button" @click="navigate('/admin/orders')">订单查询</button>
+      <button :class="{ active: routeName === 'admin-users' || routeName === 'admin-user-detail' }" type="button" @click="navigate('/admin/users')">用户管理</button>
       <button :class="{ active: routeName === 'admin-payments' || routeName === 'admin-payment-detail' }" type="button" @click="navigate('/admin/payments')">付款记录</button>
     </nav>
 
@@ -1671,6 +1741,47 @@ onMounted(() => {
               <section class="panel nested-panel">
                 <div class="panel__header"><h2>关联付款明细</h2><span>{{ paymentDetail.payment.items.length }} items</span></div>
                 <div class="table-scroll detail-table"><table><thead><tr><th>订单号</th><th>项目名</th><th>谷子名称</th><th>本次分配金额</th><th>当前付款状态</th><th>来源</th></tr></thead><tbody><tr v-if="paymentDetail.payment.items.length === 0"><td colspan="6">无关联明细。</td></tr><tr v-for="item in paymentDetail.payment.items" :key="item.id"><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}<small>{{ item.category || item.character_name || item.series_code || '-' }}</small></td><td>{{ formatMoney(item.applied_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div>
+              </section>
+            </template>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-users'">
+          <section class="panel">
+            <div class="panel__header"><div><h2>用户管理</h2><p class="muted">查看用户订单和付款汇总；本页只读，不提供删除。</p></div><button class="secondary-button" type="button" :disabled="adminUsersLoading" @click="loadAdminUsers">{{ adminUsersLoading ? '加载中' : '刷新' }}</button></div>
+            <form class="order-filters" @submit.prevent="loadAdminUsers">
+              <label><span>CN</span><input v-model="adminUserFilters.cn" placeholder="CN 或显示名" /></label>
+              <label><span>状态</span><select v-model="adminUserFilters.status"><option value="">全部</option><option value="active">正常</option><option value="disabled">已禁用</option></select></label>
+              <div class="filter-actions"><button class="primary-button" type="submit" :disabled="adminUsersLoading">查询</button><button class="secondary-button" type="button" @click="resetAdminUserFilters">重置</button></div>
+            </form>
+            <div v-if="adminUsersMessage" class="inline-alert">{{ adminUsersMessage }}</div>
+            <div class="table-scroll history-table"><table><thead><tr><th>CN</th><th>查询码</th><th>状态</th><th>订单数</th><th>订单总金额</th><th>已付金额</th><th>剩余金额</th><th>创建时间</th><th></th></tr></thead><tbody><tr v-if="!adminUsersLoading && adminUsers.length === 0"><td colspan="9">暂无用户。</td></tr><tr v-for="user in adminUsers" :key="user.id"><td><strong>{{ user.cn_code }}</strong><small>{{ user.display_name || '-' }}</small></td><td>{{ user.has_query_code ? '已设置' : '未设置' }}</td><td>{{ user.status === 'active' ? '正常' : user.status }}</td><td>{{ user.order_count }}</td><td>{{ formatMoney(user.total_amount) }}</td><td>{{ formatMoney(user.paid_amount) }}</td><td :class="{ danger: user.remaining_amount > 0 }">{{ formatMoney(user.remaining_amount) }}</td><td>{{ formatDate(user.created_at) }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/users/' + user.id)">详情</button></td></tr></tbody></table></div>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-user-detail'">
+          <section class="panel">
+            <div class="panel__header"><div><h2>用户详情</h2><p class="muted">{{ routeUserID }}</p></div><button class="secondary-button" type="button" @click="navigate('/admin/users')">返回用户列表</button></div>
+            <div v-if="adminUserDetailMessage" class="inline-alert">{{ adminUserDetailMessage }}</div><p v-if="adminUserDetailLoading" class="muted">正在加载用户详情。</p>
+            <template v-if="adminUserDetail">
+              <div class="summary-grid">
+                <article class="metric-tile"><span>CN</span><strong>{{ adminUserDetail.user.cn_code }}</strong></article>
+                <article class="metric-tile"><span>显示名称</span><strong>{{ adminUserDetail.user.display_name || '-' }}</strong></article>
+                <article class="metric-tile"><span>查询码</span><strong>{{ adminUserDetail.user.has_query_code ? '已设置' : '未设置' }}</strong></article>
+                <article class="metric-tile"><span>状态</span><strong>{{ adminUserDetail.user.status === 'active' ? '正常' : adminUserDetail.user.status }}</strong></article>
+                <article class="metric-tile"><span>订单数</span><strong>{{ adminUserDetail.user.order_count }}</strong></article>
+                <article class="metric-tile"><span>订单总金额</span><strong>{{ formatMoney(adminUserDetail.user.total_amount) }}</strong></article>
+                <article class="metric-tile"><span>已付金额</span><strong>{{ formatMoney(adminUserDetail.user.paid_amount) }}</strong></article>
+                <article class="metric-tile"><span>剩余金额</span><strong :class="{ danger: adminUserDetail.user.remaining_amount > 0 }">{{ formatMoney(adminUserDetail.user.remaining_amount) }}</strong></article>
+              </div>
+              <p v-if="adminUserDetail.import_filenames.length > 0" class="muted">导入来源：{{ adminUserDetail.import_filenames.join('、') }}</p>
+              <section class="panel nested-panel">
+                <div class="panel__header"><h2>订单</h2><span>{{ adminUserDetail.orders.length }} 单</span></div>
+                <div class="table-scroll history-table"><table><thead><tr><th>订单号</th><th>项目</th><th>状态</th><th>明细数</th><th>总金额</th><th>已付</th><th>剩余</th><th>创建时间</th><th></th></tr></thead><tbody><tr v-if="adminUserDetail.orders.length === 0"><td colspan="9">暂无订单。</td></tr><tr v-for="order in adminUserDetail.orders" :key="order.id"><td>{{ order.order_no }}</td><td>{{ order.project_name }}</td><td>{{ statusLabel(order.status) }}</td><td>{{ order.item_count }}</td><td>{{ formatMoney(order.total_amount) }}</td><td>{{ formatMoney(order.paid_amount) }}</td><td :class="{ danger: order.remaining_amount > 0 }">{{ formatMoney(order.remaining_amount) }}</td><td>{{ formatDate(order.created_at) }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/orders/' + order.id)">订单详情</button></td></tr></tbody></table></div>
+              </section>
+              <section class="panel nested-panel">
+                <div class="panel__header"><h2>付款记录</h2><span>{{ adminUserDetail.payments.length }} 笔</span></div>
+                <div class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th>本金</th><th>手续费</th><th>实付金额</th><th>付款方式</th><th>状态</th><th>操作管理员</th><th>撤销信息</th><th></th></tr></thead><tbody><tr v-if="adminUserDetail.payments.length === 0"><td colspan="9">暂无付款记录。</td></tr><tr v-for="payment in adminUserDetail.payments" :key="payment.id" :class="{ 'voided-row': payment.status === 'voided' }"><td>{{ formatDate(payment.paid_at) }}</td><td>{{ formatMoney(payment.principal_amount) }}</td><td>{{ formatMoney(payment.fee_amount) }}</td><td>{{ formatMoney(payment.total_amount) }}</td><td>{{ paymentMethodLabel(payment.payment_method || '') }}</td><td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.voided_at ? `${payment.voided_by || '-'} / ${payment.void_reason || '-'}` : '-' }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
               </section>
             </template>
           </section>

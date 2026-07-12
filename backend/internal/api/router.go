@@ -14,6 +14,7 @@ import (
 	"pjsk/backend/internal/orders"
 	"pjsk/backend/internal/payments"
 	"pjsk/backend/internal/query"
+	"pjsk/backend/internal/users"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -91,6 +92,16 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.Handle(
 		"/api/admin/orders/",
 		adminHandler.RequireAuthentication(http.HandlerFunc(ordersHandler.Detail)),
+	)
+
+	usersHandler := users.NewHandler(users.NewPostgresStore(dbPool))
+	mux.Handle(
+		"/api/admin/users",
+		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.List)),
+	)
+	mux.Handle(
+		"/api/admin/users/",
+		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.Detail)),
 	)
 
 	paymentsHandler := payments.NewHandler(payments.NewPostgresStore(dbPool))
