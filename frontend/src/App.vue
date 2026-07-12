@@ -141,7 +141,7 @@ const cnPaymentLoading = ref(false)
 const cnPaymentMessage = ref('')
 const selectedPaymentItemIds = ref<Set<string>>(new Set())
 const paymentAmounts = ref<Record<string, string>>({})
-type PaymentMethod = 'alipay' | 'wechat' | ''
+type PaymentMethod = 'alipay' | 'wechat' | 'bank' | 'cash' | 'other' | ''
 const paymentMethod = ref<PaymentMethod>('')
 const paymentPaidAt = ref(localDateTimeInputValue())
 const paymentNote = ref('')
@@ -597,16 +597,28 @@ async function loadPaymentDetail(id: string) {
 
 async function voidPayment() {
   if (!paymentDetail.value || paymentDetail.value.payment.status !== 'approved' || paymentVoiding.value) return
+  const payment = paymentDetail.value.payment
+  const principal = payment.principal_amount ?? payment.amount
+  const fee = payment.fee_amount ?? 0
+  const total = payment.total_amount ?? payment.payable_amount ?? roundMoney(principal + fee)
   const reason = window.prompt('请输入撤销原因')?.trim()
   if (!reason) {
     paymentDetailMessage.value = '撤销原因不能为空。'
     return
   }
-  if (!window.confirm('确认撤销这笔付款？撤销后将回滚关联订单明细付款状态。')) return
+  const confirmMessage = [
+    '确认撤销这笔付款？撤销后将回滚关联订单明细付款状态。',
+    `CN：${payment.cn_code}`,
+    `本金：${formatMoney(principal)}`,
+    `手续费：${formatMoney(fee)}`,
+    `实付总额：${formatMoney(total)}`,
+    `影响明细：${payment.payment_item_count} 条`,
+  ].join('\n')
+  if (!window.confirm(confirmMessage)) return
   paymentVoiding.value = true
   paymentDetailMessage.value = ''
   try {
-    paymentDetail.value = await postJSON<PaymentDetailResponse>('/api/admin/payments/' + encodeURIComponent(paymentDetail.value.payment.id) + '/void', { reason })
+    paymentDetail.value = await postJSON<PaymentDetailResponse>('/api/admin/payments/' + encodeURIComponent(payment.id) + '/void', { reason })
     paymentDetailMessage.value = '付款已撤销，订单状态已回滚。'
     await loadPaymentRecords()
   } catch (error) {
@@ -1211,7 +1223,9 @@ function paymentMethodLabel(method: string) {
   const labels: Record<string, string> = {
     alipay: '支付宝',
     wechat: '微信',
-    bank: '银行卡（历史）',
+    bank: '银行转账',
+    cash: '现金',
+    other: '其他',
   }
   return labels[method] ?? method
 }
@@ -1588,6 +1602,18 @@ onMounted(() => {
                       <input type="radio" value="wechat" v-model="paymentMethod" />
                       <span>微信</span>
                     </label>
+                    <label class="payment-method-option" :class="{ active: paymentMethod === 'bank' }">
+                      <input type="radio" value="bank" v-model="paymentMethod" />
+                      <span>银行转账</span>
+                    </label>
+                    <label class="payment-method-option" :class="{ active: paymentMethod === 'cash' }">
+                      <input type="radio" value="cash" v-model="paymentMethod" />
+                      <span>现金</span>
+                    </label>
+                    <label class="payment-method-option" :class="{ active: paymentMethod === 'other' }">
+                      <input type="radio" value="other" v-model="paymentMethod" />
+                      <span>其他</span>
+                    </label>
                     <span v-if="paymentMethod === ''" class="payment-method-hint">请选择付款方式</span>
                   </div>
                   <div v-if="paymentMethod !== '' && selectedPaymentItems.length > 0" class="payment-fee-preview">
@@ -1605,7 +1631,7 @@ onMounted(() => {
                 <div class="table-scroll detail-table payment-table"><table><thead><tr><th>选择</th><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th>本次分配</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="12">暂无待付款明细。</td></tr><tr v-for="item in cnPayment.items" :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}<small>{{ item.sku || item.series_code || '-' }}</small></td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div>
               </template>
             </section>
-            <form class="order-filters" @submit.prevent="loadPaymentRecords"><label><span>CN</span><input v-model="paymentFilters.cn" placeholder="CN 或显示名" /></label><label><span>付款方式</span><select v-model="paymentFilters.paymentMethod"><option value="">全部</option><option value="alipay">支付宝</option><option value="wechat">微信</option><option value="bank">银行卡（历史）</option></select></label><label><span>付款状态</span><select v-model="paymentFilters.status"><option value="">全部</option><option value="approved">已通过</option><option value="submitted">待审核</option><option value="rejected">已拒绝</option><option value="voided">已撤销</option></select></label><label><span>付款开始时间</span><input v-model="paymentFilters.paidFrom" type="datetime-local" /></label><label><span>付款结束时间</span><input v-model="paymentFilters.paidTo" type="datetime-local" /></label><div class="filter-actions"><button class="primary-button" type="submit" :disabled="paymentRecordsLoading">查询</button><button class="secondary-button" type="button" @click="resetPaymentFilters">重置</button></div></form>
+            <form class="order-filters" @submit.prevent="loadPaymentRecords"><label><span>CN</span><input v-model="paymentFilters.cn" placeholder="CN 或显示名" /></label><label><span>付款方式</span><select v-model="paymentFilters.paymentMethod"><option value="">全部</option><option value="alipay">支付宝</option><option value="wechat">微信</option><option value="bank">银行转账</option><option value="cash">现金</option><option value="other">其他</option></select></label><label><span>付款状态</span><select v-model="paymentFilters.status"><option value="">全部</option><option value="approved">已通过</option><option value="submitted">待审核</option><option value="rejected">已拒绝</option><option value="voided">已撤销</option></select></label><label><span>付款开始时间</span><input v-model="paymentFilters.paidFrom" type="datetime-local" /></label><label><span>付款结束时间</span><input v-model="paymentFilters.paidTo" type="datetime-local" /></label><div class="filter-actions"><button class="primary-button" type="submit" :disabled="paymentRecordsLoading">查询</button><button class="secondary-button" type="button" @click="resetPaymentFilters">重置</button></div></form>
             <div v-if="paymentRecordsMessage" class="inline-alert">{{ paymentRecordsMessage }}</div>
             <div class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th>CN</th><th>本金</th><th>手续费</th><th>实付金额</th><th>付款方式</th><th>状态</th><th>操作管理员</th><th>备注</th><th>关联明细数量</th><th></th></tr></thead><tbody><tr v-if="!paymentRecordsLoading && paymentRecords.length === 0"><td colspan="11">暂无付款记录。</td></tr><tr v-for="payment in paymentRecords" :key="payment.id"><td>{{ formatDate(payment.paid_at) }}</td><td><strong>{{ payment.cn_code }}</strong><small>{{ payment.display_name || '-' }}</small></td><td>{{ formatMoney(payment.amount) }}</td><td>{{ formatMoney(payment.fee_amount) }}</td><td>{{ formatMoney(payment.payable_amount) }}</td><td>{{ paymentMethodLabel(payment.payment_method || '') }}</td><td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.note || '-' }}</td><td>{{ payment.payment_item_count }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
           </section>
@@ -1618,9 +1644,9 @@ onMounted(() => {
             <template v-if="paymentDetail">
               <div class="summary-grid">
                 <article class="metric-tile"><span>CN</span><strong>{{ paymentDetail.payment.cn_code }}</strong></article>
-                <article class="metric-tile"><span>本金</span><strong>{{ formatMoney(paymentDetail.payment.amount) }}</strong></article>
+                <article class="metric-tile"><span>本金</span><strong>{{ formatMoney(paymentDetail.payment.principal_amount ?? paymentDetail.payment.amount) }}</strong></article>
                 <article class="metric-tile"><span>手续费</span><strong>{{ formatMoney(paymentDetail.payment.fee_amount) }}</strong></article>
-                <article class="metric-tile"><span>实付金额</span><strong>{{ formatMoney(paymentDetail.payment.payable_amount) }}</strong></article>
+                <article class="metric-tile"><span>实付金额</span><strong>{{ formatMoney(paymentDetail.payment.total_amount ?? paymentDetail.payment.payable_amount) }}</strong></article>
                 <article class="metric-tile"><span>付款方式</span><strong>{{ paymentMethodLabel(paymentDetail.payment.payment_method || '') }}</strong></article>
                 <article class="metric-tile"><span>状态</span><strong>{{ paymentStatusLabel(paymentDetail.payment.status) }}</strong></article>
                 <article class="metric-tile"><span>操作管理员</span><strong>{{ paymentDetail.payment.created_by || '-' }}</strong></article>

@@ -349,7 +349,7 @@ func TestCreateRejectsInvalidPaymentMethod(t *testing.T) {
 			return CreatePaymentResponse{}, ErrInvalidPaymentMethod
 		},
 	})
-	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"bank","idempotency_key":"key-1","items":[{"order_item_id":"item-1","amount":10}]}`)
+	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"gold","idempotency_key":"key-1","items":[{"order_item_id":"item-1","amount":10}]}`)
 	request := authenticatedRequest(http.MethodPost, "/api/admin/payments", body)
 	response := httptest.NewRecorder()
 
@@ -386,7 +386,7 @@ func TestCreateMapsUnknownErrors(t *testing.T) {
 func TestListPassesFilters(t *testing.T) {
 	handler := NewHandler(fakeStore{
 		listPaymentRecords: func(_ context.Context, filters PaymentFilters) (PaymentListResponse, error) {
-			if filters.CN != "CN001" || filters.PaymentMethod != "Alipay" || filters.Status != "approved" || filters.PaidFrom != "2026-07-12T10:00" || filters.PaidTo != "2026-07-13T10:00" {
+			if filters.CN != "CN001" || filters.PaymentMethod != "alipay" || filters.Status != "approved" || filters.PaidFrom != "2026-07-12T10:00" || filters.PaidTo != "2026-07-13T10:00" {
 				t.Fatalf("filters = %#v", filters)
 			}
 			if filters.Limit != 100 {
@@ -465,39 +465,73 @@ func TestDetailMapsNotFound(t *testing.T) {
 	}
 }
 
-func TestCalculateFeeAlipay(t *testing.T) {
-	// Alipay: fee = 0, payable = base
-	baseCents := int64(3680)
-	feeCents, payableCents := calculateFee(baseCents, "alipay")
-	if feeCents != 0 {
-		t.Fatalf("alipay feeCents = %d, want 0", feeCents)
+func TestNormalizePaymentMethod(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{" Alipay ", "alipay"},
+		{"\u652f\u4ed8\u5b9d", "alipay"},
+		{"WeChat", "wechat"},
+		{"\u5fae\u4fe1", "wechat"},
+		{"\u94f6\u884c\u8f6c\u8d26", "bank"},
+		{"Cash", "cash"},
+		{"\u5176\u4ed6", "other"},
 	}
-	if payableCents != 3680 {
-		t.Fatalf("alipay payableCents = %d, want 3680", payableCents)
+	for _, c := range cases {
+		got, err := normalizePaymentMethod(c.input)
+		if err != nil {
+			t.Fatalf("normalizePaymentMethod(%q): %v", c.input, err)
+		}
+		if got != c.want {
+			t.Fatalf("normalizePaymentMethod(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
+func TestNormalizePaymentMethodRejectsUnknown(t *testing.T) {
+	if _, err := normalizePaymentMethod("gold"); !errors.Is(err, ErrInvalidPaymentMethod) {
+		t.Fatalf("normalizePaymentMethod(gold) error = %v, want ErrInvalidPaymentMethod", err)
+	}
+}
+
+func TestCalculateFeeNonWechat(t *testing.T) {
+	for _, method := range []string{"alipay", "bank", "cash", "other"} {
+		feeCents, payableCents := calculateFee(3680, method)
+		if feeCents != 0 {
+			t.Fatalf("%s feeCents = %d, want 0", method, feeCents)
+		}
+		if payableCents != 3680 {
+			t.Fatalf("%s payableCents = %d, want 3680", method, payableCents)
+		}
 	}
 }
 
 func TestCalculateFeeWechat(t *testing.T) {
 	cases := []struct {
-		baseCents       int64
-		wantFeeCents    int64
+		amount           string
+		baseCents        int64
+		wantFeeCents     int64
 		wantPayableCents int64
 	}{
-		{1, 1, 2},       // 0.01 -> fee 0.01, payable 0.02
-		{999, 1, 1000},  // 9.99 -> fee 0.01, payable 10.00
-		{1000, 1, 1001}, // 10.00 -> fee 0.01, payable 10.01
-		{1001, 2, 1003}, // 10.01 -> fee 0.02, payable 10.03
-		{3680, 4, 3684}, // 36.80 -> fee 0.04, payable 36.84
-		{7360, 8, 7368}, // 73.60 -> fee 0.08, payable 73.68
-		{62100, 63, 62163}, // 621.00 -> fee 0.63, payable 621.63
+		{"0.00", 0, 0, 0},
+		{"0.01", 1, 1, 2},
+		{"1.00", 100, 1, 101},
+		{"10.00", 1000, 1, 1001},
+		{"10.01", 1001, 2, 1003},
+		{"100.00", 10000, 10, 10010},
+		{"100.01", 10001, 11, 10012},
+		{"110.40", 11040, 12, 11052},
+		{"999.99", 99999, 100, 100099},
+		{"1000.00", 100000, 100, 100100},
 	}
 	for _, c := range cases {
 		feeCents, payableCents := calculateFee(c.baseCents, "wechat")
 		if feeCents != c.wantFeeCents {
-			t.Fatalf("wechat baseCents=%d: feeCents = %d, want %d", c.baseCents, feeCents, c.wantFeeCents)
+			t.Fatalf("wechat %s: feeCents = %d, want %d", c.amount, feeCents, c.wantFeeCents)
 		}
 		if payableCents != c.wantPayableCents {
-			t.Fatalf("wechat baseCents=%d: payableCents = %d, want %d", c.baseCents, payableCents, c.wantPayableCents)
+			t.Fatalf("wechat %s: payableCents = %d, want %d", c.amount, payableCents, c.wantPayableCents)
 		}
 	}
 }
@@ -558,6 +592,10 @@ func TestDetailReturnsFullItems(t *testing.T) {
 						CNCode:           "CN001",
 						DisplayName:      "Test User",
 						Amount:           150,
+						PrincipalAmount:  150,
+						FeeAmount:        0,
+						PayableAmount:    150,
+						TotalAmount:      150,
 						PaymentMethod:    "bank",
 						Status:           "approved",
 						PaidAt:           "2026-07-12T12:30:00Z",
@@ -618,8 +656,14 @@ func TestDetailReturnsFullItems(t *testing.T) {
 	if payload.Payment.CNCode != "CN001" {
 		t.Fatalf("payload.Payment.CNCode = %q, want CN001", payload.Payment.CNCode)
 	}
-	if payload.Payment.Amount != 150 {
-		t.Fatalf("payload.Payment.Amount = %f, want 150", payload.Payment.Amount)
+	if payload.Payment.Amount != 150 || payload.Payment.PrincipalAmount != 150 {
+		t.Fatalf("payment principal = %.2f/%.2f, want 150", payload.Payment.Amount, payload.Payment.PrincipalAmount)
+	}
+	if payload.Payment.FeeAmount != 0 || payload.Payment.PayableAmount != 150 || payload.Payment.TotalAmount != 150 {
+		t.Fatalf("payment fee/payable/total = %.2f/%.2f/%.2f, want 0/150/150", payload.Payment.FeeAmount, payload.Payment.PayableAmount, payload.Payment.TotalAmount)
+	}
+	if payload.Payment.PaymentMethod != "bank" {
+		t.Fatalf("payload.Payment.PaymentMethod = %q, want bank", payload.Payment.PaymentMethod)
 	}
 	if payload.Payment.Status != "approved" {
 		t.Fatalf("payload.Payment.Status = %q, want approved", payload.Payment.Status)
@@ -661,6 +705,67 @@ func TestDetailReturnsFullItems(t *testing.T) {
 	}
 	if item2.PaymentStatus != "partial" {
 		t.Fatalf("item2.PaymentStatus = %q, want partial", item2.PaymentStatus)
+	}
+}
+
+func TestVoidRejectsEmptyReason(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		voidPayment: func(_ context.Context, request VoidPaymentRequest, adminID string) (PaymentDetailResponse, error) {
+			if request.Reason != "   " || adminID != "admin-1" {
+				t.Fatalf("request/admin = %#v/%q", request, adminID)
+			}
+			return PaymentDetailResponse{}, ErrVoidReasonRequired
+		},
+	})
+	request := authenticatedRequest(http.MethodPost, "/api/admin/payments/11111111-1111-1111-1111-111111111111/void", bytes.NewBufferString(`{"reason":"   "}`))
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Detail).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	var payload errorResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Error != ErrVoidReasonRequired.Error() {
+		t.Fatalf("error = %q, want %q", payload.Error, ErrVoidReasonRequired.Error())
+	}
+}
+
+func TestVoidMapsNotFound(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		voidPayment: func(_ context.Context, request VoidPaymentRequest, adminID string) (PaymentDetailResponse, error) {
+			if request.PaymentID != "11111111-1111-1111-1111-111111111111" || request.Reason != "missing" || adminID != "admin-1" {
+				t.Fatalf("request/admin = %#v/%q", request, adminID)
+			}
+			return PaymentDetailResponse{}, ErrPaymentNotFound
+		},
+	})
+	request := authenticatedRequest(http.MethodPost, "/api/admin/payments/11111111-1111-1111-1111-111111111111/void", bytes.NewBufferString(`{"reason":"missing"}`))
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Detail).ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestVoidMapsAlreadyVoided(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		voidPayment: func(context.Context, VoidPaymentRequest, string) (PaymentDetailResponse, error) {
+			return PaymentDetailResponse{}, ErrPaymentAlreadyVoid
+		},
+	})
+	request := authenticatedRequest(http.MethodPost, "/api/admin/payments/11111111-1111-1111-1111-111111111111/void", bytes.NewBufferString(`{"reason":"again"}`))
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Detail).ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusConflict)
 	}
 }
 

@@ -353,8 +353,10 @@ export type PaymentItemRow = {
 export type PaymentRecord = {
   id: string
   amount: number
+  principal_amount?: number
   fee_amount?: number
   payable_amount?: number
+  total_amount?: number
   payment_method?: string
   note?: string
   status: string
@@ -387,8 +389,10 @@ export type PaymentListItem = {
   cn_code: string
   display_name?: string
   amount: number
+  principal_amount?: number
   fee_amount?: number
   payable_amount?: number
+  total_amount?: number
   payment_method?: string
   status: string
   paid_at: string

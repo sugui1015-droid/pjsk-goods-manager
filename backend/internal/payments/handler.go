@@ -32,7 +32,7 @@ var (
 	ErrVoidReasonRequired   = errors.New("void reason is required")
 	ErrPaymentAlreadyVoid   = errors.New("payment is already voided")
 	ErrPaymentNotApproved   = errors.New("only approved payments can be voided")
-	ErrInvalidPaymentMethod = errors.New("payment_method must be 'alipay' or 'wechat'")
+	ErrInvalidPaymentMethod = errors.New("payment_method must be one of wechat, alipay, bank, cash, other")
 )
 
 type Handler struct {
@@ -95,19 +95,21 @@ type PaymentItemRow struct {
 }
 
 type PaymentRecord struct {
-	ID            string  `json:"id"`
-	Amount        float64 `json:"amount"`
-	FeeAmount     float64 `json:"fee_amount"`
-	PayableAmount float64 `json:"payable_amount"`
-	PaymentMethod string  `json:"payment_method,omitempty"`
-	Note          string  `json:"note,omitempty"`
-	Status        string  `json:"status"`
-	PaidAt        string  `json:"paid_at"`
-	CreatedBy     string  `json:"created_by,omitempty"`
-	CreatedAt     string  `json:"created_at"`
-	VoidedAt      string  `json:"voided_at,omitempty"`
-	VoidedBy      string  `json:"voided_by,omitempty"`
-	VoidReason    string  `json:"void_reason,omitempty"`
+	ID              string  `json:"id"`
+	Amount          float64 `json:"amount"`
+	PrincipalAmount float64 `json:"principal_amount"`
+	FeeAmount       float64 `json:"fee_amount"`
+	PayableAmount   float64 `json:"payable_amount"`
+	TotalAmount     float64 `json:"total_amount"`
+	PaymentMethod   string  `json:"payment_method,omitempty"`
+	Note            string  `json:"note,omitempty"`
+	Status          string  `json:"status"`
+	PaidAt          string  `json:"paid_at"`
+	CreatedBy       string  `json:"created_by,omitempty"`
+	CreatedAt       string  `json:"created_at"`
+	VoidedAt        string  `json:"voided_at,omitempty"`
+	VoidedBy        string  `json:"voided_by,omitempty"`
+	VoidReason      string  `json:"void_reason,omitempty"`
 }
 
 type CreatePaymentRequest struct {
@@ -151,8 +153,10 @@ type PaymentListItem struct {
 	CNCode           string  `json:"cn_code"`
 	DisplayName      string  `json:"display_name,omitempty"`
 	Amount           float64 `json:"amount"`
+	PrincipalAmount  float64 `json:"principal_amount"`
 	FeeAmount        float64 `json:"fee_amount"`
 	PayableAmount    float64 `json:"payable_amount"`
+	TotalAmount      float64 `json:"total_amount"`
 	PaymentMethod    string  `json:"payment_method,omitempty"`
 	Status           string  `json:"status"`
 	PaidAt           string  `json:"paid_at"`
@@ -392,7 +396,7 @@ func paymentFiltersFromRequest(r *http.Request) (PaymentFilters, error) {
 	}
 	return PaymentFilters{
 		CN:            strings.TrimSpace(query.Get("cn")),
-		PaymentMethod: strings.TrimSpace(query.Get("payment_method")),
+		PaymentMethod: normalizePaymentMethodFilter(query.Get("payment_method")),
 		Status:        strings.TrimSpace(query.Get("status")),
 		PaidFrom:      paidFrom,
 		PaidTo:        paidTo,
@@ -574,9 +578,9 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePayment
 		return CreatePaymentResponse{}, ErrInvalidAmount
 	}
 
-	paymentMethod := strings.TrimSpace(request.PaymentMethod)
-	if paymentMethod != "alipay" && paymentMethod != "wechat" {
-		return CreatePaymentResponse{}, ErrInvalidPaymentMethod
+	paymentMethod, err := normalizePaymentMethod(request.PaymentMethod)
+	if err != nil {
+		return CreatePaymentResponse{}, err
 	}
 
 	// Convert to integer cents for fee calculation — no float64 arithmetic on fees.
@@ -705,8 +709,11 @@ func (s *PostgresStore) ListPaymentRecords(ctx context.Context, filters PaymentF
 			return PaymentListResponse{}, err
 		}
 		item.Amount = round2(item.Amount)
+		item.PrincipalAmount = item.Amount
 		item.FeeAmount = round2(item.FeeAmount)
 		item.PayableAmount = round2(item.PayableAmount)
+		item.TotalAmount = item.PayableAmount
+		item.PaymentMethod = normalizePaymentMethodFilter(item.PaymentMethod)
 		response.Items = append(response.Items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -767,8 +774,11 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 		return PaymentDetailResponse{}, err
 	}
 	detail.Amount = round2(detail.Amount)
+	detail.PrincipalAmount = detail.Amount
 	detail.FeeAmount = round2(detail.FeeAmount)
 	detail.PayableAmount = round2(detail.PayableAmount)
+	detail.TotalAmount = detail.PayableAmount
+	detail.PaymentMethod = normalizePaymentMethodFilter(detail.PaymentMethod)
 
 	rows, err := s.pool.Query(ctx, `
 		select
@@ -1099,8 +1109,11 @@ func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) 
 			return nil, err
 		}
 		record.Amount = round2(record.Amount)
+		record.PrincipalAmount = record.Amount
 		record.FeeAmount = round2(record.FeeAmount)
 		record.PayableAmount = round2(record.PayableAmount)
+		record.TotalAmount = record.PayableAmount
+		record.PaymentMethod = normalizePaymentMethodFilter(record.PaymentMethod)
 		records = append(records, record)
 	}
 	return records, rows.Err()
@@ -1254,6 +1267,35 @@ func normalizeCN(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 }
 
+func normalizePaymentMethod(value string) (string, error) {
+	normalized := normalizePaymentMethodFilter(value)
+	switch normalized {
+	case "wechat", "alipay", "bank", "cash", "other":
+		return normalized, nil
+	default:
+		return "", ErrInvalidPaymentMethod
+	}
+}
+
+func normalizePaymentMethodFilter(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	switch normalized {
+	case "wechat", "we chat", "wx", "weixin", "\u5fae\u4fe1":
+		return "wechat"
+	case "alipay", "ali pay", "zhifubao", "\u652f\u4ed8\u5b9d":
+		return "alipay"
+	case "bank", "bank transfer", "transfer", "\u94f6\u884c\u8f6c\u8d26":
+		return "bank"
+	case "cash", "\u73b0\u91d1":
+		return "cash"
+	case "other", "others", "\u5176\u4ed6":
+		return "other"
+	default:
+		return normalized
+	}
+}
+
 func round2(value float64) float64 {
 	return math.Round(value*100) / 100
 }
@@ -1265,7 +1307,7 @@ func safeCentsFromFloat64(amount float64) int64 {
 }
 
 // calculateFee returns (feeCents, payableCents) given baseCents and paymentMethod.
-// All arithmetic is in integer cents — no float64 involved in fee calculation.
+// All arithmetic is in integer cents; no float64 involved in fee calculation.
 func calculateFee(baseCents int64, paymentMethod string) (int64, int64) {
 	switch paymentMethod {
 	case "alipay":
