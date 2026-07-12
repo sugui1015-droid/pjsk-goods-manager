@@ -113,6 +113,83 @@ func TestCreatePassesAdminAndReturnsDuplicate(t *testing.T) {
 	}
 }
 
+func TestCreateReturnsDuplicatePayment(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		createPayment: func(_ context.Context, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
+			return CreatePaymentResponse{
+				PaymentID: "payment-dup-1",
+				Status:    "approved",
+				Duplicate: true,
+				Summary: PaymentSummary{
+					TotalAmount:     100,
+					PaidAmount:      50,
+					RemainingAmount: 50,
+					ItemCount:       2,
+					UnpaidCount:     1,
+					PartialCount:    1,
+					PaidCount:       0,
+				},
+				Items: []PaymentItemRow{
+					{ID: "item-1", OrderID: "order-1", Amount: 50, PaidAmount: 50, RemainingAmount: 0, PaymentStatus: "paid"},
+					{ID: "item-2", OrderID: "order-1", Amount: 50, PaidAmount: 0, RemainingAmount: 50, PaymentStatus: "unpaid"},
+				},
+			}, nil
+		},
+	})
+	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"bank","paid_at":"2026-07-12T12:30:00Z","idempotency_key":"key-dup","items":[{"order_item_id":"item-1","amount":10}]}`)
+	request := authenticatedRequest(http.MethodPost, "/api/admin/payments", body)
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Create).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var payload CreatePaymentResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !payload.Duplicate {
+		t.Fatalf("payload.Duplicate = false, want true")
+	}
+	if payload.PaymentID != "payment-dup-1" {
+		t.Fatalf("payload.PaymentID = %q, want payment-dup-1", payload.PaymentID)
+	}
+	if payload.Status != "approved" {
+		t.Fatalf("payload.Status = %q, want approved", payload.Status)
+	}
+	if payload.Summary.TotalAmount != 100 {
+		t.Fatalf("payload.Summary.TotalAmount = %f, want 100", payload.Summary.TotalAmount)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("len(payload.Items) = %d, want 2", len(payload.Items))
+	}
+}
+
+func TestCreateRejectsOverPayment(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		createPayment: func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error) {
+			return CreatePaymentResponse{}, ErrOverPayment
+		},
+	})
+	body := bytes.NewBufferString(`{"cn":"CN001","idempotency_key":"key-overpay","items":[{"order_item_id":"item-1","amount":999}]}`)
+	request := authenticatedRequest(http.MethodPost, "/api/admin/payments", body)
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Create).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	var payload errorResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Error != ErrOverPayment.Error() {
+		t.Fatalf("error = %q, want %q", payload.Error, ErrOverPayment.Error())
+	}
+}
+
 func TestCreateMapsValidationErrors(t *testing.T) {
 	handler := NewHandler(fakeStore{
 		createPayment: func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error) {
@@ -296,6 +373,125 @@ func TestDetailMapsNotFound(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestDetailReturnsFullItems(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		getPaymentDetail: func(_ context.Context, paymentID string) (PaymentDetailResponse, error) {
+			if paymentID != "11111111-1111-1111-1111-111111111111" {
+				t.Fatalf("paymentID = %q, want 11111111-1111-1111-1111-111111111111", paymentID)
+			}
+			return PaymentDetailResponse{
+				Payment: PaymentDetail{
+					PaymentListItem: PaymentListItem{
+						ID:               "11111111-1111-1111-1111-111111111111",
+						CNCode:           "CN001",
+						DisplayName:      "Test User",
+						Amount:           150,
+						PaymentMethod:    "bank",
+						Status:           "approved",
+						PaidAt:           "2026-07-12T12:30:00Z",
+						CreatedBy:        "admin-1",
+						Note:             "test payment",
+						PaymentItemCount: 2,
+						CreatedAt:        "2026-07-12T12:30:00Z",
+					},
+					UserID: "user-1",
+					Items: []PaymentDetailItem{
+						{
+							ID:            "pi-1",
+							OrderItemID:   "oi-1",
+							OrderID:       "order-1",
+							OrderNo:       "ORD-001",
+							ProjectName:   "Project A",
+							ProductName:   "Product X",
+							CharacterName: "Character 1",
+							Category:      "figure",
+							SeriesCode:    "SERIES-01",
+							DisplayName:   "Product X-figure",
+							SKU:           "SKU-001",
+							AppliedAmount: 100,
+							PaymentStatus: "paid",
+						},
+						{
+							ID:            "pi-2",
+							OrderItemID:   "oi-2",
+							OrderID:       "order-1",
+							OrderNo:       "ORD-001",
+							ProjectName:   "Project A",
+							ProductName:   "Product Y",
+							AppliedAmount: 50,
+							PaymentStatus: "partial",
+						},
+					},
+				},
+			}, nil
+		},
+	})
+	request := authenticatedRequest(http.MethodGet, "/api/admin/payments/11111111-1111-1111-1111-111111111111", bytes.NewBufferString(""))
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Detail).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var payload PaymentDetailResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// Verify payment summary fields
+	if payload.Payment.ID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("payload.Payment.ID = %q, want 11111111-1111-1111-1111-111111111111", payload.Payment.ID)
+	}
+	if payload.Payment.CNCode != "CN001" {
+		t.Fatalf("payload.Payment.CNCode = %q, want CN001", payload.Payment.CNCode)
+	}
+	if payload.Payment.Amount != 150 {
+		t.Fatalf("payload.Payment.Amount = %f, want 150", payload.Payment.Amount)
+	}
+	if payload.Payment.Status != "approved" {
+		t.Fatalf("payload.Payment.Status = %q, want approved", payload.Payment.Status)
+	}
+	if payload.Payment.PaymentItemCount != 2 {
+		t.Fatalf("payload.Payment.PaymentItemCount = %d, want 2", payload.Payment.PaymentItemCount)
+	}
+
+	// Verify items count
+	if len(payload.Payment.Items) != 2 {
+		t.Fatalf("len(payload.Payment.Items) = %d, want 2", len(payload.Payment.Items))
+	}
+
+	// Verify key fields on first item
+	item := payload.Payment.Items[0]
+	if item.OrderItemID != "oi-1" {
+		t.Fatalf("item.OrderItemID = %q, want oi-1", item.OrderItemID)
+	}
+	if item.AppliedAmount != 100 {
+		t.Fatalf("item.AppliedAmount = %f, want 100", item.AppliedAmount)
+	}
+	if item.OrderNo != "ORD-001" {
+		t.Fatalf("item.OrderNo = %q, want ORD-001", item.OrderNo)
+	}
+	if item.ProductName != "Product X" {
+		t.Fatalf("item.ProductName = %q, want Product X", item.ProductName)
+	}
+	if item.PaymentStatus != "paid" {
+		t.Fatalf("item.PaymentStatus = %q, want paid", item.PaymentStatus)
+	}
+
+	// Verify key fields on second item
+	item2 := payload.Payment.Items[1]
+	if item2.OrderItemID != "oi-2" {
+		t.Fatalf("item2.OrderItemID = %q, want oi-2", item2.OrderItemID)
+	}
+	if item2.AppliedAmount != 50 {
+		t.Fatalf("item2.AppliedAmount = %f, want 50", item2.AppliedAmount)
+	}
+	if item2.PaymentStatus != "partial" {
+		t.Fatalf("item2.PaymentStatus = %q, want partial", item2.PaymentStatus)
 	}
 }
 
