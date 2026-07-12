@@ -143,6 +143,10 @@ function endpoint(path: string) {
   return apiBaseUrl ? `${apiBaseUrl}${path}` : path
 }
 
+export function apiUrl(path: string) {
+  return endpoint(path)
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = response.statusText

@@ -582,6 +582,12 @@ th {
   color: #b42318;
 }
 
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .payment-immutable-hint {
   font-size: 13px;
   color: #92400e;

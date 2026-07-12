@@ -10,6 +10,7 @@ import (
 
 	"pjsk/backend/internal/admin"
 	"pjsk/backend/internal/config"
+	"pjsk/backend/internal/export"
 	"pjsk/backend/internal/importpreview"
 	"pjsk/backend/internal/orders"
 	"pjsk/backend/internal/payments"
@@ -128,6 +129,24 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.Handle(
 		"/api/admin/payments",
 		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Collection)),
+	)
+
+	exportHandler := export.NewHandler(
+		users.NewPostgresStore(dbPool),
+		payments.NewPostgresStore(dbPool),
+		dbPool,
+	)
+	mux.Handle(
+		"/api/admin/export/users.csv",
+		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.Users)),
+	)
+	mux.Handle(
+		"/api/admin/export/payments.csv",
+		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.Payments)),
+	)
+	mux.Handle(
+		"/api/admin/export/order-items.csv",
+		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.OrderItems)),
 	)
 
 	queryHandler := query.NewHandler(

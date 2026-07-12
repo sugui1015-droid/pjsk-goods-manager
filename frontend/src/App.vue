@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   ApiError,
+  apiUrl,
   getJSON,
   postForm,
   postJSON,
@@ -700,6 +701,43 @@ async function loadAdminUsers() {
 function resetAdminUserFilters() {
   adminUserFilters.value = { cn: '', status: '' }
   void loadAdminUsers()
+}
+
+function openExport(path: string, params: Record<string, string>) {
+  const searchParams = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value.trim()) searchParams.set(key, value.trim())
+  }
+  const suffix = searchParams.toString() ? `?${searchParams.toString()}` : ''
+  window.open(apiUrl(path + suffix), '_blank')
+}
+
+function exportAdminUsersCSV() {
+  openExport('/api/admin/export/users.csv', {
+    cn: adminUserFilters.value.cn,
+    status: adminUserFilters.value.status,
+  })
+}
+
+function exportPaymentsCSV() {
+  openExport('/api/admin/export/payments.csv', {
+    cn: paymentFilters.value.cn,
+    payment_method: paymentFilters.value.paymentMethod,
+    status: paymentFilters.value.status,
+    paid_from: paymentFilters.value.paidFrom,
+    paid_to: paymentFilters.value.paidTo,
+  })
+}
+
+function exportUnpaidItemsCSV() {
+  openExport('/api/admin/export/order-items.csv', { payment_status: 'unpaid' })
+}
+
+function exportOrderItemsCSV() {
+  openExport('/api/admin/export/order-items.csv', {
+    cn: orderFilters.value.cn,
+    project: orderFilters.value.project,
+  })
 }
 
 async function loadAdminUserDetail(id: string) {
@@ -1721,7 +1759,7 @@ onMounted(() => {
 
         <template v-else-if="routeName === 'admin-payments'">
           <section class="panel">
-            <div class="panel__header"><div><h2>付款记录</h2><p class="muted">只读查看付款流水和关联明细；本页不提供删除、作废或冲正。</p></div><button class="secondary-button" type="button" :disabled="paymentRecordsLoading" @click="loadPaymentRecords">{{ paymentRecordsLoading ? '加载中' : '刷新' }}</button></div>
+            <div class="panel__header"><div><h2>付款记录</h2><p class="muted">只读查看付款流水和关联明细；本页不提供删除、作废或冲正。</p></div><div class="header-actions"><button class="secondary-button" type="button" @click="exportPaymentsCSV">导出付款 CSV</button><button class="secondary-button" type="button" @click="exportUnpaidItemsCSV">导出未付明细 CSV</button><button class="secondary-button" type="button" :disabled="paymentRecordsLoading" @click="loadPaymentRecords">{{ paymentRecordsLoading ? '加载中' : '刷新' }}</button></div></div>
             <section class="panel nested-panel payment-entry-panel">
               <div class="panel__header">
                 <div><h2>录入付款</h2><p class="muted">按 CN 加载尚未付清的订单明细，支持全额或部分付款。</p></div>
@@ -1827,7 +1865,7 @@ onMounted(() => {
 
         <template v-else-if="routeName === 'admin-users'">
           <section class="panel">
-            <div class="panel__header"><div><h2>用户管理</h2><p class="muted">查看用户订单和付款汇总；本页只读，不提供删除。</p></div><button class="secondary-button" type="button" :disabled="adminUsersLoading" @click="loadAdminUsers">{{ adminUsersLoading ? '加载中' : '刷新' }}</button></div>
+            <div class="panel__header"><div><h2>用户管理</h2><p class="muted">查看用户订单和付款汇总；本页只读，不提供删除。</p></div><div class="header-actions"><button class="secondary-button" type="button" @click="exportAdminUsersCSV">导出 CSV</button><button class="secondary-button" type="button" :disabled="adminUsersLoading" @click="loadAdminUsers">{{ adminUsersLoading ? '加载中' : '刷新' }}</button></div></div>
             <form class="order-filters" @submit.prevent="loadAdminUsers">
               <label><span>CN</span><input v-model="adminUserFilters.cn" placeholder="CN 或显示名" /></label>
               <label><span>状态</span><select v-model="adminUserFilters.status"><option value="">全部</option><option value="active">正常</option><option value="disabled">已禁用</option></select></label>
@@ -1899,7 +1937,7 @@ onMounted(() => {
                 <h2>订单只读查询</h2>
                 <p class="muted">查看 Excel 确认导入后的正式订单数据；本页不允许修改、删除或撤销。</p>
               </div>
-              <button class="secondary-button" type="button" :disabled="ordersLoading" @click="loadOrders">刷新</button>
+              <div class="header-actions"><button class="secondary-button" type="button" @click="exportOrderItemsCSV">导出明细 CSV</button><button class="secondary-button" type="button" :disabled="ordersLoading" @click="loadOrders">刷新</button></div>
             </div>
 
             <form class="order-filters" @submit.prevent="loadOrders">
