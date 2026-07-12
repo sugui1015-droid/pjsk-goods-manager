@@ -15,6 +15,7 @@ import (
 
 type fakeStore struct {
 	getCNPayment       func(context.Context, string) (CNPaymentResponse, error)
+	getCNUnpaidPayment func(context.Context, string) (CNPaymentResponse, error)
 	createPayment      func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error)
 	listPaymentRecords func(context.Context, PaymentFilters) (PaymentListResponse, error)
 	getPaymentDetail   func(context.Context, string) (PaymentDetailResponse, error)
@@ -26,6 +27,13 @@ func (s fakeStore) GetCNPayment(ctx context.Context, cn string) (CNPaymentRespon
 		return CNPaymentResponse{}, nil
 	}
 	return s.getCNPayment(ctx, cn)
+}
+
+func (s fakeStore) GetCNUnpaidPayment(ctx context.Context, cn string) (CNPaymentResponse, error) {
+	if s.getCNUnpaidPayment == nil {
+		return CNPaymentResponse{}, nil
+	}
+	return s.getCNUnpaidPayment(ctx, cn)
 }
 
 func (s fakeStore) CreatePayment(ctx context.Context, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
@@ -74,6 +82,56 @@ func TestCNRequiresCN(t *testing.T) {
 	}
 }
 
+func TestUnpaidReturnsOnlyPayableItems(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		getCNUnpaidPayment: func(_ context.Context, cn string) (CNPaymentResponse, error) {
+			if cn != "CN001" {
+				t.Fatalf("cn = %q, want CN001", cn)
+			}
+			return CNPaymentResponse{
+				User: PaymentUser{CNCode: "CN001"},
+				Items: []PaymentItemRow{
+					{ID: "item-1", OrderItemID: "item-1", RemainingAmount: 5, PaymentStatus: "partial"},
+				},
+			}, nil
+		},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/payments/unpaid?cn=CN001", nil)
+	response := httptest.NewRecorder()
+
+	handler.Unpaid(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var payload CNPaymentResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].OrderItemID != "item-1" {
+		t.Fatalf("payload.Items = %#v, want item-1", payload.Items)
+	}
+}
+
+func TestUnpaidRequiresCN(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		getCNUnpaidPayment: func(_ context.Context, cn string) (CNPaymentResponse, error) {
+			if cn != "" {
+				t.Fatalf("cn = %q, want empty", cn)
+			}
+			return CNPaymentResponse{}, ErrCNRequired
+		},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/payments/unpaid", nil)
+	response := httptest.NewRecorder()
+
+	handler.Unpaid(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
 func TestCreateRequiresAdmin(t *testing.T) {
 	handler := NewHandler(fakeStore{})
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/payments", bytes.NewBufferString(`{}`))
@@ -102,7 +160,7 @@ func TestCreatePassesAdminAndReturnsDuplicate(t *testing.T) {
 			}, nil
 		},
 	})
-	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"bank","paid_at":"2026-07-12T12:30:00Z","idempotency_key":"key-1","items":[{"order_item_id":"item-1","amount":10}]}`)
+	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"alipay","paid_at":"2026-07-12T12:30:00Z","idempotency_key":"key-1","items":[{"order_item_id":"item-1","amount":10}]}`)
 	request := authenticatedRequest(http.MethodPost, "/api/admin/payments", body)
 	response := httptest.NewRecorder()
 
@@ -143,7 +201,7 @@ func TestCreateReturnsDuplicatePayment(t *testing.T) {
 			}, nil
 		},
 	})
-	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"bank","paid_at":"2026-07-12T12:30:00Z","idempotency_key":"key-dup","items":[{"order_item_id":"item-1","amount":10}]}`)
+	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"alipay","paid_at":"2026-07-12T12:30:00Z","idempotency_key":"key-dup","items":[{"order_item_id":"item-1","amount":10}]}`)
 	request := authenticatedRequest(http.MethodPost, "/api/admin/payments", body)
 	response := httptest.NewRecorder()
 
@@ -285,6 +343,30 @@ func TestCreateRejectsUnknownCN(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsInvalidPaymentMethod(t *testing.T) {
+	handler := NewHandler(fakeStore{
+		createPayment: func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error) {
+			return CreatePaymentResponse{}, ErrInvalidPaymentMethod
+		},
+	})
+	body := bytes.NewBufferString(`{"cn":"CN001","payment_method":"bank","idempotency_key":"key-1","items":[{"order_item_id":"item-1","amount":10}]}`)
+	request := authenticatedRequest(http.MethodPost, "/api/admin/payments", body)
+	response := httptest.NewRecorder()
+
+	authenticatedHandler(handler.Create).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	var payload errorResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Error != ErrInvalidPaymentMethod.Error() {
+		t.Fatalf("error = %q, want %q", payload.Error, ErrInvalidPaymentMethod.Error())
+	}
+}
+
 func TestCreateMapsUnknownErrors(t *testing.T) {
 	handler := NewHandler(fakeStore{
 		createPayment: func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error) {
@@ -380,6 +462,86 @@ func TestDetailMapsNotFound(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestCalculateFeeAlipay(t *testing.T) {
+	// Alipay: fee = 0, payable = base
+	baseCents := int64(3680)
+	feeCents, payableCents := calculateFee(baseCents, "alipay")
+	if feeCents != 0 {
+		t.Fatalf("alipay feeCents = %d, want 0", feeCents)
+	}
+	if payableCents != 3680 {
+		t.Fatalf("alipay payableCents = %d, want 3680", payableCents)
+	}
+}
+
+func TestCalculateFeeWechat(t *testing.T) {
+	cases := []struct {
+		baseCents       int64
+		wantFeeCents    int64
+		wantPayableCents int64
+	}{
+		{1, 1, 2},       // 0.01 -> fee 0.01, payable 0.02
+		{999, 1, 1000},  // 9.99 -> fee 0.01, payable 10.00
+		{1000, 1, 1001}, // 10.00 -> fee 0.01, payable 10.01
+		{1001, 2, 1003}, // 10.01 -> fee 0.02, payable 10.03
+		{3680, 4, 3684}, // 36.80 -> fee 0.04, payable 36.84
+		{7360, 8, 7368}, // 73.60 -> fee 0.08, payable 73.68
+		{62100, 63, 62163}, // 621.00 -> fee 0.63, payable 621.63
+	}
+	for _, c := range cases {
+		feeCents, payableCents := calculateFee(c.baseCents, "wechat")
+		if feeCents != c.wantFeeCents {
+			t.Fatalf("wechat baseCents=%d: feeCents = %d, want %d", c.baseCents, feeCents, c.wantFeeCents)
+		}
+		if payableCents != c.wantPayableCents {
+			t.Fatalf("wechat baseCents=%d: payableCents = %d, want %d", c.baseCents, payableCents, c.wantPayableCents)
+		}
+	}
+}
+
+func TestCentsToNumeric(t *testing.T) {
+	cases := []struct {
+		cents int64
+		want  string
+	}{
+		{0, "0.00"},
+		{1, "0.01"},
+		{10, "0.10"},
+		{100, "1.00"},
+		{3680, "36.80"},
+		{7360, "73.60"},
+		{62100, "621.00"},
+		{62163, "621.63"},
+	}
+	for _, c := range cases {
+		got := centsToNumeric(c.cents)
+		if got != c.want {
+			t.Fatalf("centsToNumeric(%d) = %q, want %q", c.cents, got, c.want)
+		}
+	}
+}
+
+func TestSafeCentsFromFloat64(t *testing.T) {
+	cases := []struct {
+		input float64
+		want  int64
+	}{
+		{0.01, 1},
+		{9.99, 999},
+		{10.00, 1000},
+		{10.01, 1001},
+		{36.80, 3680},
+		{73.60, 7360},
+		{621.00, 62100},
+	}
+	for _, c := range cases {
+		got := safeCentsFromFloat64(c.input)
+		if got != c.want {
+			t.Fatalf("safeCentsFromFloat64(%.2f) = %d, want %d", c.input, got, c.want)
+		}
 	}
 }
 

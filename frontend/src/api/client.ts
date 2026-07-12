@@ -329,6 +329,7 @@ export type PaymentSummary = {
 
 export type PaymentItemRow = {
   id: string
+  order_item_id: string
   order_id: string
   order_no: string
   project_name: string
@@ -352,6 +353,8 @@ export type PaymentItemRow = {
 export type PaymentRecord = {
   id: string
   amount: number
+  fee_amount?: number
+  payable_amount?: number
   payment_method?: string
   note?: string
   status: string
@@ -384,6 +387,8 @@ export type PaymentListItem = {
   cn_code: string
   display_name?: string
   amount: number
+  fee_amount?: number
+  payable_amount?: number
   payment_method?: string
   status: string
   paid_at: string

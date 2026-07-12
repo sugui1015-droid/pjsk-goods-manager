@@ -38,7 +38,7 @@ func TestPostgresVoidPartialPaymentRollsBackToSubmitted(t *testing.T) {
 
 	created, err := fixture.store.CreatePayment(context.Background(), CreatePaymentRequest{
 		CN:             data.CN,
-		PaymentMethod:  "test",
+		PaymentMethod:  "alipay",
 		PaidAt:         "2026-07-12T13:00",
 		Note:           "partial void test",
 		IdempotencyKey: fixture.prefix + "-partial",
@@ -67,7 +67,7 @@ func TestPostgresVoidOneOfMultiplePaymentsRecalculatesRemainingPayment(t *testin
 
 	first, err := fixture.store.CreatePayment(context.Background(), CreatePaymentRequest{
 		CN:             data.CN,
-		PaymentMethod:  "test",
+		PaymentMethod:  "alipay",
 		PaidAt:         "2026-07-12T13:05",
 		IdempotencyKey: fixture.prefix + "-multi-1",
 		Items:          []CreatePaymentItemRequest{{OrderItemID: data.ItemAID, Amount: 4}},
@@ -77,7 +77,7 @@ func TestPostgresVoidOneOfMultiplePaymentsRecalculatesRemainingPayment(t *testin
 	}
 	if _, err := fixture.store.CreatePayment(context.Background(), CreatePaymentRequest{
 		CN:             data.CN,
-		PaymentMethod:  "test",
+		PaymentMethod:  "alipay",
 		PaidAt:         "2026-07-12T13:06",
 		IdempotencyKey: fixture.prefix + "-multi-2",
 		Items:          []CreatePaymentItemRequest{{OrderItemID: data.ItemAID, Amount: 3}},
@@ -98,7 +98,7 @@ func TestPostgresVoidFullPaymentRollsBackPaidStatus(t *testing.T) {
 
 	created, err := fixture.store.CreatePayment(context.Background(), CreatePaymentRequest{
 		CN:             data.CN,
-		PaymentMethod:  "test",
+		PaymentMethod:  "alipay",
 		PaidAt:         "2026-07-12T13:10",
 		IdempotencyKey: fixture.prefix + "-full",
 		Items:          []CreatePaymentItemRequest{{OrderItemID: data.ItemAID, Amount: 10}},
@@ -114,11 +114,69 @@ func TestPostgresVoidFullPaymentRollsBackPaidStatus(t *testing.T) {
 	fixture.assertOrderAndItems(t, data.OrderNo, "submitted", map[string]string{data.ItemAID: "unpaid"})
 }
 
+func TestPostgresUnpaidPaymentItemsReturnOnlyRemainingItems(t *testing.T) {
+	fixture := newPaymentDBFixture(t)
+	data := fixture.createPaymentCase(t, 10, 20)
+
+	if _, err := fixture.store.CreatePayment(context.Background(), CreatePaymentRequest{
+		CN:             data.CN,
+		PaymentMethod:  "alipay",
+		PaidAt:         "2026-07-12T13:20",
+		IdempotencyKey: fixture.prefix + "-unpaid-filter",
+		Items: []CreatePaymentItemRequest{
+			{OrderItemID: data.ItemAID, Amount: 10},
+			{OrderItemID: data.ItemBID, Amount: 5},
+		},
+	}, fixture.adminID); err != nil {
+		t.Fatalf("CreatePayment: %v", err)
+	}
+
+	response, err := fixture.store.GetCNUnpaidPayment(context.Background(), data.CN)
+	if err != nil {
+		t.Fatalf("GetCNUnpaidPayment: %v", err)
+	}
+	if len(response.Items) != 1 {
+		t.Fatalf("len(response.Items) = %d, want 1: %#v", len(response.Items), response.Items)
+	}
+	item := response.Items[0]
+	if item.ID != data.ItemBID || item.OrderItemID != data.ItemBID {
+		t.Fatalf("item ids = %q/%q, want %q", item.ID, item.OrderItemID, data.ItemBID)
+	}
+	if item.PaymentStatus != "partial" {
+		t.Fatalf("payment status = %q, want partial", item.PaymentStatus)
+	}
+	if item.Amount != 20 || item.PaidAmount != 5 || item.RemainingAmount != 15 {
+		t.Fatalf("amounts = %.2f/%.2f/%.2f, want 20/5/15", item.Amount, item.PaidAmount, item.RemainingAmount)
+	}
+	if response.Summary.ItemCount != 1 || response.Summary.PartialCount != 1 || response.Summary.RemainingAmount != 15 {
+		t.Fatalf("summary = %#v, want one partial item remaining 15", response.Summary)
+	}
+}
+
+func TestPostgresUnpaidPaymentItemsReturnUnpaidItems(t *testing.T) {
+	fixture := newPaymentDBFixture(t)
+	data := fixture.createPaymentCase(t, 10, 20)
+
+	response, err := fixture.store.GetCNUnpaidPayment(context.Background(), data.CN)
+	if err != nil {
+		t.Fatalf("GetCNUnpaidPayment: %v", err)
+	}
+	if len(response.Items) != 2 {
+		t.Fatalf("len(response.Items) = %d, want 2", len(response.Items))
+	}
+	for _, item := range response.Items {
+		if item.PaymentStatus != "unpaid" || item.RemainingAmount <= 0 {
+			t.Fatalf("item = %#v, want unpaid with remaining amount", item)
+		}
+	}
+}
+
 func TestPostgresVoidPaymentTwiceReturnsConflictError(t *testing.T) {
 	fixture := newPaymentDBFixture(t)
 	data := fixture.createPaymentCase(t, 10, 0)
 	created, err := fixture.store.CreatePayment(context.Background(), CreatePaymentRequest{
 		CN:             data.CN,
+		PaymentMethod:  "alipay",
 		IdempotencyKey: fixture.prefix + "-twice",
 		Items:          []CreatePaymentItemRequest{{OrderItemID: data.ItemAID, Amount: 5}},
 	}, fixture.adminID)
@@ -139,6 +197,7 @@ func TestPostgresVoidPaymentConcurrentOnlyOneSucceeds(t *testing.T) {
 	data := fixture.createPaymentCase(t, 10, 0)
 	created, err := fixture.store.CreatePayment(context.Background(), CreatePaymentRequest{
 		CN:             data.CN,
+		PaymentMethod:  "alipay",
 		IdempotencyKey: fixture.prefix + "-concurrent",
 		Items:          []CreatePaymentItemRequest{{OrderItemID: data.ItemAID, Amount: 5}},
 	}, fixture.adminID)
@@ -222,6 +281,31 @@ func (f paymentDBFixture) applyVoidMigration(t *testing.T) {
 	`)
 	if err != nil {
 		t.Fatalf("apply void migration: %v", err)
+	}
+	_, err = f.pool.Exec(context.Background(), `
+		alter table payments
+			add column if not exists fee_amount numeric(12,2),
+			add column if not exists payable_amount numeric(12,2);
+		update payments
+		set
+			fee_amount = 0,
+			payable_amount = submitted_amount
+		where fee_amount is null
+		   or payable_amount is null;
+		alter table payments
+			alter column fee_amount set not null,
+			alter column payable_amount set not null;
+		alter table payments
+			drop constraint if exists payments_fee_amount_check,
+			drop constraint if exists payments_payable_amount_check;
+		alter table payments
+			add constraint payments_fee_amount_check
+				check (fee_amount >= 0),
+			add constraint payments_payable_amount_check
+				check (payable_amount = submitted_amount + fee_amount);
+	`)
+	if err != nil {
+		t.Fatalf("apply fee migration: %v", err)
 	}
 }
 

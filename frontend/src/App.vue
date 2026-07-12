@@ -135,15 +135,19 @@ const orderFilters = ref({
   createdFrom: '',
   createdTo: '',
 })
+const paymentEntryCN = ref('')
 const cnPayment = ref<CNPaymentResponse | null>(null)
 const cnPaymentLoading = ref(false)
 const cnPaymentMessage = ref('')
 const selectedPaymentItemIds = ref<Set<string>>(new Set())
 const paymentAmounts = ref<Record<string, string>>({})
-const paymentMethod = ref('Alipay')
+type PaymentMethod = 'alipay' | 'wechat' | ''
+const paymentMethod = ref<PaymentMethod>('')
 const paymentPaidAt = ref(localDateTimeInputValue())
 const paymentNote = ref('')
 const paymentSaving = ref(false)
+const paymentDraftIdempotencyKey = ref('')
+const paymentCreatedID = ref('')
 
 const paymentRecordsLoading = ref(false)
 const paymentRecordsMessage = ref('')
@@ -183,7 +187,16 @@ const canConfirm = computed(() => {
 const selectedPaymentItems = computed(() => (cnPayment.value?.items ?? []).filter((item) => selectedPaymentItemIds.value.has(item.id)))
 const selectedPaymentTotal = computed(() => selectedPaymentItems.value.reduce((sum, item) => roundMoney(sum + paymentAmountValue(item.id)), 0))
 const hasInvalidPaymentAmount = computed(() => selectedPaymentItems.value.some(paymentAmountInvalid))
-const canSavePayment = computed(() => selectedPaymentItems.value.length > 0 && selectedPaymentTotal.value > 0 && !hasInvalidPaymentAmount.value && !paymentSaving.value)
+const canSavePayment = computed(() => selectedPaymentItems.value.length > 0 && selectedPaymentTotal.value > 0 && paymentMethod.value !== '' && !hasInvalidPaymentAmount.value && !paymentSaving.value)
+
+const paymentBaseCents = computed(() => Math.round(selectedPaymentTotal.value * 100))
+const paymentFeeCents = computed(() => {
+  if (paymentMethod.value === 'alipay') return 0
+  if (paymentMethod.value === 'wechat') return Math.floor((paymentBaseCents.value + 999) / 1000)
+  return 0
+})
+const paymentFeeAmount = computed(() => paymentFeeCents.value / 100)
+const paymentPayableAmount = computed(() => (paymentBaseCents.value + paymentFeeCents.value) / 100)
 
 const templateCounts = computed(() => countTemplates(preview.value?.batches ?? []))
 const previewRows = computed(() => flattenPreviewDetails(preview.value))
@@ -638,16 +651,18 @@ async function loadOrderDetail(id: string) {
 }
 
 async function loadCNPayment(preserveMessage = false) {
-  const cn = orderFilters.value.cn.trim()
+  const cn = paymentEntryCN.value.trim()
   if (!cn) {
-    cnPaymentMessage.value = 'Enter one CN first.'
+    cnPaymentMessage.value = '请先输入 CN。'
     return
   }
   cnPaymentLoading.value = true
   if (!preserveMessage) cnPaymentMessage.value = ''
+  if (!preserveMessage) paymentCreatedID.value = ''
   try {
-    cnPayment.value = await getJSON<CNPaymentResponse>(`/api/admin/payments/cn?cn=${encodeURIComponent(cn)}`)
+    cnPayment.value = await getJSON<CNPaymentResponse>(`/api/admin/payments/unpaid?cn=${encodeURIComponent(cn)}`)
     resetPaymentDraft()
+    if (cnPayment.value.items.length === 0) cnPaymentMessage.value = '该 CN 暂无待付款明细。'
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
@@ -655,7 +670,7 @@ async function loadCNPayment(preserveMessage = false) {
       return
     }
     cnPayment.value = null
-    cnPaymentMessage.value = error instanceof Error ? error.message : 'Payment details failed to load'
+    cnPaymentMessage.value = error instanceof Error ? error.message : '付款明细加载失败'
   } finally {
     cnPaymentLoading.value = false
   }
@@ -666,6 +681,7 @@ function resetPaymentDraft() {
   paymentAmounts.value = {}
   paymentPaidAt.value = localDateTimeInputValue()
   paymentNote.value = ''
+  paymentDraftIdempotencyKey.value = newIdempotencyKey()
 }
 
 function setPaymentItemSelected(item: PaymentItemRow, checked: boolean) {
@@ -698,34 +714,60 @@ function paymentAmountInvalid(item: PaymentItemRow) {
 }
 
 async function savePayment() {
-  if (!cnPayment.value || !canSavePayment.value) return
-  const invalidItem = selectedPaymentItems.value.find(paymentAmountInvalid)
-  if (invalidItem) {
-    cnPaymentMessage.value = 'Amount must be greater than 0 and not exceed remaining amount.'
+  if (!cnPayment.value) return
+  if (paymentMethod.value === '') {
+    cnPaymentMessage.value = '请选择付款方式。'
     return
   }
+  if (selectedPaymentItems.value.length === 0) {
+    cnPaymentMessage.value = '请先选择待付款明细。'
+    return
+  }
+  const invalidItem = selectedPaymentItems.value.find(paymentAmountInvalid)
+  if (invalidItem) {
+    cnPaymentMessage.value = '本次分配金额必须大于 0，且不能超过剩余应付金额。'
+    return
+  }
+  if (!canSavePayment.value) return
+  const submittedTotal = selectedPaymentTotal.value
+  const submittedFee = paymentFeeAmount.value
+  const submittedPayable = paymentPayableAmount.value
+  const methodLabel = paymentMethodLabel(paymentMethod.value)
+  const confirmLines = [
+    `CN：${cnPayment.value.user.cn_code}`,
+    `付款方式：${methodLabel}`,
+    `本金：${formatMoney(submittedTotal)}`,
+    `手续费：${formatMoney(submittedFee)}`,
+    `实付金额：${formatMoney(submittedPayable)}`,
+    `关联明细数量：${selectedPaymentItems.value.length}`,
+    '',
+    ...selectedPaymentItems.value.map((item) => `${item.order_no} / ${item.display_name || item.product_name}：${formatMoney(paymentAmountValue(item.id))}`),
+  ]
+  if (!window.confirm(confirmLines.join('\n'))) return
   paymentSaving.value = true
   cnPaymentMessage.value = ''
+  paymentCreatedID.value = ''
   try {
-    const submittedTotal = selectedPaymentTotal.value
+    if (!paymentDraftIdempotencyKey.value) paymentDraftIdempotencyKey.value = newIdempotencyKey()
     const response = await postJSON<CreatePaymentResponse>('/api/admin/payments', {
       cn: cnPayment.value.user.cn_code,
-      payment_method: paymentMethod.value.trim(),
+      payment_method: paymentMethod.value,
       paid_at: paymentPaidAt.value,
       note: paymentNote.value.trim(),
-      idempotency_key: newIdempotencyKey(),
+      idempotency_key: paymentDraftIdempotencyKey.value,
       items: selectedPaymentItems.value.map((item) => ({ order_item_id: item.id, amount: paymentAmountValue(item.id) })),
     })
-    cnPayment.value = { ...cnPayment.value, summary: response.summary, items: response.items }
+    paymentCreatedID.value = response.payment_id
     await loadCNPayment(true)
-    cnPaymentMessage.value = response.duplicate ? '检测到重复提交，未新增付款记录。' : `已保存付款 ${formatMoney(submittedTotal)}。`
+    await loadPaymentRecords()
+    cnPaymentMessage.value = response.duplicate ? '检测到重复提交，未新增付款记录。' : `付款已保存，本金 ${formatMoney(submittedTotal)}，实付 ${formatMoney(submittedPayable)}。`
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
       authMessage.value = 'Login expired. Please log in again.'
       return
     }
-    cnPaymentMessage.value = error instanceof Error ? error.message : 'Payment save failed'
+    cnPaymentMessage.value = error instanceof Error ? error.message : '付款保存失败'
   } finally {
     paymentSaving.value = false
   }
@@ -1165,6 +1207,15 @@ function countTemplates(batches: ImportBatch[]) {
 }
 
 
+function paymentMethodLabel(method: string) {
+  const labels: Record<string, string> = {
+    alipay: '支付宝',
+    wechat: '微信',
+    bank: '银行卡（历史）',
+  }
+  return labels[method] ?? method
+}
+
 function statusLabel(status: string) {
   const labels: Record<string, string> = {
     previewed: '待确认',
@@ -1181,6 +1232,17 @@ function statusLabel(status: string) {
     partially_paid: '部分付款',
     approved: 'approved',
     voided: 'voided',
+  }
+  return labels[status] ?? status
+}
+
+function paymentStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    submitted: '待审核',
+    approved: '已通过',
+    rejected: '已拒绝',
+    cancelled: '已取消',
+    voided: '已撤销',
   }
   return labels[status] ?? status
 }
@@ -1497,9 +1559,55 @@ onMounted(() => {
         <template v-else-if="routeName === 'admin-payments'">
           <section class="panel">
             <div class="panel__header"><div><h2>付款记录</h2><p class="muted">只读查看付款流水和关联明细；本页不提供删除、作废或冲正。</p></div><button class="secondary-button" type="button" :disabled="paymentRecordsLoading" @click="loadPaymentRecords">{{ paymentRecordsLoading ? '加载中' : '刷新' }}</button></div>
-            <form class="order-filters" @submit.prevent="loadPaymentRecords"><label><span>CN</span><input v-model="paymentFilters.cn" placeholder="CN 或显示名" /></label><label><span>付款方式</span><input v-model="paymentFilters.paymentMethod" placeholder="Alipay / WeChat / Bank" /></label><label><span>付款状态</span><select v-model="paymentFilters.status"><option value="">全部</option><option value="approved">approved</option><option value="submitted">submitted</option><option value="rejected">rejected</option><option value="voided">voided</option></select></label><label><span>付款开始时间</span><input v-model="paymentFilters.paidFrom" type="datetime-local" /></label><label><span>付款结束时间</span><input v-model="paymentFilters.paidTo" type="datetime-local" /></label><div class="filter-actions"><button class="primary-button" type="submit" :disabled="paymentRecordsLoading">查询</button><button class="secondary-button" type="button" @click="resetPaymentFilters">重置</button></div></form>
+            <section class="panel nested-panel payment-entry-panel">
+              <div class="panel__header">
+                <div><h2>录入付款</h2><p class="muted">按 CN 加载尚未付清的订单明细，支持全额或部分付款。</p></div>
+                <button class="secondary-button" type="button" :disabled="cnPaymentLoading" @click="() => loadCNPayment()">{{ cnPaymentLoading ? '加载中' : '加载待付明细' }}</button>
+              </div>
+              <form class="payment-cn-form" @submit.prevent="loadCNPayment()">
+                <label><span>CN</span><input v-model="paymentEntryCN" placeholder="输入 CN" /></label>
+                <button class="primary-button" type="submit" :disabled="cnPaymentLoading">查询</button>
+              </form>
+              <div v-if="cnPaymentMessage" class="inline-alert">{{ cnPaymentMessage }}</div>
+              <template v-if="cnPayment">
+                <div class="summary-grid compact-summary payment-summary">
+                  <article class="metric-tile"><span>CN</span><strong>{{ cnPayment.user.cn_code }}</strong></article>
+                  <article class="metric-tile"><span>待付总额</span><strong>{{ formatMoney(cnPayment.summary.remaining_amount) }}</strong></article>
+                  <article class="metric-tile"><span>待付明细</span><strong>{{ cnPayment.summary.item_count }}</strong></article>
+                  <article class="metric-tile"><span>已选明细</span><strong>{{ selectedPaymentItems.length }}</strong></article>
+                  <article class="metric-tile"><span>本次合计</span><strong>{{ formatMoney(selectedPaymentTotal) }}</strong></article>
+                </div>
+                <div class="payment-form">
+                  <div class="payment-method-group">
+                    <span class="payment-method-label">付款方式</span>
+                    <label class="payment-method-option" :class="{ active: paymentMethod === 'alipay' }">
+                      <input type="radio" value="alipay" v-model="paymentMethod" />
+                      <span>支付宝</span>
+                    </label>
+                    <label class="payment-method-option" :class="{ active: paymentMethod === 'wechat' }">
+                      <input type="radio" value="wechat" v-model="paymentMethod" />
+                      <span>微信</span>
+                    </label>
+                    <span v-if="paymentMethod === ''" class="payment-method-hint">请选择付款方式</span>
+                  </div>
+                  <div v-if="paymentMethod !== '' && selectedPaymentItems.length > 0" class="payment-fee-preview">
+                    <span>本金：{{ formatMoney(selectedPaymentTotal) }}</span>
+                    <span>手续费：{{ formatMoney(paymentFeeAmount) }}</span>
+                    <span>实付金额：{{ formatMoney(paymentPayableAmount) }}</span>
+                  </div>
+                  <label class="payment-note"><span>备注</span><input v-model="paymentNote" maxlength="200" placeholder="可选" /></label>
+                  <div class="payment-actions">
+                    <span>{{ selectedPaymentItems.length }} 条明细 / {{ formatMoney(selectedPaymentTotal) }}</span>
+                    <button class="primary-button" type="button" :disabled="!canSavePayment" @click="savePayment">{{ paymentSaving ? '保存中' : '保存付款' }}</button>
+                    <button v-if="paymentCreatedID" class="secondary-button" type="button" @click="navigate('/admin/payments/' + paymentCreatedID)">查看付款详情</button>
+                  </div>
+                </div>
+                <div class="table-scroll detail-table payment-table"><table><thead><tr><th>选择</th><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th>本次分配</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="12">暂无待付款明细。</td></tr><tr v-for="item in cnPayment.items" :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}<small>{{ item.sku || item.series_code || '-' }}</small></td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div>
+              </template>
+            </section>
+            <form class="order-filters" @submit.prevent="loadPaymentRecords"><label><span>CN</span><input v-model="paymentFilters.cn" placeholder="CN 或显示名" /></label><label><span>付款方式</span><select v-model="paymentFilters.paymentMethod"><option value="">全部</option><option value="alipay">支付宝</option><option value="wechat">微信</option><option value="bank">银行卡（历史）</option></select></label><label><span>付款状态</span><select v-model="paymentFilters.status"><option value="">全部</option><option value="approved">已通过</option><option value="submitted">待审核</option><option value="rejected">已拒绝</option><option value="voided">已撤销</option></select></label><label><span>付款开始时间</span><input v-model="paymentFilters.paidFrom" type="datetime-local" /></label><label><span>付款结束时间</span><input v-model="paymentFilters.paidTo" type="datetime-local" /></label><div class="filter-actions"><button class="primary-button" type="submit" :disabled="paymentRecordsLoading">查询</button><button class="secondary-button" type="button" @click="resetPaymentFilters">重置</button></div></form>
             <div v-if="paymentRecordsMessage" class="inline-alert">{{ paymentRecordsMessage }}</div>
-            <div class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th>CN</th><th>付款金额</th><th>付款方式</th><th>状态</th><th>操作管理员</th><th>备注</th><th>关联明细数量</th><th></th></tr></thead><tbody><tr v-if="!paymentRecordsLoading && paymentRecords.length === 0"><td colspan="9">暂无付款记录。</td></tr><tr v-for="payment in paymentRecords" :key="payment.id"><td>{{ formatDate(payment.paid_at) }}</td><td><strong>{{ payment.cn_code }}</strong><small>{{ payment.display_name || '-' }}</small></td><td>{{ formatMoney(payment.amount) }}</td><td>{{ payment.payment_method || '-' }}</td><td><span class="status-chip" :data-state="payment.status">{{ statusLabel(payment.status) }}</span></td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.note || '-' }}</td><td>{{ payment.payment_item_count }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
+            <div class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th>CN</th><th>本金</th><th>手续费</th><th>实付金额</th><th>付款方式</th><th>状态</th><th>操作管理员</th><th>备注</th><th>关联明细数量</th><th></th></tr></thead><tbody><tr v-if="!paymentRecordsLoading && paymentRecords.length === 0"><td colspan="11">暂无付款记录。</td></tr><tr v-for="payment in paymentRecords" :key="payment.id"><td>{{ formatDate(payment.paid_at) }}</td><td><strong>{{ payment.cn_code }}</strong><small>{{ payment.display_name || '-' }}</small></td><td>{{ formatMoney(payment.amount) }}</td><td>{{ formatMoney(payment.fee_amount) }}</td><td>{{ formatMoney(payment.payable_amount) }}</td><td>{{ paymentMethodLabel(payment.payment_method || '') }}</td><td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.note || '-' }}</td><td>{{ payment.payment_item_count }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
           </section>
         </template>
 
@@ -1510,9 +1618,11 @@ onMounted(() => {
             <template v-if="paymentDetail">
               <div class="summary-grid">
                 <article class="metric-tile"><span>CN</span><strong>{{ paymentDetail.payment.cn_code }}</strong></article>
-                <article class="metric-tile"><span>付款金额</span><strong>{{ formatMoney(paymentDetail.payment.amount) }}</strong></article>
-                <article class="metric-tile"><span>付款方式</span><strong>{{ paymentDetail.payment.payment_method || '-' }}</strong></article>
-                <article class="metric-tile"><span>状态</span><strong>{{ statusLabel(paymentDetail.payment.status) }}</strong></article>
+                <article class="metric-tile"><span>本金</span><strong>{{ formatMoney(paymentDetail.payment.amount) }}</strong></article>
+                <article class="metric-tile"><span>手续费</span><strong>{{ formatMoney(paymentDetail.payment.fee_amount) }}</strong></article>
+                <article class="metric-tile"><span>实付金额</span><strong>{{ formatMoney(paymentDetail.payment.payable_amount) }}</strong></article>
+                <article class="metric-tile"><span>付款方式</span><strong>{{ paymentMethodLabel(paymentDetail.payment.payment_method || '') }}</strong></article>
+                <article class="metric-tile"><span>状态</span><strong>{{ paymentStatusLabel(paymentDetail.payment.status) }}</strong></article>
                 <article class="metric-tile"><span>操作管理员</span><strong>{{ paymentDetail.payment.created_by || '-' }}</strong></article>
                 <article class="metric-tile"><span>付款时间</span><strong>{{ formatDate(paymentDetail.payment.paid_at) }}</strong></article>
                 <article class="metric-tile"><span>关联明细</span><strong>{{ paymentDetail.payment.payment_item_count }}</strong></article>
@@ -1572,17 +1682,6 @@ onMounted(() => {
                 <button class="secondary-button" type="button" @click="resetOrderFilters">重置</button>
               </div>
             </form>
-
-            <section class="panel nested-panel payment-entry-panel">
-              <div class="panel__header"><div><h2>Payment entry</h2><p class="muted">Load one CN, select order items, and save full or partial payment.</p></div><button class="secondary-button" type="button" :disabled="cnPaymentLoading" @click="() => loadCNPayment()">{{ cnPaymentLoading ? 'Loading' : 'Load CN payments' }}</button></div>
-              <div v-if="cnPaymentMessage" class="inline-alert">{{ cnPaymentMessage }}</div>
-              <template v-if="cnPayment">
-                <div class="summary-grid compact-summary payment-summary"><article class="metric-tile"><span>CN</span><strong>{{ cnPayment.user.cn_code }}</strong></article><article class="metric-tile"><span>Total</span><strong>{{ formatMoney(cnPayment.summary.total_amount) }}</strong></article><article class="metric-tile"><span>Paid</span><strong>{{ formatMoney(cnPayment.summary.paid_amount) }}</strong></article><article class="metric-tile"><span>Remaining</span><strong>{{ formatMoney(cnPayment.summary.remaining_amount) }}</strong></article><article class="metric-tile"><span>Items U/P/F</span><strong>{{ cnPayment.summary.unpaid_count }} / {{ cnPayment.summary.partial_count }} / {{ cnPayment.summary.paid_count }}</strong></article></div>
-                <div class="payment-form"><label><span>Method</span><input v-model="paymentMethod" placeholder="Alipay / WeChat / Bank" /></label><label><span>Paid at</span><input v-model="paymentPaidAt" type="datetime-local" /></label><label class="payment-note"><span>Note</span><input v-model="paymentNote" maxlength="200" placeholder="Optional" /></label><div class="payment-actions"><span>{{ selectedPaymentItems.length }} items / {{ formatMoney(selectedPaymentTotal) }}</span><button class="primary-button" type="button" :disabled="!canSavePayment" @click="savePayment">{{ paymentSaving ? 'Saving' : 'Save payment' }}</button></div></div>
-                <div class="table-scroll detail-table payment-table"><table><thead><tr><th>Select</th><th>Project / Order</th><th>Item</th><th>Qty</th><th>Due</th><th>Paid</th><th>Remain</th><th>This payment</th><th>Status</th><th>Source</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="10">No payable order items.</td></tr><tr v-for="item in cnPayment.items" :key="item.id" :class="{ muted: item.remaining_amount <= 0 }"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.project_name }}<small>{{ item.order_no }}</small></td><td>{{ item.display_name || item.product_name }}<small>{{ item.category || item.character_name || '-' }}</small></td><td>{{ item.quantity }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}<small>{{ item.source_row_key || item.source_sheet || '' }}</small></td></tr></tbody></table></div>
-                <section class="panel nested-panel payment-history-panel"><div class="panel__header"><h2>Payment history</h2><span>{{ cnPayment.payments.length }} records</span></div><div class="table-scroll compact-table"><table><thead><tr><th>Amount</th><th>Method</th><th>Paid at</th><th>Admin</th><th>Note</th><th>Status</th></tr></thead><tbody><tr v-if="cnPayment.payments.length === 0"><td colspan="6">No payment records.</td></tr><tr v-for="payment in cnPayment.payments" :key="payment.id"><td>{{ formatMoney(payment.amount) }}</td><td>{{ payment.payment_method || '-' }}</td><td>{{ formatDate(payment.paid_at) }}</td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.note || '-' }}</td><td>{{ payment.status }}</td></tr></tbody></table></div></section>
-              </template>
-            </section>
 
             <div v-if="ordersMessage" class="inline-alert">{{ ordersMessage }}</div>
             <div class="table-scroll history-table">

@@ -99,6 +99,10 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.CN)),
 	)
 	mux.Handle(
+		"/api/admin/payments/unpaid",
+		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Unpaid)),
+	)
+	mux.Handle(
 		"/api/admin/payments/",
 		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Detail)),
 	)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -19,18 +20,19 @@ import (
 )
 
 var (
-	ErrCNRequired         = errors.New("cn is required")
-	ErrUserNotFound       = errors.New("cn not found")
-	ErrNoPaymentItems     = errors.New("payment items are required")
-	ErrInvalidAmount      = errors.New("payment amount must be greater than 0")
-	ErrOverPayment        = errors.New("payment amount exceeds remaining amount")
-	ErrItemMismatch       = errors.New("order item does not belong to this cn")
-	ErrIdempotencyKey     = errors.New("idempotency key is required")
-	ErrPaymentTime        = errors.New("payment time is invalid")
-	ErrPaymentNotFound    = errors.New("payment not found")
-	ErrVoidReasonRequired = errors.New("void reason is required")
-	ErrPaymentAlreadyVoid = errors.New("payment is already voided")
-	ErrPaymentNotApproved = errors.New("only approved payments can be voided")
+	ErrCNRequired           = errors.New("cn is required")
+	ErrUserNotFound         = errors.New("cn not found")
+	ErrNoPaymentItems       = errors.New("payment items are required")
+	ErrInvalidAmount        = errors.New("payment amount must be greater than 0")
+	ErrOverPayment          = errors.New("payment amount exceeds remaining amount")
+	ErrItemMismatch         = errors.New("order item does not belong to this cn")
+	ErrIdempotencyKey       = errors.New("idempotency key is required")
+	ErrPaymentTime          = errors.New("payment time is invalid")
+	ErrPaymentNotFound      = errors.New("payment not found")
+	ErrVoidReasonRequired   = errors.New("void reason is required")
+	ErrPaymentAlreadyVoid   = errors.New("payment is already voided")
+	ErrPaymentNotApproved   = errors.New("only approved payments can be voided")
+	ErrInvalidPaymentMethod = errors.New("payment_method must be 'alipay' or 'wechat'")
 )
 
 type Handler struct {
@@ -39,6 +41,7 @@ type Handler struct {
 
 type Store interface {
 	GetCNPayment(context.Context, string) (CNPaymentResponse, error)
+	GetCNUnpaidPayment(context.Context, string) (CNPaymentResponse, error)
 	CreatePayment(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error)
 	ListPaymentRecords(context.Context, PaymentFilters) (PaymentListResponse, error)
 	GetPaymentDetail(context.Context, string) (PaymentDetailResponse, error)
@@ -70,6 +73,7 @@ type PaymentSummary struct {
 
 type PaymentItemRow struct {
 	ID              string  `json:"id"`
+	OrderItemID     string  `json:"order_item_id"`
 	OrderID         string  `json:"order_id"`
 	OrderNo         string  `json:"order_no"`
 	ProjectName     string  `json:"project_name"`
@@ -93,6 +97,8 @@ type PaymentItemRow struct {
 type PaymentRecord struct {
 	ID            string  `json:"id"`
 	Amount        float64 `json:"amount"`
+	FeeAmount     float64 `json:"fee_amount"`
+	PayableAmount float64 `json:"payable_amount"`
 	PaymentMethod string  `json:"payment_method,omitempty"`
 	Note          string  `json:"note,omitempty"`
 	Status        string  `json:"status"`
@@ -145,6 +151,8 @@ type PaymentListItem struct {
 	CNCode           string  `json:"cn_code"`
 	DisplayName      string  `json:"display_name,omitempty"`
 	Amount           float64 `json:"amount"`
+	FeeAmount        float64 `json:"fee_amount"`
+	PayableAmount    float64 `json:"payable_amount"`
 	PaymentMethod    string  `json:"payment_method,omitempty"`
 	Status           string  `json:"status"`
 	PaidAt           string  `json:"paid_at"`
@@ -321,6 +329,23 @@ func (h *Handler) CN(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (h *Handler) Unpaid(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	cn := strings.TrimSpace(r.URL.Query().Get("cn"))
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	response, err := h.store.GetCNUnpaidPayment(ctx, cn)
+	if err != nil {
+		writePaymentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
@@ -343,6 +368,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	response, err := h.store.CreatePayment(ctx, request, account.ID)
 	if err != nil {
+		log.Printf("CreatePayment failed: cn=%q method=%q ik=%q item_count=%d err=%v",
+			request.CN, request.PaymentMethod, request.IdempotencyKey, len(request.Items), err)
 		writePaymentError(w, err)
 		return
 	}
@@ -439,6 +466,27 @@ func (s *PostgresStore) GetCNPayment(ctx context.Context, cn string) (CNPaymentR
 	return CNPaymentResponse{User: user, Summary: summary, Items: items, Payments: records}, nil
 }
 
+func (s *PostgresStore) GetCNUnpaidPayment(ctx context.Context, cn string) (CNPaymentResponse, error) {
+	cn = normalizeCN(cn)
+	if cn == "" {
+		return CNPaymentResponse{}, ErrCNRequired
+	}
+
+	user, err := s.findUser(ctx, cn)
+	if err != nil {
+		return CNPaymentResponse{}, err
+	}
+	items, err := s.listUnpaidItemsForUser(ctx, user.ID)
+	if err != nil {
+		return CNPaymentResponse{}, err
+	}
+	records, err := s.listPaymentsForUser(ctx, user.ID)
+	if err != nil {
+		return CNPaymentResponse{}, err
+	}
+	return CNPaymentResponse{User: user, Summary: summarizePaymentItems(items), Items: items, Payments: records}, nil
+}
+
 func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
 	cn := normalizeCN(request.CN)
 	if cn == "" {
@@ -526,11 +574,27 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePayment
 		return CreatePaymentResponse{}, ErrInvalidAmount
 	}
 
+	paymentMethod := strings.TrimSpace(request.PaymentMethod)
+	if paymentMethod != "alipay" && paymentMethod != "wechat" {
+		return CreatePaymentResponse{}, ErrInvalidPaymentMethod
+	}
+
+	// Convert to integer cents for fee calculation — no float64 arithmetic on fees.
+	baseCents := safeCentsFromFloat64(total)
+	feeCents, payableCents := calculateFee(baseCents, paymentMethod)
+
+	// Format as strings for numeric(12,2) columns to avoid float64 precision loss.
+	submittedAmountStr := centsToNumeric(baseCents)
+	feeAmountStr := centsToNumeric(feeCents)
+	payableAmountStr := centsToNumeric(payableCents)
+
 	var paymentID string
 	err = tx.QueryRow(ctx, `
 		insert into payments (
 			user_id,
 			submitted_amount,
+			fee_amount,
+			payable_amount,
 			payment_method,
 			note,
 			status,
@@ -541,9 +605,9 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePayment
 			created_by,
 			idempotency_key
 		)
-		values ($1::uuid, $2, $3, $4, 'approved', now(), now(), $5::uuid, $6, $5::uuid, $7)
+		values ($1::uuid, $2::numeric(12,2), $3::numeric(12,2), $4::numeric(12,2), $5, $6, 'approved', now(), now(), $7::uuid, $8, $7::uuid, $9)
 		returning id::text
-	`, user.ID, total, strings.TrimSpace(request.PaymentMethod), strings.TrimSpace(request.Note), adminID, paidAt, request.IdempotencyKey).Scan(&paymentID)
+	`, user.ID, submittedAmountStr, feeAmountStr, payableAmountStr, paymentMethod, strings.TrimSpace(request.Note), adminID, paidAt, request.IdempotencyKey).Scan(&paymentID)
 	if err != nil {
 		return CreatePaymentResponse{}, err
 	}
@@ -585,8 +649,8 @@ func (s *PostgresStore) ListPaymentRecords(ctx context.Context, filters PaymentF
 		conditions = append(conditions, "(u.cn_code ilike "+placeholder+" or coalesce(u.display_name, '') ilike "+placeholder+")")
 	}
 	if filters.PaymentMethod != "" {
-		placeholder := addArg("%" + filters.PaymentMethod + "%")
-		conditions = append(conditions, "coalesce(p.payment_method, '') ilike "+placeholder)
+		placeholder := addArg(filters.PaymentMethod)
+		conditions = append(conditions, "lower(coalesce(p.payment_method, '')) = lower("+placeholder+")")
 	}
 	if filters.Status != "" {
 		placeholder := addArg(filters.Status)
@@ -608,6 +672,8 @@ func (s *PostgresStore) ListPaymentRecords(ctx context.Context, filters PaymentF
 			u.cn_code,
 			coalesce(u.display_name, ''),
 			p.submitted_amount::float8,
+			p.fee_amount::float8,
+			p.payable_amount::float8,
 			coalesce(p.payment_method, ''),
 			p.status,
 			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
@@ -624,7 +690,7 @@ func (s *PostgresStore) ListPaymentRecords(ctx context.Context, filters PaymentF
 		left join admins voider on voider.id = p.voided_by_admin_id
 		left join payment_items pi on pi.payment_id = p.id
 		where `+strings.Join(conditions, " and ")+`
-		group by p.id, u.cn_code, u.display_name, p.submitted_amount, p.payment_method, p.status, p.paid_at, p.approved_at, p.submitted_at, a.username, p.note, p.created_at, p.voided_at, voider.username, p.void_reason
+		group by p.id, u.cn_code, u.display_name, p.submitted_amount, p.fee_amount, p.payable_amount, p.payment_method, p.status, p.paid_at, p.approved_at, p.submitted_at, a.username, p.note, p.created_at, p.voided_at, voider.username, p.void_reason
 		order by coalesce(p.paid_at, p.approved_at, p.submitted_at) desc, p.created_at desc, p.id desc
 		limit `+limitPlaceholder, args...)
 	if err != nil {
@@ -635,10 +701,12 @@ func (s *PostgresStore) ListPaymentRecords(ctx context.Context, filters PaymentF
 	response := PaymentListResponse{Items: []PaymentListItem{}}
 	for rows.Next() {
 		var item PaymentListItem
-		if err := rows.Scan(&item.ID, &item.CNCode, &item.DisplayName, &item.Amount, &item.PaymentMethod, &item.Status, &item.PaidAt, &item.CreatedBy, &item.Note, &item.PaymentItemCount, &item.CreatedAt, &item.VoidedAt, &item.VoidedBy, &item.VoidReason); err != nil {
+		if err := rows.Scan(&item.ID, &item.CNCode, &item.DisplayName, &item.Amount, &item.FeeAmount, &item.PayableAmount, &item.PaymentMethod, &item.Status, &item.PaidAt, &item.CreatedBy, &item.Note, &item.PaymentItemCount, &item.CreatedAt, &item.VoidedAt, &item.VoidedBy, &item.VoidReason); err != nil {
 			return PaymentListResponse{}, err
 		}
 		item.Amount = round2(item.Amount)
+		item.FeeAmount = round2(item.FeeAmount)
+		item.PayableAmount = round2(item.PayableAmount)
 		response.Items = append(response.Items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -656,6 +724,8 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 			u.cn_code,
 			coalesce(u.display_name, ''),
 			p.submitted_amount::float8,
+			p.fee_amount::float8,
+			p.payable_amount::float8,
 			coalesce(p.payment_method, ''),
 			p.status,
 			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
@@ -677,6 +747,8 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 		&detail.CNCode,
 		&detail.DisplayName,
 		&detail.Amount,
+		&detail.FeeAmount,
+		&detail.PayableAmount,
 		&detail.PaymentMethod,
 		&detail.Status,
 		&detail.PaidAt,
@@ -695,6 +767,8 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 		return PaymentDetailResponse{}, err
 	}
 	detail.Amount = round2(detail.Amount)
+	detail.FeeAmount = round2(detail.FeeAmount)
+	detail.PayableAmount = round2(detail.PayableAmount)
 
 	rows, err := s.pool.Query(ctx, `
 		select
@@ -841,6 +915,43 @@ func (s *PostgresStore) listItemsForUser(ctx context.Context, userID string) ([]
 	return listItemsForUserTx(ctx, s.pool, userID)
 }
 
+func (s *PostgresStore) listUnpaidItemsForUser(ctx context.Context, userID string) ([]PaymentItemRow, error) {
+	items, _, err := listItemsForUserTx(ctx, s.pool, userID)
+	if err != nil {
+		return nil, err
+	}
+	return filterPayableItems(items), nil
+}
+
+func filterPayableItems(items []PaymentItemRow) []PaymentItemRow {
+	payable := make([]PaymentItemRow, 0, len(items))
+	for _, item := range items {
+		if item.RemainingAmount > 0.005 {
+			payable = append(payable, item)
+		}
+	}
+	return payable
+}
+
+func summarizePaymentItems(items []PaymentItemRow) PaymentSummary {
+	summary := PaymentSummary{}
+	for _, item := range items {
+		summary.TotalAmount = round2(summary.TotalAmount + item.Amount)
+		summary.PaidAmount = round2(summary.PaidAmount + item.PaidAmount)
+		summary.RemainingAmount = round2(summary.RemainingAmount + item.RemainingAmount)
+		summary.ItemCount++
+		switch item.PaymentStatus {
+		case "paid":
+			summary.PaidCount++
+		case "partial":
+			summary.PartialCount++
+		default:
+			summary.UnpaidCount++
+		}
+	}
+	return summary
+}
+
 func listItemsForUserTx(ctx context.Context, q queryer, userID string) ([]PaymentItemRow, PaymentSummary, error) {
 	rows, err := q.Query(ctx, `
 		with paid_by_item as (
@@ -918,6 +1029,7 @@ func listItemsForUserTx(ctx context.Context, q queryer, userID string) ([]Paymen
 		); err != nil {
 			return nil, PaymentSummary{}, err
 		}
+		item.OrderItemID = item.ID
 		item.Amount = round2(item.Amount)
 		item.PaidAmount = round2(item.PaidAmount)
 		item.RemainingAmount = round2(item.RemainingAmount)
@@ -943,6 +1055,8 @@ func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) 
 		select
 			p.id::text,
 			p.submitted_amount::float8,
+			p.fee_amount::float8,
+			p.payable_amount::float8,
 			coalesce(p.payment_method, ''),
 			coalesce(p.note, ''),
 			p.status,
@@ -970,6 +1084,8 @@ func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) 
 		if err := rows.Scan(
 			&record.ID,
 			&record.Amount,
+			&record.FeeAmount,
+			&record.PayableAmount,
 			&record.PaymentMethod,
 			&record.Note,
 			&record.Status,
@@ -983,6 +1099,8 @@ func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) 
 			return nil, err
 		}
 		record.Amount = round2(record.Amount)
+		record.FeeAmount = round2(record.FeeAmount)
+		record.PayableAmount = round2(record.PayableAmount)
 		records = append(records, record)
 	}
 	return records, rows.Err()
@@ -1140,6 +1258,38 @@ func round2(value float64) float64 {
 	return math.Round(value*100) / 100
 }
 
+// safeCentsFromFloat64 converts a round2'd float64 amount to integer cents.
+// Input must already be rounded to 2 decimal places via round2().
+func safeCentsFromFloat64(amount float64) int64 {
+	return int64(math.Round(amount * 100))
+}
+
+// calculateFee returns (feeCents, payableCents) given baseCents and paymentMethod.
+// All arithmetic is in integer cents — no float64 involved in fee calculation.
+func calculateFee(baseCents int64, paymentMethod string) (int64, int64) {
+	switch paymentMethod {
+	case "alipay":
+		return 0, baseCents
+	case "wechat":
+		// fee_cents = (base_cents + 999) / 1000  (ceiling division by 1000, i.e. 0.1% rounded up)
+		feeCents := (baseCents + 999) / 1000
+		return feeCents, baseCents + feeCents
+	default:
+		return 0, baseCents
+	}
+}
+
+// centsToNumeric formats integer cents as a string for numeric(12,2), e.g. 3680 -> "36.80".
+func centsToNumeric(cents int64) string {
+	sign := ""
+	abs := cents
+	if cents < 0 {
+		sign = "-"
+		abs = -cents
+	}
+	return fmt.Sprintf("%s%d.%02d", sign, abs/100, abs%100)
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	decoder := json.NewDecoder(r.Body)
@@ -1163,7 +1313,8 @@ func writePaymentError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrIdempotencyKey),
 		errors.Is(err, ErrPaymentTime),
 		errors.Is(err, ErrVoidReasonRequired),
-		errors.Is(err, ErrPaymentNotApproved):
+		errors.Is(err, ErrPaymentNotApproved),
+		errors.Is(err, ErrInvalidPaymentMethod):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrPaymentAlreadyVoid):
 		writeError(w, http.StatusConflict, err.Error())
