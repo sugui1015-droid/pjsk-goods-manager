@@ -582,6 +582,16 @@ th {
   color: #b42318;
 }
 
+.payment-immutable-hint {
+  font-size: 13px;
+  color: #92400e;
+  padding: 8px 12px;
+  margin: 8px 0 0;
+  border: 1px solid #f6d9a8;
+  border-radius: 8px;
+  background: #fdf6e9;
+}
+
 .payment-fee-preview {
   display: flex;
   flex-wrap: wrap;

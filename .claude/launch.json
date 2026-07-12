@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "backend\\run.cmd"],
+      "port": 8080
+    },
+    {
+      "name": "frontend",
+      "cwd": "frontend",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "D:\\pjsk\\frontend\\run.cmd"],
+      "port": 5173
+    }
+  ]
+}

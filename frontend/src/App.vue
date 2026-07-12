@@ -1582,6 +1582,7 @@ onMounted(() => {
                 <label><span>CN</span><input v-model="paymentEntryCN" placeholder="输入 CN" /></label>
                 <button class="primary-button" type="submit" :disabled="cnPaymentLoading">查询</button>
               </form>
+              <p class="payment-immutable-hint">付款记录保存后不可直接修改。如金额、付款方式或关联明细录入错误，请先在付款详情页撤销原付款，再重新录入。</p>
               <div v-if="cnPaymentMessage" class="inline-alert">{{ cnPaymentMessage }}</div>
               <template v-if="cnPayment">
                 <div class="summary-grid compact-summary payment-summary">
@@ -1659,7 +1660,7 @@ onMounted(() => {
               </div>
               <section v-if="paymentDetail.payment.status === 'approved'" class="panel nested-panel danger-panel">
                 <div class="panel__header">
-                  <div><h2>撤销付款</h2><p class="muted">撤销后该付款不再计入有效已付款金额，相关订单状态会重新计算。</p></div>
+                  <div><h2>撤销付款</h2><p class="muted">付款记录不可直接修改。如金额、方式或明细错误，请撤销本笔付款后重新录入；撤销后该付款不再计入有效已付款金额，相关订单状态会重新计算。</p></div>
                   <button class="danger-button" type="button" :disabled="paymentVoiding" @click="voidPayment">{{ paymentVoiding ? '撤销中' : '撤销付款' }}</button>
                 </div>
               </section>
