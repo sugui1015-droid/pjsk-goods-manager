@@ -9,6 +9,8 @@ import {
   type AdminUserDetailResponse,
   type AdminUserListItem,
   type AdminUserListResponse,
+  type AdminUserMergePreviewResponse,
+  type AdminUserMergeResponse,
   type AuthResponse,
   type ConfigResponse,
   type CNPaymentResponse,
@@ -91,6 +93,12 @@ const adminUserFilters = ref({ cn: '', status: '' })
 const adminUserDetail = ref<AdminUserDetailResponse | null>(null)
 const adminUserDetailLoading = ref(false)
 const adminUserDetailMessage = ref('')
+const mergeTargetCN = ref('')
+const mergeReason = ref('')
+const mergePreview = ref<AdminUserMergePreviewResponse | null>(null)
+const mergePreviewLoading = ref(false)
+const mergeSaving = ref(false)
+const mergeMessage = ref('')
 
 const admin = ref<Admin | null>(null)
 const authChecked = ref(false)
@@ -698,6 +706,10 @@ async function loadAdminUserDetail(id: string) {
   adminUserDetailLoading.value = true
   adminUserDetailMessage.value = ''
   adminUserDetail.value = null
+  mergeTargetCN.value = ''
+  mergeReason.value = ''
+  mergePreview.value = null
+  mergeMessage.value = ''
   try {
     adminUserDetail.value = await getJSON<AdminUserDetailResponse>('/api/admin/users/' + encodeURIComponent(id))
   } catch (error) {
@@ -709,6 +721,73 @@ async function loadAdminUserDetail(id: string) {
     adminUserDetailMessage.value = error instanceof Error ? error.message : '用户详情加载失败'
   } finally {
     adminUserDetailLoading.value = false
+  }
+}
+
+async function previewCNMerge() {
+  if (!adminUserDetail.value) return
+  const target = mergeTargetCN.value.trim()
+  if (!target) {
+    mergeMessage.value = '请输入要合并到的目标 CN。'
+    return
+  }
+  mergePreviewLoading.value = true
+  mergeMessage.value = ''
+  mergePreview.value = null
+  try {
+    mergePreview.value = await getJSON<AdminUserMergePreviewResponse>(
+      `/api/admin/users/merge-preview?source_id=${encodeURIComponent(adminUserDetail.value.user.id)}&target_cn=${encodeURIComponent(target)}`,
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    mergeMessage.value = error instanceof Error ? error.message : '合并预览失败'
+  } finally {
+    mergePreviewLoading.value = false
+  }
+}
+
+async function confirmCNMerge() {
+  if (!adminUserDetail.value || !mergePreview.value || mergeSaving.value) return
+  const reason = mergeReason.value.trim()
+  if (!reason) {
+    mergeMessage.value = '请填写合并原因。'
+    return
+  }
+  const preview = mergePreview.value
+  const confirmMessage = [
+    '确认合并 CN？此操作不可撤销。',
+    `被合并（将标记为已合并）：${preview.source.cn_code}`,
+    `合并到：${preview.target.cn_code}`,
+    `迁移订单：${preview.move_order_count} 单`,
+    `迁移付款：${preview.move_payment_count} 笔`,
+    `原因：${reason}`,
+  ].join('\n')
+  if (!window.confirm(confirmMessage)) return
+  mergeSaving.value = true
+  mergeMessage.value = ''
+  try {
+    const response = await postJSON<AdminUserMergeResponse>('/api/admin/users/merge', {
+      source_user_id: preview.source.id,
+      target_user_id: preview.target.id,
+      reason,
+    })
+    mergeMessage.value = `合并完成：迁移订单 ${response.moved_order_count} 单、付款 ${response.moved_payment_count} 笔。`
+    mergePreview.value = null
+    await loadAdminUserDetail(preview.target.id)
+    navigate('/admin/users/' + preview.target.id)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    mergeMessage.value = error instanceof Error ? error.message : 'CN 合并失败'
+  } finally {
+    mergeSaving.value = false
   }
 }
 
@@ -1775,6 +1854,32 @@ onMounted(() => {
                 <article class="metric-tile"><span>剩余金额</span><strong :class="{ danger: adminUserDetail.user.remaining_amount > 0 }">{{ formatMoney(adminUserDetail.user.remaining_amount) }}</strong></article>
               </div>
               <p v-if="adminUserDetail.import_filenames.length > 0" class="muted">导入来源：{{ adminUserDetail.import_filenames.join('、') }}</p>
+              <section v-if="adminUserDetail.user.status === 'active'" class="panel nested-panel danger-panel">
+                <div class="panel__header"><div><h2>CN 合并</h2><p class="muted">将当前 CN 的订单、付款和查询记录全部迁移到目标 CN，当前 CN 标记为“已合并”。此操作不可撤销，请先预览影响范围。</p></div></div>
+                <div class="payment-cn-form">
+                  <label><span>合并到目标 CN</span><input v-model="mergeTargetCN" placeholder="输入目标 CN" /></label>
+                  <button class="secondary-button" type="button" :disabled="mergePreviewLoading" @click="previewCNMerge">{{ mergePreviewLoading ? '预览中' : '预览合并影响' }}</button>
+                </div>
+                <div v-if="mergeMessage" class="inline-alert">{{ mergeMessage }}</div>
+                <template v-if="mergePreview">
+                  <div class="summary-grid compact-summary">
+                    <article class="metric-tile"><span>被合并 CN</span><strong>{{ mergePreview.source.cn_code }}</strong></article>
+                    <article class="metric-tile"><span>目标 CN</span><strong>{{ mergePreview.target.cn_code }}</strong></article>
+                    <article class="metric-tile"><span>迁移订单</span><strong>{{ mergePreview.move_order_count }} 单</strong></article>
+                    <article class="metric-tile"><span>迁移付款</span><strong>{{ mergePreview.move_payment_count }} 笔</strong></article>
+                    <article class="metric-tile"><span>目标现有订单</span><strong>{{ mergePreview.target.order_count }} 单</strong></article>
+                    <article class="metric-tile"><span>目标剩余应付</span><strong>{{ formatMoney(mergePreview.target.remaining_amount) }}</strong></article>
+                  </div>
+                  <div class="payment-cn-form">
+                    <label><span>合并原因（必填）</span><input v-model="mergeReason" maxlength="200" placeholder="例如：同一用户重复 CN" /></label>
+                    <button class="danger-button" type="button" :disabled="mergeSaving" @click="confirmCNMerge">{{ mergeSaving ? '合并中' : '确认合并' }}</button>
+                  </div>
+                </template>
+              </section>
+              <section v-if="adminUserDetail.merges.length > 0" class="panel nested-panel">
+                <div class="panel__header"><h2>CN 合并历史</h2><span>{{ adminUserDetail.merges.length }} 条</span></div>
+                <div class="table-scroll history-table"><table><thead><tr><th>方向</th><th>相关 CN</th><th>原因</th><th>操作管理员</th><th>时间</th></tr></thead><tbody><tr v-for="entry in adminUserDetail.merges" :key="entry.id"><td>{{ entry.direction === 'merged_into' ? '本 CN 被合并到' : '接收合并自' }}</td><td>{{ entry.other_cn }}</td><td>{{ entry.reason }}</td><td>{{ entry.merged_by || '-' }}</td><td>{{ formatDate(entry.merged_at) }}</td></tr></tbody></table></div>
+              </section>
               <section class="panel nested-panel">
                 <div class="panel__header"><h2>订单</h2><span>{{ adminUserDetail.orders.length }} 单</span></div>
                 <div class="table-scroll history-table"><table><thead><tr><th>订单号</th><th>项目</th><th>状态</th><th>明细数</th><th>总金额</th><th>已付</th><th>剩余</th><th>创建时间</th><th></th></tr></thead><tbody><tr v-if="adminUserDetail.orders.length === 0"><td colspan="9">暂无订单。</td></tr><tr v-for="order in adminUserDetail.orders" :key="order.id"><td>{{ order.order_no }}</td><td>{{ order.project_name }}</td><td>{{ statusLabel(order.status) }}</td><td>{{ order.item_count }}</td><td>{{ formatMoney(order.total_amount) }}</td><td>{{ formatMoney(order.paid_amount) }}</td><td :class="{ danger: order.remaining_amount > 0 }">{{ formatMoney(order.remaining_amount) }}</td><td>{{ formatDate(order.created_at) }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/orders/' + order.id)">订单详情</button></td></tr></tbody></table></div>

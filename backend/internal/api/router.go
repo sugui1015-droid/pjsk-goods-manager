@@ -100,6 +100,14 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.List)),
 	)
 	mux.Handle(
+		"/api/admin/users/merge-preview",
+		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.MergePreview)),
+	)
+	mux.Handle(
+		"/api/admin/users/merge",
+		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.Merge)),
+	)
+	mux.Handle(
 		"/api/admin/users/",
 		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.Detail)),
 	)

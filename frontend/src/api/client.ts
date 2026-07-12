@@ -548,4 +548,29 @@ export type AdminUserDetailResponse = {
   orders: AdminUserDetailOrder[]
   payments: AdminUserDetailPayment[]
   import_filenames: string[]
+  merges: AdminUserMergeLogEntry[]
+}
+
+export type AdminUserMergeLogEntry = {
+  id: string
+  direction: 'merged_into' | 'absorbed'
+  other_cn: string
+  reason: string
+  merged_by?: string
+  merged_at: string
+}
+
+export type AdminUserMergePreviewResponse = {
+  source: AdminUserListItem
+  target: AdminUserListItem
+  move_order_count: number
+  move_payment_count: number
+}
+
+export type AdminUserMergeResponse = {
+  source_user_id: string
+  target_user_id: string
+  moved_order_count: number
+  moved_payment_count: number
+  merged_at: string
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -24,6 +25,8 @@ type Handler struct {
 type Store interface {
 	ListUsers(context.Context, Filters) (ListResponse, error)
 	GetUserDetail(context.Context, string) (DetailResponse, error)
+	PreviewMerge(context.Context, string, string) (MergePreviewResponse, error)
+	MergeUsers(context.Context, MergeRequest, string) (MergeResponse, error)
 }
 
 type Filters struct {
@@ -80,6 +83,7 @@ type DetailResponse struct {
 	Orders          []DetailOrder   `json:"orders"`
 	Payments        []DetailPayment `json:"payments"`
 	ImportFilenames []string        `json:"import_filenames"`
+	Merges          []MergeLogEntry `json:"merges"`
 }
 
 type errorResponse struct {
@@ -303,6 +307,12 @@ func (s *PostgresStore) GetUserDetail(ctx context.Context, userID string) (Detai
 		return DetailResponse{}, err
 	}
 	detail.ImportFilenames = filenames
+
+	merges, err := s.listMergeLogs(ctx, userID)
+	if err != nil {
+		return DetailResponse{}, err
+	}
+	detail.Merges = merges
 	return detail, nil
 }
 
@@ -465,6 +475,19 @@ func isUUIDLike(value string) bool {
 
 func round2(value float64) float64 {
 	return math.Round(value*100) / 100
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
