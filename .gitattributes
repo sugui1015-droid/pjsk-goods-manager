@@ -41,3 +41,6 @@
 *.woff2 binary
 *.ttf   binary
 *.eot   binary
+
+# Git hooks are shell scripts and must stay LF even on Windows checkouts
+.githooks/* text eol=lf

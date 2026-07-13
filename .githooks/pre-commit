@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+bad=0
+changes=$(git diff --cached --name-status -- docs/development-logs/ || true)
+old_ifs=$IFS
+IFS='
+'
+for line in $changes; do
+  status=${line%%[ 	]*}
+  case "$status" in
+    D|R*) bad=1 ;;
+  esac
+done
+IFS=$old_ifs
+
+if [ "$bad" -eq 1 ]; then
+  echo "ERROR: refusing to commit deletion or rename of docs/development-logs history." >&2
+  echo "Development logs are project records and must not be deleted, moved, or renamed." >&2
+  echo "Restore the log file and commit normal additions or modifications instead." >&2
+  exit 1
+fi
+
+exit 0
