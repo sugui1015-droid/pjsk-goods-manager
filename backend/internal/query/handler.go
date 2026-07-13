@@ -45,7 +45,10 @@ type Store interface {
 }
 
 type User struct {
-	ID            string  `json:"id"`
+	// ID is the internal database primary key, used for session lookups and
+	// to scope order queries. It is deliberately not serialized — regular
+	// users identify themselves by CN, not by an internal database id.
+	ID            string  `json:"-"`
 	CNCode        string  `json:"cn_code"`
 	DisplayName   *string `json:"display_name,omitempty"`
 	QueryCodeHash *string `json:"-"`
@@ -72,20 +75,47 @@ type OrdersResponse struct {
 }
 
 // PaymentRecord is the user-facing view of a payment. It intentionally
-// excludes admin usernames, notes, and void reasons.
+// excludes admin usernames, notes, void reasons, and void timestamps —
+// the voided lifecycle is conveyed to users only through Status.
 type PaymentRecord struct {
-	ID              string  `json:"id"`
-	PrincipalAmount float64 `json:"principal_amount"`
-	FeeAmount       float64 `json:"fee_amount"`
-	TotalAmount     float64 `json:"total_amount"`
-	PaymentMethod   string  `json:"payment_method,omitempty"`
-	Status          string  `json:"status"`
-	PaidAt          string  `json:"paid_at"`
-	VoidedAt        string  `json:"voided_at,omitempty"`
+	// ID is a scan target only, used internally to attach Items;
+	// regular users have no endpoint that accepts a payment id, so it is
+	// never serialized.
+	ID              string        `json:"-"`
+	PrincipalAmount float64       `json:"principal_amount"`
+	FeeAmount       float64       `json:"fee_amount"`
+	TotalAmount     float64       `json:"total_amount"`
+	PaymentMethod   string        `json:"payment_method,omitempty"`
+	Status          string        `json:"status"`
+	PaidAt          string        `json:"paid_at"`
+	Items           []PaymentItem `json:"items"`
+}
+
+// PaymentItem is the regular-user-facing view of how one payment was split
+// across order items. It is a dedicated DTO, deliberately separate from the
+// admin-side payments.PaymentDetailItem: no order numbers, project names,
+// internal ids, import/source tracking, or audit fields ever enter this
+// struct. DisplayName is the composed business name (name, or name-category
+// per the existing display rule) and is always non-empty, so no raw
+// goods_name fallback is carried. Amount is the item's own subtotal (小计);
+// AppliedAmount is the portion of THIS payment allocated to the item
+// (本次付款金额) — they differ whenever an item spans several payments.
+type PaymentItem struct {
+	DisplayName   string  `json:"display_name"`
+	CharacterName string  `json:"character_name,omitempty"`
+	Category      string  `json:"category,omitempty"`
+	Quantity      float64 `json:"quantity"`
+	UnitPrice     float64 `json:"unit_price"`
+	Amount        float64 `json:"amount"`
+	AppliedAmount float64 `json:"applied_amount"`
+	PaymentStatus string  `json:"payment_status"`
 }
 
 type Order struct {
-	ID              string      `json:"id"`
+	// ID is used internally to fetch this order's items and is deliberately
+	// not serialized — regular users identify their own orders by OrderNo,
+	// a human-facing code, not an internal database id.
+	ID              string      `json:"-"`
 	OrderNo         string      `json:"order_no"`
 	Status          string      `json:"status"`
 	ProjectName     string      `json:"project_name"`
@@ -94,12 +124,15 @@ type Order struct {
 	PaidAmount      float64     `json:"paid_amount"`
 	RemainingAmount float64     `json:"remaining_amount"`
 	CreatedAt       string      `json:"created_at"`
-	ImportFilenames []string    `json:"import_filenames"`
 	Items           []OrderItem `json:"items"`
 }
 
+// OrderItem is the regular-user-facing view of an order line. It
+// deliberately excludes internal tracking fields (order-item id, import
+// batch id, source filename, source sheet) — those are for admin
+// troubleshooting only (see the admin "technical identifiers" panels) and
+// must never reach the public /api/query/orders response.
 type OrderItem struct {
-	ID              string  `json:"id"`
 	GoodsName       string  `json:"goods_name"`
 	Category        string  `json:"category,omitempty"`
 	CharacterName   string  `json:"character_name,omitempty"`
@@ -111,9 +144,6 @@ type OrderItem struct {
 	PaidAmount      float64 `json:"paid_amount"`
 	RemainingAmount float64 `json:"remaining_amount"`
 	PaymentStatus   string  `json:"payment_status"`
-	ImportBatchID   string  `json:"import_batch_id,omitempty"`
-	ImportFilename  string  `json:"import_filename,omitempty"`
-	SourceSheet     string  `json:"source_sheet,omitempty"`
 }
 
 type errorResponse struct {
@@ -329,12 +359,10 @@ func (s *PostgresStore) ListOrdersForUser(ctx context.Context, userID string) (O
 			p.name,
 			coalesce(sum(oi.quantity), 0)::float8,
 			coalesce(sum(oi.amount), 0)::float8,
-			to_char(o.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-			coalesce(array_agg(distinct ib.original_filename) filter (where ib.original_filename is not null), array[]::text[])
+			to_char(o.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		from orders o
 		join projects p on p.id = o.project_id
 		left join order_items oi on oi.order_id = o.id and oi.revoked_at is null
-		left join import_batches ib on ib.id = oi.import_batch_id
 		where o.user_id = $1::uuid
 		  and o.status <> 'cancelled'
 		group by o.id, o.order_no, o.status, p.name, o.created_at
@@ -357,7 +385,6 @@ func (s *PostgresStore) ListOrdersForUser(ctx context.Context, userID string) (O
 			&order.TotalQuantity,
 			&order.TotalAmount,
 			&order.CreatedAt,
-			&order.ImportFilenames,
 		); err != nil {
 			return OrdersResponse{}, err
 		}
@@ -399,24 +426,19 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			group by pi.order_item_id
 		)
 		select
-			oi.id::text,
 			product.name,
 			coalesce(product.category, ''),
 			coalesce(product.character_name, ''),
 			coalesce(product.series_code, ''),
-			case when coalesce(product.category, '') = '' or product.category = '默认分类' then product.name else product.name || '-' || product.category end,
+			product.name,
 			oi.quantity::float8,
 			oi.unit_price::float8,
 			oi.amount::float8,
 			least(coalesce(paid.paid_amount, 0), oi.amount)::float8,
 			greatest(oi.amount - coalesce(paid.paid_amount, 0), 0)::float8,
-			oi.payment_status,
-			coalesce(oi.import_batch_id::text, ''),
-			coalesce(ib.original_filename, ''),
-			coalesce(oi.source_sheet, '')
+			oi.payment_status
 		from order_items oi
 		join products product on product.id = oi.product_id
-		left join import_batches ib on ib.id = oi.import_batch_id
 		left join paid_by_item paid on paid.order_item_id = oi.id
 		where oi.order_id = $1::uuid
 		  and oi.revoked_at is null
@@ -431,7 +453,6 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 	for rows.Next() {
 		var item OrderItem
 		if err := rows.Scan(
-			&item.ID,
 			&item.GoodsName,
 			&item.Category,
 			&item.CharacterName,
@@ -443,9 +464,6 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			&item.PaidAmount,
 			&item.RemainingAmount,
 			&item.PaymentStatus,
-			&item.ImportBatchID,
-			&item.ImportFilename,
-			&item.SourceSheet,
 		); err != nil {
 			return nil, err
 		}
@@ -466,8 +484,7 @@ func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) 
 			p.payable_amount::float8,
 			coalesce(p.payment_method, ''),
 			p.status,
-			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-			coalesce(to_char(p.voided_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
+			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		from payments p
 		where p.user_id = $1::uuid
 		order by coalesce(p.paid_at, p.approved_at, p.submitted_at) desc, p.created_at desc, p.id desc
@@ -489,16 +506,81 @@ func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) 
 			&record.PaymentMethod,
 			&record.Status,
 			&record.PaidAt,
-			&record.VoidedAt,
 		); err != nil {
 			return nil, err
 		}
 		record.PrincipalAmount = round2(record.PrincipalAmount)
 		record.FeeAmount = round2(record.FeeAmount)
 		record.TotalAmount = round2(record.TotalAmount)
+		record.Items = []PaymentItem{}
 		records = append(records, record)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	itemsByPayment, err := s.listPaymentItemsForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range records {
+		if items, ok := itemsByPayment[records[index].ID]; ok {
+			records[index].Items = items
+		}
+	}
+	return records, nil
+}
+
+// listPaymentItemsForUser loads the user-facing item allocations for every
+// payment belonging to the user, keyed by internal payment id (which is
+// only used for grouping here and never serialized).
+func (s *PostgresStore) listPaymentItemsForUser(ctx context.Context, userID string) (map[string][]PaymentItem, error) {
+	rows, err := s.pool.Query(ctx, `
+		select
+			pi.payment_id::text,
+			case when coalesce(product.category, '') = '' or product.category = '默认分类' then product.name else product.name || '-' || product.category end,
+			coalesce(product.character_name, ''),
+			coalesce(product.category, ''),
+			oi.quantity::float8,
+			oi.unit_price::float8,
+			oi.amount::float8,
+			pi.applied_amount::float8,
+			oi.payment_status
+		from payment_items pi
+		join payments p on p.id = pi.payment_id
+		join order_items oi on oi.id = pi.order_item_id
+		join products product on product.id = oi.product_id
+		where p.user_id = $1::uuid
+		order by pi.payment_id, product.sort_order, product.name, oi.created_at
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	itemsByPayment := map[string][]PaymentItem{}
+	for rows.Next() {
+		var paymentID string
+		var item PaymentItem
+		if err := rows.Scan(
+			&paymentID,
+			&item.DisplayName,
+			&item.CharacterName,
+			&item.Category,
+			&item.Quantity,
+			&item.UnitPrice,
+			&item.Amount,
+			&item.AppliedAmount,
+			&item.PaymentStatus,
+		); err != nil {
+			return nil, err
+		}
+		item.UnitPrice = round2(item.UnitPrice)
+		item.Amount = round2(item.Amount)
+		item.AppliedAmount = round2(item.AppliedAmount)
+		itemsByPayment[paymentID] = append(itemsByPayment[paymentID], item)
+	}
+	return itemsByPayment, rows.Err()
 }
 
 func normalizeCN(value string) string {
