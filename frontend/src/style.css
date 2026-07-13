@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   color: #1f2937;
   background: #eef2f5;
@@ -1737,6 +1737,42 @@ th {
   .payment-cn-form .primary-button,
   .payment-cn-form .secondary-button,
   .payment-cn-form .danger-button {
+    width: 100%;
+  }
+}
+.query-security-panel {
+  border-color: #c9d8e6;
+  background: #f8fbfd;
+}
+
+.query-security-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr)) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.query-security-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.query-security-form input {
+  min-height: 36px;
+  width: 100%;
+  border: 1px solid #ccd7e0;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #ffffff;
+}
+
+@media (max-width: 780px) {
+  .query-security-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .query-security-form .primary-button {
     width: 100%;
   }
 }

@@ -104,6 +104,90 @@ func TestPostgresAdminQueryAccountLifecycle(t *testing.T) {
 	}
 }
 
+func TestPostgresQueryChangeCodeLifecycle(t *testing.T) {
+	pool := newUsersTestPool(t)
+	prefix := "QUERY_ACCOUNT_CHANGE_TEST_" + time.Now().Format("20060102150405")
+	cleanupQueryAccountFixture(t, pool, prefix)
+	t.Cleanup(func() { cleanupQueryAccountFixture(t, pool, prefix) })
+
+	ctx := context.Background()
+	userID := insertQueryAccountUser(t, pool, prefix+"CN", "OldCode-123")
+	otherUserID := insertQueryAccountUser(t, pool, prefix+"OTHER", "OtherCode-123")
+	queryHandler := queryapi.NewHandler(queryapi.NewPostgresStore(pool), time.Hour, false)
+
+	firstCookie := queryLogin(t, queryHandler, prefix+"CN", "OldCode-123", http.StatusOK)
+	secondCookie := queryLogin(t, queryHandler, prefix+"CN", "OldCode-123", http.StatusOK)
+	otherCookie := queryLogin(t, queryHandler, prefix+"OTHER", "OtherCode-123", http.StatusOK)
+	assertSessionCount(t, pool, userID, 2)
+	assertSessionCount(t, pool, otherUserID, 1)
+	oldHash := readQueryCodeHash(t, pool, userID)
+
+	wrongOld := changeQueryCode(t, queryHandler, firstCookie, "WrongCode-123", "NewCode-456", "NewCode-456", http.StatusUnauthorized)
+	assertNoQuerySecret(t, wrongOld.Body.String(), "NewCode-456")
+	assertSessionCount(t, pool, userID, 2)
+
+	mismatch := changeQueryCode(t, queryHandler, firstCookie, "OldCode-123", "NewCode-456", "OtherCode-456", http.StatusBadRequest)
+	assertNoQuerySecret(t, mismatch.Body.String(), "NewCode-456")
+
+	invalid := changeQueryCode(t, queryHandler, firstCookie, "OldCode-123", "短", "短", http.StatusBadRequest)
+	assertNoQuerySecret(t, invalid.Body.String(), "OldCode-123")
+
+	same := changeQueryCode(t, queryHandler, firstCookie, "OldCode-123", "OldCode-123", "OldCode-123", http.StatusBadRequest)
+	assertNoQuerySecret(t, same.Body.String(), "OldCode-123")
+
+	success := changeQueryCode(t, queryHandler, firstCookie, "OldCode-123", "NewCode-456", "NewCode-456", http.StatusOK)
+	assertNoQuerySecret(t, success.Body.String(), "NewCode-456")
+	assertClearsQueryCookie(t, success)
+	assertSessionCount(t, pool, userID, 0)
+	assertSessionCount(t, pool, otherUserID, 1)
+
+	newHash := readQueryCodeHash(t, pool, userID)
+	if newHash == oldHash || strings.Contains(newHash, "NewCode-456") || strings.Contains(newHash, "OldCode-123") {
+		t.Fatalf("query code hash was not safely changed")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(newHash), []byte("NewCode-456")); err != nil {
+		t.Fatalf("new hash does not match new query code: %v", err)
+	}
+	queryLogin(t, queryHandler, prefix+"CN", "OldCode-123", http.StatusUnauthorized)
+	queryLogin(t, queryHandler, prefix+"CN", "NewCode-456", http.StatusOK)
+
+	oldSessionResponse := httptest.NewRecorder()
+	oldSessionRequest := httptest.NewRequest(http.MethodGet, "/api/query/orders", nil)
+	oldSessionRequest.AddCookie(secondCookie)
+	queryHandler.Orders(oldSessionResponse, oldSessionRequest)
+	if oldSessionResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("old session after change status = %d, want 401", oldSessionResponse.Code)
+	}
+	otherSessionResponse := httptest.NewRecorder()
+	otherSessionRequest := httptest.NewRequest(http.MethodGet, "/api/query/orders", nil)
+	otherSessionRequest.AddCookie(otherCookie)
+	queryHandler.Orders(otherSessionResponse, otherSessionRequest)
+	if otherSessionResponse.Code != http.StatusOK {
+		t.Fatalf("other user session status = %d, want 200", otherSessionResponse.Code)
+	}
+
+	disabledID := insertQueryAccountUser(t, pool, prefix+"DISABLED", "DisabledCode-123")
+	disabledCookie := queryLogin(t, queryHandler, prefix+"DISABLED", "DisabledCode-123", http.StatusOK)
+	if _, err := pool.Exec(ctx, `update users set status = 'disabled' where id = $1::uuid`, disabledID); err != nil {
+		t.Fatalf("disable fixture user: %v", err)
+	}
+	changeQueryCode(t, queryHandler, disabledCookie, "DisabledCode-123", "DisabledNew-456", "DisabledNew-456", http.StatusUnauthorized)
+
+	mergedID := insertQueryAccountUser(t, pool, prefix+"MERGED", "MergedCode-123")
+	mergedCookie := queryLogin(t, queryHandler, prefix+"MERGED", "MergedCode-123", http.StatusOK)
+	if _, err := pool.Exec(ctx, `update users set status = 'merged' where id = $1::uuid`, mergedID); err != nil {
+		t.Fatalf("merge fixture user: %v", err)
+	}
+	changeQueryCode(t, queryHandler, mergedCookie, "MergedCode-123", "MergedNew-456", "MergedNew-456", http.StatusUnauthorized)
+
+	expiredID := insertQueryAccountUser(t, pool, prefix+"EXPIRED", "ExpiredCode-123")
+	expiredCookie := queryLogin(t, queryHandler, prefix+"EXPIRED", "ExpiredCode-123", http.StatusOK)
+	if _, err := pool.Exec(ctx, `update query_sessions set expires_at = now() - interval '1 minute' where user_id = $1::uuid`, expiredID); err != nil {
+		t.Fatalf("expire fixture query session: %v", err)
+	}
+	changeQueryCode(t, queryHandler, expiredCookie, "ExpiredCode-123", "ExpiredNew-456", "ExpiredNew-456", http.StatusUnauthorized)
+}
+
 func TestAdminQueryAccountRouteRejectsRegularQuerySession(t *testing.T) {
 	pool := newUsersTestPool(t)
 	prefix := "QUERY_ACCOUNT_ROUTE_TEST_" + time.Now().Format("20060102150405")
@@ -192,6 +276,40 @@ func queryLogin(t *testing.T, handler *queryapi.Handler, cn string, code string,
 	return nil
 }
 
+func changeQueryCode(t *testing.T, handler *queryapi.Handler, cookie *http.Cookie, oldCode string, newCode string, confirmCode string, wantStatus int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"old_query_code": oldCode, "new_query_code": newCode, "confirm_query_code": confirmCode})
+	request := httptest.NewRequest(http.MethodPost, "/api/query/change-code", bytes.NewReader(body))
+	request.RemoteAddr = "10.20.30.40:50000"
+	if cookie != nil {
+		request.AddCookie(cookie)
+	}
+	response := httptest.NewRecorder()
+	handler.ChangeCode(response, request)
+	if response.Code != wantStatus {
+		t.Fatalf("change query code status = %d, want %d: %s", response.Code, wantStatus, response.Body.String())
+	}
+	return response
+}
+
+func readQueryCodeHash(t *testing.T, pool *pgxpool.Pool, userID string) string {
+	t.Helper()
+	var hash string
+	if err := pool.QueryRow(context.Background(), `select coalesce(query_code_hash, '') from users where id = $1::uuid`, userID).Scan(&hash); err != nil {
+		t.Fatalf("read query code hash: %v", err)
+	}
+	return hash
+}
+
+func assertClearsQueryCookie(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == "pjsk_query_session" && cookie.MaxAge < 0 {
+			return
+		}
+	}
+	t.Fatal("query session cookie was not cleared")
+}
 func assertNoQuerySecret(t *testing.T, body string, plain string) {
 	t.Helper()
 	if strings.Contains(body, plain) || strings.Contains(body, "query_code_hash") || strings.Contains(body, "$2a$") || strings.Contains(body, "$2b$") {

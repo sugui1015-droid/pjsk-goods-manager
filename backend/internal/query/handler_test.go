@@ -3,11 +3,14 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type stubStore struct{}
@@ -19,7 +22,8 @@ func (stubStore) CreateSession(context.Context, string, string, time.Time) error
 func (stubStore) FindUserBySession(context.Context, string) (User, error) {
 	return User{}, ErrNotFound
 }
-func (stubStore) DeleteSession(context.Context, string) error { return nil }
+func (stubStore) DeleteSession(context.Context, string) error           { return nil }
+func (stubStore) ChangeQueryCode(context.Context, string, string) error { return nil }
 func (stubStore) ListOrdersForUser(context.Context, string) (OrdersResponse, error) {
 	return OrdersResponse{}, nil
 }
@@ -174,5 +178,165 @@ func TestNormalizeCN(t *testing.T) {
 		if got := normalizeCN(input); got != want {
 			t.Fatalf("normalizeCN(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+type changeCodeStore struct {
+	user        User
+	changeErr   error
+	changedUser string
+	changedHash string
+}
+
+func (s *changeCodeStore) FindUserByCN(context.Context, string) (User, error) {
+	return User{}, ErrNotFound
+}
+func (s *changeCodeStore) CreateSession(context.Context, string, string, time.Time) error { return nil }
+func (s *changeCodeStore) FindUserBySession(context.Context, string) (User, error) {
+	if s.user.ID == "" {
+		return User{}, ErrNotFound
+	}
+	return s.user, nil
+}
+func (s *changeCodeStore) DeleteSession(context.Context, string) error { return nil }
+func (s *changeCodeStore) ChangeQueryCode(_ context.Context, userID string, queryCodeHash string) error {
+	if s.changeErr != nil {
+		return s.changeErr
+	}
+	s.changedUser = userID
+	s.changedHash = queryCodeHash
+	return nil
+}
+func (s *changeCodeStore) ListOrdersForUser(context.Context, string) (OrdersResponse, error) {
+	return OrdersResponse{}, nil
+}
+
+func TestChangeCodeRequiresQuerySession(t *testing.T) {
+	handler := NewHandler(&changeCodeStore{}, time.Hour, false)
+	request := httptest.NewRequest(http.MethodPost, "/api/query/change-code", strings.NewReader(`{"old_query_code":"OldCode-123","new_query_code":"NewCode-456","confirm_query_code":"NewCode-456"}`))
+	response := httptest.NewRecorder()
+	handler.ChangeCode(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", response.Code)
+	}
+}
+
+func TestChangeCodeValidationAndSuccess(t *testing.T) {
+	oldHashBytes, err := bcrypt.GenerateFromPassword([]byte("OldCode-123"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash old code: %v", err)
+	}
+	oldHash := string(oldHashBytes)
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{"empty new", `{"old_query_code":"OldCode-123","new_query_code":"   ","confirm_query_code":""}`, http.StatusBadRequest},
+		{"mismatch", `{"old_query_code":"OldCode-123","new_query_code":"NewCode-456","confirm_query_code":"OtherCode-456"}`, http.StatusBadRequest},
+		{"invalid format", `{"old_query_code":"OldCode-123","new_query_code":"bad space","confirm_query_code":"bad space"}`, http.StatusBadRequest},
+		{"wrong old", `{"old_query_code":"WrongCode-123","new_query_code":"NewCode-456","confirm_query_code":"NewCode-456"}`, http.StatusUnauthorized},
+		{"same as old", `{"old_query_code":"OldCode-123","new_query_code":"OldCode-123","confirm_query_code":"OldCode-123"}`, http.StatusBadRequest},
+		{"success", `{"old_query_code":"OldCode-123","new_query_code":"NewCode-456","confirm_query_code":"NewCode-456"}`, http.StatusOK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &changeCodeStore{user: User{ID: "user-1", CNCode: "CN001", QueryCodeHash: &oldHash, Status: "active"}}
+			handler := NewHandler(store, time.Hour, false)
+			request := httptest.NewRequest(http.MethodPost, "/api/query/change-code", strings.NewReader(test.body))
+			request.RemoteAddr = "10.0.0.2:50000"
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "session-token"})
+			response := httptest.NewRecorder()
+			handler.ChangeCode(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			body := response.Body.String()
+			for _, forbidden := range []string{"OldCode-123", "NewCode-456", "query_code_hash", "user_id", "$2a$", "$2b$"} {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("response leaks %q: %s", forbidden, body)
+				}
+			}
+			if test.wantStatus == http.StatusOK {
+				if store.changedUser != "user-1" || store.changedHash == "" || store.changedHash == oldHash {
+					t.Fatalf("query code hash was not changed: user=%q hash=%q", store.changedUser, store.changedHash)
+				}
+				if err := bcrypt.CompareHashAndPassword([]byte(store.changedHash), []byte("NewCode-456")); err != nil {
+					t.Fatalf("changed hash does not match new code: %v", err)
+				}
+				cleared := false
+				for _, cookie := range response.Result().Cookies() {
+					if cookie.Name == sessionCookieName && cookie.MaxAge < 0 {
+						cleared = true
+					}
+				}
+				if !cleared {
+					t.Fatal("session cookie was not cleared")
+				}
+			}
+		})
+	}
+}
+
+func TestChangeCodeStoreFailureDoesNotClearSessionCookie(t *testing.T) {
+	oldHashBytes, err := bcrypt.GenerateFromPassword([]byte("OldCode-123"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash old code: %v", err)
+	}
+	oldHash := string(oldHashBytes)
+	store := &changeCodeStore{
+		user:      User{ID: "user-1", CNCode: "CN001", QueryCodeHash: &oldHash, Status: "active"},
+		changeErr: errors.New("store failure"),
+	}
+	handler := NewHandler(store, time.Hour, false)
+	request := httptest.NewRequest(http.MethodPost, "/api/query/change-code", strings.NewReader(`{"old_query_code":"OldCode-123","new_query_code":"NewCode-456","confirm_query_code":"NewCode-456"}`))
+	request.RemoteAddr = "10.0.0.4:50000"
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "session-token"})
+	response := httptest.NewRecorder()
+
+	handler.ChangeCode(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", response.Code, response.Body.String())
+	}
+	if store.changedHash != "" {
+		t.Fatalf("store recorded changed hash despite failure")
+	}
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == sessionCookieName && cookie.MaxAge < 0 {
+			t.Fatalf("session cookie should not be cleared when transaction fails")
+		}
+	}
+	body := response.Body.String()
+	for _, forbidden := range []string{"OldCode-123", "NewCode-456", "query_code_hash", "user_id", "$2a$", "$2b$"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("response leaks %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestChangeCodeRateLimitedAfterWrongOldCode(t *testing.T) {
+	oldHashBytes, err := bcrypt.GenerateFromPassword([]byte("OldCode-123"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash old code: %v", err)
+	}
+	oldHash := string(oldHashBytes)
+	store := &changeCodeStore{user: User{ID: "user-1", CNCode: "CN001", QueryCodeHash: &oldHash, Status: "active"}}
+	handler := NewHandler(store, time.Hour, false)
+	doChange := func() int {
+		request := httptest.NewRequest(http.MethodPost, "/api/query/change-code", strings.NewReader(`{"old_query_code":"WrongCode-123","new_query_code":"NewCode-456","confirm_query_code":"NewCode-456"}`))
+		request.RemoteAddr = "10.0.0.3:50000"
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "session-token"})
+		response := httptest.NewRecorder()
+		handler.ChangeCode(response, request)
+		return response.Code
+	}
+	for i := 0; i < handler.limiter.maxFailures; i++ {
+		if code := doChange(); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401", i+1, code)
+		}
+	}
+	if code := doChange(); code != http.StatusTooManyRequests {
+		t.Fatalf("blocked attempt status = %d, want 429", code)
 	}
 }

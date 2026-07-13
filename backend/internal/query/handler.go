@@ -18,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
+
+	"pjsk/backend/internal/querycode"
 )
 
 const sessionCookieName = "pjsk_query_session"
@@ -41,6 +43,7 @@ type Store interface {
 	CreateSession(context.Context, string, string, time.Time) error
 	FindUserBySession(context.Context, string) (User, error)
 	DeleteSession(context.Context, string) error
+	ChangeQueryCode(context.Context, string, string) error
 	ListOrdersForUser(context.Context, string) (OrdersResponse, error)
 }
 
@@ -58,6 +61,16 @@ type User struct {
 type loginRequest struct {
 	CN        string `json:"cn"`
 	QueryCode string `json:"query_code"`
+}
+
+type changeCodeRequest struct {
+	OldQueryCode     string `json:"old_query_code"`
+	NewQueryCode     string `json:"new_query_code"`
+	ConfirmQueryCode string `json:"confirm_query_code"`
+}
+
+type changeCodeResponse struct {
+	Message string `json:"message"`
 }
 
 type loginResponse struct {
@@ -282,7 +295,87 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *Handler) ChangeCode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	user, ok := h.userFromRequestWithHash(w, r, true)
+	if !ok {
+		return
+	}
+	if user.QueryCodeHash == nil || *user.QueryCodeHash == "" {
+		writeError(w, http.StatusBadRequest, "当前账号尚未设置查询码")
+		return
+	}
+
+	var request changeCodeRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	oldQueryCode := strings.TrimSpace(request.OldQueryCode)
+	newQueryCode := strings.TrimSpace(request.NewQueryCode)
+	confirmQueryCode := strings.TrimSpace(request.ConfirmQueryCode)
+	if oldQueryCode == "" {
+		writeError(w, http.StatusBadRequest, "请输入旧查询码")
+		return
+	}
+	if newQueryCode == "" {
+		writeError(w, http.StatusBadRequest, "请输入新查询码")
+		return
+	}
+	if newQueryCode != confirmQueryCode {
+		writeError(w, http.StatusBadRequest, "两次输入的新查询码不一致")
+		return
+	}
+	if err := querycode.Validate(newQueryCode); err != nil {
+		writeError(w, http.StatusBadRequest, "查询码格式不正确")
+		return
+	}
+
+	limiterKey := "change:" + user.ID
+	ip := clientIP(r)
+	if !h.limiter.allow(ip, limiterKey, h.now()) {
+		writeError(w, http.StatusTooManyRequests, "尝试次数过多，请稍后再试")
+		return
+	}
+	oldMatches := bcrypt.CompareHashAndPassword([]byte(*user.QueryCodeHash), []byte(oldQueryCode)) == nil
+	if !oldMatches {
+		h.limiter.recordFailure(ip, limiterKey, h.now())
+		writeError(w, http.StatusUnauthorized, "旧查询码不正确")
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(*user.QueryCodeHash), []byte(newQueryCode)) == nil {
+		writeError(w, http.StatusBadRequest, "新查询码不能与旧查询码相同")
+		return
+	}
+
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(newQueryCode), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("hash changed query code: %v", err)
+		writeError(w, http.StatusInternalServerError, "服务器内部错误")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	if err := h.store.ChangeQueryCode(ctx, user.ID, string(hashBytes)); err != nil {
+		log.Printf("change query code: %v", err)
+		writeError(w, http.StatusInternalServerError, "服务器内部错误")
+		return
+	}
+	h.limiter.recordSuccess(ip, limiterKey)
+	h.clearSessionCookie(w)
+	writeJSON(w, http.StatusOK, changeCodeResponse{Message: "查询码已更新，请使用新查询码重新登录。"})
+}
+
 func (h *Handler) userFromRequest(w http.ResponseWriter, r *http.Request) (User, bool) {
+	return h.userFromRequestWithHash(w, r, false)
+}
+
+func (h *Handler) userFromRequestWithHash(w http.ResponseWriter, r *http.Request, keepQueryCodeHash bool) (User, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
 		writeError(w, http.StatusUnauthorized, "请先输入 CN 和查询码")
@@ -300,7 +393,9 @@ func (h *Handler) userFromRequest(w http.ResponseWriter, r *http.Request) (User,
 		writeError(w, http.StatusUnauthorized, "查询登录已过期，请重新输入查询码")
 		return User{}, false
 	}
-	user.QueryCodeHash = nil
+	if !keepQueryCodeHash {
+		user.QueryCodeHash = nil
+	}
 	return user, true
 }
 
@@ -354,6 +449,22 @@ func (s *PostgresStore) FindUserBySession(ctx context.Context, tokenHash string)
 func (s *PostgresStore) DeleteSession(ctx context.Context, tokenHash string) error {
 	_, err := s.pool.Exec(ctx, "delete from query_sessions where token_hash = $1", tokenHash)
 	return err
+}
+
+func (s *PostgresStore) ChangeQueryCode(ctx context.Context, userID string, queryCodeHash string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `update users set query_code_hash = $2, query_code_updated_at = now(), updated_at = now() where id = $1::uuid`, userID, queryCodeHash); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from query_sessions where user_id = $1::uuid`, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) ListOrdersForUser(ctx context.Context, userID string) (OrdersResponse, error) {

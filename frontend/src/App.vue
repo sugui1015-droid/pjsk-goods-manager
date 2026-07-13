@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import {
   ApiError,
   apiUrl,
+  changeQueryCode,
   getJSON,
   postForm,
   postJSON,
@@ -201,6 +202,11 @@ const queryUser = ref<QueryUser | null>(null)
 const queryOrders = ref<QueryOrdersResponse | null>(null)
 const queryLoading = ref(false)
 const queryMessage = ref('')
+const queryOldCode = ref('')
+const queryNewCode = ref('')
+const queryConfirmCode = ref('')
+const queryCodeChanging = ref(false)
+const querySecurityMessage = ref('')
 
 const isBackendOnline = computed(() => health.value?.status === 'ok')
 const readyCount = computed(() => config.value.modules.filter((item) => item.status === 'ready').length)
@@ -1339,11 +1345,50 @@ async function logoutQuery() {
     queryUser.value = null
     queryOrders.value = null
     queryCode.value = ''
+    queryOldCode.value = ''
+    queryNewCode.value = ''
+    queryConfirmCode.value = ''
+    querySecurityMessage.value = ''
     queryMessage.value = '已退出查询。'
   } catch (error) {
     queryMessage.value = error instanceof Error ? error.message : '退出失败'
   } finally {
     queryLoading.value = false
+  }
+}
+
+async function submitQueryCodeChange() {
+  if (queryCodeChanging.value) return
+  querySecurityMessage.value = ''
+  const oldCode = queryOldCode.value.trim()
+  const newCode = queryNewCode.value.trim()
+  const confirmCode = queryConfirmCode.value.trim()
+  if (!oldCode || !newCode || !confirmCode) {
+    querySecurityMessage.value = '请完整输入旧查询码、新查询码和确认查询码。'
+    return
+  }
+  if (newCode !== confirmCode) {
+    querySecurityMessage.value = '两次输入的新查询码不一致。'
+    return
+  }
+  queryCodeChanging.value = true
+  try {
+    const response = await changeQueryCode({
+      old_query_code: oldCode,
+      new_query_code: newCode,
+      confirm_query_code: confirmCode,
+    })
+    queryOldCode.value = ''
+    queryNewCode.value = ''
+    queryConfirmCode.value = ''
+    queryUser.value = null
+    queryOrders.value = null
+    queryCode.value = ''
+    queryMessage.value = response.message
+  } catch (error) {
+    querySecurityMessage.value = error instanceof Error ? error.message : '查询码修改失败'
+  } finally {
+    queryCodeChanging.value = false
   }
 }
 
@@ -2519,6 +2564,22 @@ onMounted(() => {
         </section>
 
         <template v-if="queryOrders">
+          <section class="panel query-security-panel">
+            <div class="panel__header">
+              <div>
+                <h2>账号安全</h2>
+                <p class="muted">修改查询码后，当前查询登录会失效，请使用新查询码重新登录。</p>
+              </div>
+            </div>
+            <form class="query-security-form" @submit.prevent="submitQueryCodeChange">
+              <label><span>旧查询码</span><input v-model="queryOldCode" type="password" autocomplete="current-password" required placeholder="输入当前查询码" /></label>
+              <label><span>新查询码</span><input v-model="queryNewCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="6-32 位" /></label>
+              <label><span>确认新查询码</span><input v-model="queryConfirmCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="再次输入新查询码" /></label>
+              <button class="primary-button" type="submit" :disabled="queryCodeChanging">{{ queryCodeChanging ? '修改中' : '修改查询码' }}</button>
+            </form>
+            <div v-if="querySecurityMessage" class="inline-alert">{{ querySecurityMessage }}</div>
+          </section>
+
           <section class="summary-grid">
             <article class="metric-tile"><span>CN</span><strong>{{ queryOrders.user.cn_code }}</strong></article>
             <article class="metric-tile"><span>订单数</span><strong>{{ queryOrders.orders.length }}</strong></article>

@@ -471,6 +471,20 @@ export type QueryLoginResponse = {
   user: QueryUser
 }
 
+export type ChangeQueryCodeRequest = {
+  old_query_code: string
+  new_query_code: string
+  confirm_query_code: string
+}
+
+export type ChangeQueryCodeResponse = {
+  message: string
+}
+
+export function changeQueryCode(request: ChangeQueryCodeRequest): Promise<ChangeQueryCodeResponse> {
+  return postJSON<ChangeQueryCodeResponse>('/api/query/change-code', request)
+}
+
 // QueryOrderItem is the regular-user-facing shape: no internal ids, no
 // import batch/source-file tracking fields. Those exist only on the admin
 // side (see the "技术标识" panels).
