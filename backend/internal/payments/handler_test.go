@@ -144,6 +144,39 @@ func TestCreateRequiresAdmin(t *testing.T) {
 	}
 }
 
+func TestVoidRequiresAdmin(t *testing.T) {
+	handler := NewHandler(fakeStore{})
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/payments/11111111-1111-1111-1111-111111111111/void", bytes.NewBufferString(`{"reason":"typo"}`))
+	response := httptest.NewRecorder()
+
+	handler.Void(response, request, "11111111-1111-1111-1111-111111111111")
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestUnpaidRequiresGetButNotAdminAtHandlerLevel(t *testing.T) {
+	// Unpaid/CN have no per-handler admin.CurrentAdmin check of their own;
+	// they rely entirely on router-level RequireAuthentication middleware.
+	// This test documents that reliance so a future refactor that drops the
+	// middleware wrapping is caught by the router-level auth tests instead
+	// of silently passing here.
+	handler := NewHandler(fakeStore{
+		getCNUnpaidPayment: func(context.Context, string) (CNPaymentResponse, error) {
+			return CNPaymentResponse{}, nil
+		},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/payments/unpaid?cn=CN001", nil)
+	response := httptest.NewRecorder()
+
+	handler.Unpaid(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (handler itself is unauthenticated by design; auth is enforced by router middleware)", response.Code, http.StatusOK)
+	}
+}
+
 func TestCreatePassesAdminAndReturnsDuplicate(t *testing.T) {
 	handler := NewHandler(fakeStore{
 		createPayment: func(_ context.Context, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
@@ -386,7 +419,7 @@ func TestCreateMapsUnknownErrors(t *testing.T) {
 func TestListPassesFilters(t *testing.T) {
 	handler := NewHandler(fakeStore{
 		listPaymentRecords: func(_ context.Context, filters PaymentFilters) (PaymentListResponse, error) {
-			if filters.CN != "CN001" || filters.PaymentMethod != "alipay" || filters.Status != "approved" || filters.PaidFrom != "2026-07-12T10:00" || filters.PaidTo != "2026-07-13T10:00" {
+			if filters.CN != "CN001" || filters.PaymentMethod != "alipay" || filters.Status != "approved" || filters.PaidFrom != "2026-07-12T10:00:00+08:00" || filters.PaidTo != "2026-07-13T10:00:00+08:00" {
 				t.Fatalf("filters = %#v", filters)
 			}
 			if filters.Limit != 100 {
@@ -532,6 +565,36 @@ func TestCalculateFeeWechat(t *testing.T) {
 		}
 		if payableCents != c.wantPayableCents {
 			t.Fatalf("wechat %s: payableCents = %d, want %d", c.amount, payableCents, c.wantPayableCents)
+		}
+	}
+}
+
+func TestParsePaymentTimeUsesChinaOffsetNotServerLocal(t *testing.T) {
+	// "2026-07-12T10:00" must always mean 10:00 Beijing time (UTC+8), i.e.
+	// 02:00 UTC, regardless of what timezone the OS process happens to be
+	// running in (time.Local must never be consulted for business time).
+	got, err := parsePaymentTime("2026-07-12T10:00")
+	if err != nil {
+		t.Fatalf("parsePaymentTime: %v", err)
+	}
+	want := time.Date(2026, 7, 12, 2, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("parsePaymentTime = %v, want %v (2026-07-12T10:00 China time)", got, want)
+	}
+}
+
+func TestNormalizeChinaTimestampParam(t *testing.T) {
+	cases := map[string]string{
+		"":                     "",
+		"2026-07-12T10:00":     "2026-07-12T10:00:00+08:00",
+		"2026-07-12T10:00:00":  "2026-07-12T10:00:00+08:00",
+		"2026-07-12":           "2026-07-12T00:00:00+08:00",
+		"2026-07-12T02:00:00Z": "2026-07-12T02:00:00Z",
+		"not-a-time":           "not-a-time",
+	}
+	for input, want := range cases {
+		if got := normalizeChinaTimestampParam(input); got != want {
+			t.Fatalf("normalizeChinaTimestampParam(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

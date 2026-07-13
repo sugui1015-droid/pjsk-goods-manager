@@ -148,8 +148,8 @@ func TestPostgresUnpaidPaymentItemsReturnOnlyRemainingItems(t *testing.T) {
 	if item.Amount != 20 || item.PaidAmount != 5 || item.RemainingAmount != 15 {
 		t.Fatalf("amounts = %.2f/%.2f/%.2f, want 20/5/15", item.Amount, item.PaidAmount, item.RemainingAmount)
 	}
-	if response.Summary.ItemCount != 1 || response.Summary.PartialCount != 1 || response.Summary.RemainingAmount != 15 {
-		t.Fatalf("summary = %#v, want one partial item remaining 15", response.Summary)
+	if response.Summary.ItemCount != 2 || response.Summary.PaidCount != 1 || response.Summary.PartialCount != 1 || response.Summary.TotalAmount != 30 || response.Summary.PaidAmount != 15 || response.Summary.RemainingAmount != 15 {
+		t.Fatalf("summary = %#v, want full CN summary total 30 paid 15 remaining 15", response.Summary)
 	}
 }
 

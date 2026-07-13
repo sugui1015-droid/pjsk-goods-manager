@@ -78,6 +78,7 @@ type PaymentItemRow struct {
 	OrderNo         string  `json:"order_no"`
 	ProjectName     string  `json:"project_name"`
 	ProductName     string  `json:"product_name"`
+	ProductID       string  `json:"product_id,omitempty"`
 	CharacterName   string  `json:"character_name,omitempty"`
 	Category        string  `json:"category,omitempty"`
 	SeriesCode      string  `json:"series_code,omitempty"`
@@ -184,22 +185,28 @@ type PaymentDetail struct {
 }
 
 type PaymentDetailItem struct {
-	ID             string  `json:"id"`
-	OrderItemID    string  `json:"order_item_id"`
-	OrderID        string  `json:"order_id"`
-	OrderNo        string  `json:"order_no"`
-	ProjectName    string  `json:"project_name"`
-	ProductName    string  `json:"product_name"`
-	CharacterName  string  `json:"character_name,omitempty"`
-	Category       string  `json:"category,omitempty"`
-	SeriesCode     string  `json:"series_code,omitempty"`
-	DisplayName    string  `json:"display_name,omitempty"`
-	SKU            string  `json:"sku,omitempty"`
-	AppliedAmount  float64 `json:"applied_amount"`
-	PaymentStatus  string  `json:"payment_status"`
-	ImportFilename string  `json:"import_filename,omitempty"`
-	SourceSheet    string  `json:"source_sheet,omitempty"`
-	SourceRowKey   string  `json:"source_row_key,omitempty"`
+	ID              string  `json:"id"`
+	OrderItemID     string  `json:"order_item_id"`
+	OrderID         string  `json:"order_id"`
+	OrderNo         string  `json:"order_no"`
+	ProjectName     string  `json:"project_name"`
+	ProductName     string  `json:"product_name"`
+	ProductID       string  `json:"product_id,omitempty"`
+	CharacterName   string  `json:"character_name,omitempty"`
+	Category        string  `json:"category,omitempty"`
+	SeriesCode      string  `json:"series_code,omitempty"`
+	DisplayName     string  `json:"display_name,omitempty"`
+	SKU             string  `json:"sku,omitempty"`
+	Quantity        float64 `json:"quantity"`
+	UnitPrice       float64 `json:"unit_price"`
+	Amount          float64 `json:"amount"`
+	PaidAmount      float64 `json:"paid_amount"`
+	RemainingAmount float64 `json:"remaining_amount"`
+	AppliedAmount   float64 `json:"applied_amount"`
+	PaymentStatus   string  `json:"payment_status"`
+	ImportFilename  string  `json:"import_filename,omitempty"`
+	SourceSheet     string  `json:"source_sheet,omitempty"`
+	SourceRowKey    string  `json:"source_row_key,omitempty"`
 }
 
 type errorResponse struct {
@@ -398,10 +405,38 @@ func paymentFiltersFromRequest(r *http.Request) (PaymentFilters, error) {
 		CN:            strings.TrimSpace(query.Get("cn")),
 		PaymentMethod: normalizePaymentMethodFilter(query.Get("payment_method")),
 		Status:        strings.TrimSpace(query.Get("status")),
-		PaidFrom:      paidFrom,
-		PaidTo:        paidTo,
+		PaidFrom:      normalizeChinaTimestampParam(paidFrom),
+		PaidTo:        normalizeChinaTimestampParam(paidTo),
 		Limit:         limit,
 	}, nil
+}
+
+// normalizeChinaTimestampParam rewrites a naive "paid_from"/"paid_to" filter
+// value (e.g. from an HTML datetime-local input, with no UTC offset) into an
+// explicit RFC3339 string carrying the Asia/Shanghai (+08:00) offset, before
+// it is cast to ::timestamptz in SQL. Without this, Postgres would resolve
+// the naive string using the database session's timezone setting — which is
+// not guaranteed to be China time — instead of the admin's intended wall-clock
+// time. Values that already carry an offset (e.g. "Z" from a full RFC3339
+// string) are left untouched.
+func normalizeChinaTimestampParam(value string) string {
+	if value == "" {
+		return value
+	}
+	if _, err := time.Parse(time.RFC3339, value); err == nil {
+		return value
+	}
+	layouts := []string{
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.ParseInLocation(layout, value, chinaLocation); err == nil {
+			return parsed.Format(time.RFC3339)
+		}
+	}
+	return value
 }
 
 func validateOptionalPaymentTime(value string) error {
@@ -480,15 +515,16 @@ func (s *PostgresStore) GetCNUnpaidPayment(ctx context.Context, cn string) (CNPa
 	if err != nil {
 		return CNPaymentResponse{}, err
 	}
-	items, err := s.listUnpaidItemsForUser(ctx, user.ID)
+	allItems, summary, err := s.listItemsForUser(ctx, user.ID)
 	if err != nil {
 		return CNPaymentResponse{}, err
 	}
+	items := filterPayableItems(allItems)
 	records, err := s.listPaymentsForUser(ctx, user.ID)
 	if err != nil {
 		return CNPaymentResponse{}, err
 	}
-	return CNPaymentResponse{User: user, Summary: summarizePaymentItems(items), Items: items, Payments: records}, nil
+	return CNPaymentResponse{User: user, Summary: summary, Items: items, Payments: records}, nil
 }
 
 func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
@@ -781,6 +817,14 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 	detail.PaymentMethod = normalizePaymentMethodFilter(detail.PaymentMethod)
 
 	rows, err := s.pool.Query(ctx, `
+		with paid_by_item as (
+			select
+				pi_all.order_item_id,
+				coalesce(sum(pi_all.applied_amount) filter (where pay.status = 'approved'), 0) as paid_amount
+			from payment_items pi_all
+			join payments pay on pay.id = pi_all.payment_id
+			group by pi_all.order_item_id
+		)
 		select
 			pi.id::text,
 			oi.id::text,
@@ -788,13 +832,23 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 			o.order_no,
 			project.name,
 			product.name,
+			product.id::text,
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
 			coalesce(product.series_code, ''),
-			case when coalesce(product.category, '') = '' then product.name else product.name || '-' || product.category end,
+			product.name,
 			coalesce(product.sku, ''),
+			oi.quantity::float8,
+			oi.unit_price::float8,
+			oi.amount::float8,
+			least(coalesce(paid.paid_amount, 0), oi.amount)::float8,
+			greatest(oi.amount - coalesce(paid.paid_amount, 0), 0)::float8,
 			pi.applied_amount::float8,
-			oi.payment_status,
+			case
+				when coalesce(paid.paid_amount, 0) <= 0 then 'unpaid'
+				when coalesce(paid.paid_amount, 0) + 0.004 >= oi.amount then 'paid'
+				else 'partial'
+			end,
 			coalesce(ib.original_filename, ''),
 			coalesce(oi.source_sheet, ''),
 			coalesce(oi.source_row_key, '')
@@ -804,6 +858,7 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 		join projects project on project.id = o.project_id
 		join products product on product.id = oi.product_id
 		left join import_batches ib on ib.id = oi.import_batch_id
+		left join paid_by_item paid on paid.order_item_id = oi.id
 		where pi.payment_id = $1::uuid
 		order by o.order_no, product.sort_order, product.name, oi.created_at, pi.id
 	`, paymentID)
@@ -815,9 +870,12 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 	detail.Items = []PaymentDetailItem{}
 	for rows.Next() {
 		var item PaymentDetailItem
-		if err := rows.Scan(&item.ID, &item.OrderItemID, &item.OrderID, &item.OrderNo, &item.ProjectName, &item.ProductName, &item.CharacterName, &item.Category, &item.SeriesCode, &item.DisplayName, &item.SKU, &item.AppliedAmount, &item.PaymentStatus, &item.ImportFilename, &item.SourceSheet, &item.SourceRowKey); err != nil {
+		if err := rows.Scan(&item.ID, &item.OrderItemID, &item.OrderID, &item.OrderNo, &item.ProjectName, &item.ProductName, &item.ProductID, &item.CharacterName, &item.Category, &item.SeriesCode, &item.DisplayName, &item.SKU, &item.Quantity, &item.UnitPrice, &item.Amount, &item.PaidAmount, &item.RemainingAmount, &item.AppliedAmount, &item.PaymentStatus, &item.ImportFilename, &item.SourceSheet, &item.SourceRowKey); err != nil {
 			return PaymentDetailResponse{}, err
 		}
+		item.Amount = round2(item.Amount)
+		item.PaidAmount = round2(item.PaidAmount)
+		item.RemainingAmount = round2(item.RemainingAmount)
 		item.AppliedAmount = round2(item.AppliedAmount)
 		detail.Items = append(detail.Items, item)
 	}
@@ -978,10 +1036,11 @@ func listItemsForUserTx(ctx context.Context, q queryer, userID string) ([]Paymen
 			o.order_no,
 			p.name,
 			product.name,
+			product.id::text,
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
 			coalesce(product.series_code, ''),
-			case when coalesce(product.category, '') = '' or product.category = '默认分类' then product.name else product.name || '-' || product.category end,
+			product.name,
 			coalesce(product.sku, ''),
 			oi.quantity::float8,
 			oi.unit_price::float8,
@@ -1022,6 +1081,7 @@ func listItemsForUserTx(ctx context.Context, q queryer, userID string) ([]Paymen
 			&item.OrderNo,
 			&item.ProjectName,
 			&item.ProductName,
+			&item.ProductID,
 			&item.CharacterName,
 			&item.Category,
 			&item.SeriesCode,
@@ -1241,6 +1301,13 @@ func mergeRequestItems(items []CreatePaymentItemRequest) map[string]float64 {
 	return merged
 }
 
+// chinaLocation is a fixed UTC+8 offset. Business time (payment time,
+// filters) is always interpreted as Asia/Shanghai wall-clock time,
+// regardless of the server process's OS-level time.Local setting — a
+// deployed server is not guaranteed to have its local zone set to China,
+// and this must not silently drift with wherever the process happens to run.
+var chinaLocation = time.FixedZone("CST", 8*60*60)
+
 func parsePaymentTime(value string) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1254,7 +1321,7 @@ func parsePaymentTime(value string) (time.Time, error) {
 	}
 	var lastErr error
 	for _, layout := range layouts {
-		parsed, err := time.ParseInLocation(layout, value, time.Local)
+		parsed, err := time.ParseInLocation(layout, value, chinaLocation)
 		if err == nil {
 			return parsed.UTC(), nil
 		}
