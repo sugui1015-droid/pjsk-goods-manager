@@ -168,6 +168,7 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	)
 	mux.HandleFunc("/api/query/login", queryHandler.Login)
 	mux.HandleFunc("/api/query/change-code", queryHandler.ChangeCode)
+	mux.HandleFunc("/api/query/bind-code", queryHandler.BindCode)
 	mux.HandleFunc("/api/query/orders", queryHandler.Orders)
 	mux.HandleFunc("/api/query/logout", queryHandler.Logout)
 

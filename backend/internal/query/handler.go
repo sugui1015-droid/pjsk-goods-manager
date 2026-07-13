@@ -44,6 +44,7 @@ type Store interface {
 	FindUserBySession(context.Context, string) (User, error)
 	DeleteSession(context.Context, string) error
 	ChangeQueryCode(context.Context, string, string) error
+	BindQueryCode(context.Context, string, string, string) error
 	ListOrdersForUser(context.Context, string) (OrdersResponse, error)
 }
 

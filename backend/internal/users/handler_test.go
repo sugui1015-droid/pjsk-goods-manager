@@ -22,6 +22,10 @@ type stubStore struct {
 	mergeAdminID   string
 	mergeErr       error
 	previewErr     error
+
+	bindTokenUserID  string
+	bindTokenAdminID string
+	bindTokenErr     error
 }
 
 func (s *stubStore) ListUsers(_ context.Context, filters Filters) (ListResponse, error) {
@@ -49,6 +53,15 @@ func (s *stubStore) SetQueryAccessStatus(_ context.Context, id string, status st
 	s.detailID = id
 	return ListItem{ID: id, CNCode: "succ", Status: status}, nil
 }
+func (s *stubStore) CreateQueryCodeBindToken(_ context.Context, userID string, adminID string) (BindTokenResponse, error) {
+	s.bindTokenUserID = userID
+	s.bindTokenAdminID = adminID
+	if s.bindTokenErr != nil {
+		return BindTokenResponse{}, s.bindTokenErr
+	}
+	return BindTokenResponse{BindToken: "FAKE-TOKEN", ExpiresAt: "2026-07-13T15:00:00Z", Message: "绑定码仅显示一次，请安全交给用户。"}, nil
+}
+
 func (s *stubStore) PreviewMerge(_ context.Context, _ string, _ string) (MergePreviewResponse, error) {
 	return MergePreviewResponse{}, s.previewErr
 }
@@ -311,5 +324,63 @@ func TestMergePreviewMapsSameAndMergedUserErrors(t *testing.T) {
 				t.Fatalf("status = %d, want 400", response.Code)
 			}
 		})
+	}
+}
+
+func TestCreateBindTokenRequiresAdmin(t *testing.T) {
+	handler := NewHandler(&stubStore{})
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/users/6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a/query-code-bind-token", bytes.NewBufferString(`{}`))
+	recorder := httptest.NewRecorder()
+	handler.CreateBindToken(recorder, request, "6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a")
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+}
+
+func TestCreateBindTokenReturnsTokenOnce(t *testing.T) {
+	store := &stubStore{}
+	handler := NewHandler(store)
+	request := authenticatedRequest(http.MethodPost, "/api/admin/users/6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a/query-code-bind-token", bytes.NewBufferString(""))
+	recorder := httptest.NewRecorder()
+	authenticatedHandler(func(w http.ResponseWriter, r *http.Request) {
+		handler.CreateBindToken(w, r, "6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a")
+	}).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if store.bindTokenAdminID != "admin-1" {
+		t.Fatalf("admin id = %q, want admin-1", store.bindTokenAdminID)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["bind_token"] != "FAKE-TOKEN" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	for _, forbidden := range []string{"token_hash", "query_code_hash"} {
+		if _, exists := payload[forbidden]; exists {
+			t.Fatalf("response leaks %q: %#v", forbidden, payload)
+		}
+	}
+}
+
+func TestCreateBindTokenMapsEligibilityErrors(t *testing.T) {
+	cases := map[error]int{
+		ErrUserNotFound:          http.StatusNotFound,
+		ErrBindTokenUserHasCode:  http.StatusConflict,
+		ErrBindTokenUserInactive: http.StatusConflict,
+	}
+	for storeErr, wantStatus := range cases {
+		store := &stubStore{bindTokenErr: storeErr}
+		handler := NewHandler(store)
+		request := authenticatedRequest(http.MethodPost, "/api/admin/users/6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a/query-code-bind-token", bytes.NewBufferString(""))
+		recorder := httptest.NewRecorder()
+		authenticatedHandler(func(w http.ResponseWriter, r *http.Request) {
+			handler.CreateBindToken(w, r, "6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a")
+		}).ServeHTTP(recorder, request)
+		if recorder.Code != wantStatus {
+			t.Fatalf("%v: status = %d, want %d", storeErr, recorder.Code, wantStatus)
+		}
 	}
 }

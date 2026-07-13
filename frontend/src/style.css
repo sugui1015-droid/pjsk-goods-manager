@@ -1776,3 +1776,64 @@ th {
     width: 100%;
   }
 }
+
+.query-bind-entry {
+  margin: 10px 0 0;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: #316b9a;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.bind-token-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e4ebf2;
+}
+
+.bind-token-result {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #f6d9a8;
+  border-radius: 8px;
+  background: #fdf6e9;
+  display: grid;
+  gap: 8px;
+}
+
+.bind-token-result__notice {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: #92400e;
+}
+
+.bind-token-result__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bind-token-result__token {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  padding: 6px 12px;
+  border: 1px solid #e4c88a;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2937;
+  user-select: all;
+}

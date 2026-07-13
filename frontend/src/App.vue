@@ -3,7 +3,9 @@ import { computed, onMounted, ref } from 'vue'
 import {
   ApiError,
   apiUrl,
+  bindQueryCode,
   changeQueryCode,
+  createQueryCodeBindToken,
   getJSON,
   postForm,
   postJSON,
@@ -108,6 +110,11 @@ const queryCodeDraft = ref('')
 const queryCodeSaving = ref(false)
 const queryAccessSaving = ref(false)
 const queryAccountMessage = ref('')
+// One-time bind token result lives only in this in-memory ref: it is never
+// written to localStorage/sessionStorage and disappears on refresh.
+const bindTokenGenerating = ref(false)
+const bindTokenResult = ref<{ token: string; expiresAt: string } | null>(null)
+const bindTokenMessage = ref('')
 
 const admin = ref<Admin | null>(null)
 const authChecked = ref(false)
@@ -207,6 +214,15 @@ const queryNewCode = ref('')
 const queryConfirmCode = ref('')
 const queryCodeChanging = ref(false)
 const querySecurityMessage = ref('')
+// First-time bind flow on the user login page. The bind token is held only
+// in this in-memory form state — never persisted, gone on refresh.
+const queryView = ref<'login' | 'bind'>('login')
+const bindCN = ref('')
+const bindTokenInput = ref('')
+const bindNewCode = ref('')
+const bindConfirmCode = ref('')
+const bindSubmitting = ref(false)
+const bindMessage = ref('')
 
 const isBackendOnline = computed(() => health.value?.status === 'ok')
 const readyCount = computed(() => config.value.modules.filter((item) => item.status === 'ready').length)
@@ -977,6 +993,8 @@ async function loadAdminUserDetail(id: string) {
   mergeMessage.value = ''
   queryCodeDraft.value = ''
   queryAccountMessage.value = ''
+  bindTokenResult.value = null
+  bindTokenMessage.value = ''
   try {
     adminUserDetail.value = await getJSON<AdminUserDetailResponse>('/api/admin/users/' + encodeURIComponent(id))
   } catch (error) {
@@ -1028,6 +1046,52 @@ async function saveQueryCode() {
     queryAccountMessage.value = error instanceof Error ? error.message : `${action}查询码失败`
   } finally {
     queryCodeSaving.value = false
+  }
+}
+
+async function generateBindToken() {
+  if (!adminUserDetail.value || bindTokenGenerating.value) return
+  const user = adminUserDetail.value.user
+  if (!window.confirm('生成新绑定码后，该用户以前未使用的绑定码将立即失效。是否继续？')) return
+  bindTokenGenerating.value = true
+  bindTokenMessage.value = ''
+  bindTokenResult.value = null
+  try {
+    const response = await createQueryCodeBindToken(user.id)
+    bindTokenResult.value = { token: response.bind_token, expiresAt: response.expires_at }
+    await loadAdminUserDetailStatusOnly(user.id)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    bindTokenMessage.value = error instanceof Error ? error.message : '生成绑定码失败'
+  } finally {
+    bindTokenGenerating.value = false
+  }
+}
+
+// Refresh only the bind-token status flags without wiping the one-time
+// token that generateBindToken just put on screen.
+async function loadAdminUserDetailStatusOnly(id: string) {
+  try {
+    const refreshed = await getJSON<AdminUserDetailResponse>('/api/admin/users/' + encodeURIComponent(id))
+    if (adminUserDetail.value && adminUserDetail.value.user.id === id) {
+      adminUserDetail.value = refreshed
+    }
+  } catch {
+    // Status refresh is cosmetic; the generated token stays visible.
+  }
+}
+
+async function copyBindToken() {
+  if (!bindTokenResult.value) return
+  try {
+    await navigator.clipboard.writeText(bindTokenResult.value.token)
+    bindTokenMessage.value = '绑定码已复制到剪贴板。'
+  } catch {
+    bindTokenMessage.value = '复制失败，请手动选择并复制绑定码。'
   }
 }
 
@@ -1354,6 +1418,53 @@ async function logoutQuery() {
     queryMessage.value = error instanceof Error ? error.message : '退出失败'
   } finally {
     queryLoading.value = false
+  }
+}
+
+function openBindView() {
+  queryView.value = 'bind'
+  bindMessage.value = ''
+  queryMessage.value = ''
+}
+
+function closeBindView() {
+  queryView.value = 'login'
+  bindCN.value = ''
+  bindTokenInput.value = ''
+  bindNewCode.value = ''
+  bindConfirmCode.value = ''
+  bindMessage.value = ''
+}
+
+async function submitBindCode() {
+  if (bindSubmitting.value) return
+  bindMessage.value = ''
+  const cn = bindCN.value.trim()
+  const token = bindTokenInput.value.trim()
+  const newCode = bindNewCode.value.trim()
+  const confirmCode = bindConfirmCode.value.trim()
+  if (!cn || !token || !newCode || !confirmCode) {
+    bindMessage.value = '请完整输入 CN、绑定码和新查询码。'
+    return
+  }
+  if (newCode !== confirmCode) {
+    bindMessage.value = '两次输入的新查询码不一致。'
+    return
+  }
+  bindSubmitting.value = true
+  try {
+    const response = await bindQueryCode({
+      cn,
+      bind_token: token,
+      new_query_code: newCode,
+      confirm_query_code: confirmCode,
+    })
+    closeBindView()
+    queryMessage.value = response.message
+  } catch (error) {
+    bindMessage.value = error instanceof Error ? error.message : '查询码设置失败'
+  } finally {
+    bindSubmitting.value = false
   }
 }
 
@@ -2286,6 +2397,22 @@ onMounted(() => {
                   <button v-else class="secondary-button" type="button" :disabled="queryAccessSaving" @click="setQueryAccessStatus('active')">{{ queryAccessSaving ? '处理中' : '启用查询权限' }}</button>
                 </div>
                 <div v-if="queryAccountMessage" class="inline-alert">{{ queryAccountMessage }}</div>
+                <div v-if="adminUserDetail.user.status === 'active' && !adminUserDetail.user.has_query_code" class="bind-token-block">
+                  <div class="panel__header"><div><h3>首次绑定码</h3><p class="muted">线下核实身份后，为该用户生成一次性绑定码；用户在登录页“首次设置查询码”中使用。绑定码 30 分钟内有效，仅显示一次，重新生成会使旧码全部失效。</p></div></div>
+                  <div class="query-account-grid">
+                    <button class="secondary-button" type="button" :disabled="bindTokenGenerating" @click="generateBindToken">{{ bindTokenGenerating ? '生成中' : '生成一次性绑定码' }}</button>
+                    <span v-if="adminUserDetail.has_active_bind_token && !bindTokenResult" class="muted">已有未使用的绑定码（{{ formatDate(adminUserDetail.bind_token_expires_at) }} 过期）；重新生成将使其失效。</span>
+                  </div>
+                  <div v-if="bindTokenResult" class="bind-token-result">
+                    <p class="bind-token-result__notice">绑定码仅显示一次，请立即安全交给用户，刷新页面后无法再次查看。</p>
+                    <div class="bind-token-result__row">
+                      <code class="bind-token-result__token">{{ bindTokenResult.token }}</code>
+                      <button class="primary-button" type="button" @click="copyBindToken">复制</button>
+                    </div>
+                    <p class="muted">过期时间：{{ formatDate(bindTokenResult.expiresAt) }}</p>
+                  </div>
+                  <div v-if="bindTokenMessage" class="inline-alert">{{ bindTokenMessage }}</div>
+                </div>
               </section>
               <section v-if="adminUserDetail.user.status === 'active'" class="panel nested-panel danger-panel">
                 <div class="panel__header"><div><h2>CN 合并</h2><p class="muted">将当前 CN 的订单、付款和查询记录全部迁移到目标 CN，当前 CN 标记为“已合并”。此操作不可撤销，请先预览影响范围。</p></div></div>
@@ -2555,11 +2682,25 @@ onMounted(() => {
             </div>
             <button v-if="queryUser" class="secondary-button" type="button" :disabled="queryLoading" @click="logoutQuery">退出查询</button>
           </div>
-          <form v-if="!queryUser" class="login-form query-login" @submit.prevent="loginQuery">
-            <label><span>CN</span><input v-model="queryCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
-            <label><span>查询码</span><input v-model="queryCode" type="password" autocomplete="current-password" required placeholder="管理员提供的查询码" /></label>
-            <button class="primary-button" type="submit" :disabled="queryLoading">{{ queryLoading ? '查询中' : '查询订单' }}</button>
-          </form>
+          <template v-if="!queryUser && queryView === 'login'">
+            <form class="login-form query-login" @submit.prevent="loginQuery">
+              <label><span>CN</span><input v-model="queryCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
+              <label><span>查询码</span><input v-model="queryCode" type="password" autocomplete="current-password" required placeholder="管理员提供的查询码" /></label>
+              <button class="primary-button" type="submit" :disabled="queryLoading">{{ queryLoading ? '查询中' : '查询订单' }}</button>
+            </form>
+            <p class="query-bind-entry"><button class="link-button" type="button" @click="openBindView">首次设置查询码</button><span class="muted">（需要管理员提供的一次性绑定码）</span></p>
+          </template>
+          <template v-else-if="!queryUser && queryView === 'bind'">
+            <form class="login-form query-login query-bind-form" @submit.prevent="submitBindCode">
+              <label><span>CN</span><input v-model="bindCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
+              <label><span>一次性绑定码</span><input v-model="bindTokenInput" type="password" autocomplete="one-time-code" required placeholder="管理员提供的绑定码" /></label>
+              <label><span>新查询码</span><input v-model="bindNewCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="6-32 位" /></label>
+              <label><span>确认新查询码</span><input v-model="bindConfirmCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="再次输入新查询码" /></label>
+              <button class="primary-button" type="submit" :disabled="bindSubmitting">{{ bindSubmitting ? '设置中' : '设置查询码' }}</button>
+              <button class="secondary-button" type="button" :disabled="bindSubmitting" @click="closeBindView">返回登录</button>
+            </form>
+            <div v-if="bindMessage" class="inline-alert">{{ bindMessage }}</div>
+          </template>
           <div v-if="queryMessage" class="inline-alert">{{ queryMessage }}</div>
         </section>
 

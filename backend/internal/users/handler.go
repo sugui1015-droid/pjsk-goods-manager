@@ -36,6 +36,7 @@ type Store interface {
 	GetUserDetail(context.Context, string) (DetailResponse, error)
 	SetQueryCode(context.Context, string, string, bool) (ListItem, error)
 	SetQueryAccessStatus(context.Context, string, string) (ListItem, error)
+	CreateQueryCodeBindToken(context.Context, string, string) (BindTokenResponse, error)
 	PreviewMerge(context.Context, string, string) (MergePreviewResponse, error)
 	MergeUsers(context.Context, MergeRequest, string) (MergeResponse, error)
 }
@@ -134,6 +135,10 @@ type DetailResponse struct {
 	Payments        []DetailPayment `json:"payments"`
 	ImportFilenames []string        `json:"import_filenames"`
 	Merges          []MergeLogEntry `json:"merges"`
+	// Bind-token status only — the token itself and its hash are never
+	// exposed on the detail response.
+	HasActiveBindToken bool   `json:"has_active_bind_token"`
+	BindTokenExpiresAt string `json:"bind_token_expires_at,omitempty"`
 }
 
 type errorResponse struct {
@@ -189,6 +194,8 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 			h.UpdateQueryCode(w, r, id)
 		case "status":
 			h.UpdateQueryAccessStatus(w, r, id)
+		case "query-code-bind-token":
+			h.CreateBindToken(w, r, id)
 		default:
 			writeError(w, http.StatusNotFound, "user not found")
 		}
@@ -474,6 +481,17 @@ func (s *PostgresStore) GetUserDetail(ctx context.Context, userID string) (Detai
 		return DetailResponse{}, err
 	}
 	detail.Merges = merges
+
+	if err := s.pool.QueryRow(ctx, `
+		select
+			exists(select 1 from user_query_code_bind_tokens
+				where user_id = $1::uuid and used_at is null and invalidated_at is null and expires_at > now()),
+			coalesce((select to_char(max(expires_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+				from user_query_code_bind_tokens
+				where user_id = $1::uuid and used_at is null and invalidated_at is null and expires_at > now()), '')
+	`, userID).Scan(&detail.HasActiveBindToken, &detail.BindTokenExpiresAt); err != nil {
+		return DetailResponse{}, err
+	}
 	return detail, nil
 }
 

@@ -485,6 +485,35 @@ export function changeQueryCode(request: ChangeQueryCodeRequest): Promise<Change
   return postJSON<ChangeQueryCodeResponse>('/api/query/change-code', request)
 }
 
+export type BindQueryCodeRequest = {
+  cn: string
+  bind_token: string
+  new_query_code: string
+  confirm_query_code: string
+}
+
+export type BindQueryCodeResponse = {
+  message: string
+}
+
+// First-time query code setup with an admin-issued one-time bind token.
+// The token is submitted once and never persisted client-side.
+export function bindQueryCode(request: BindQueryCodeRequest): Promise<BindQueryCodeResponse> {
+  return postJSON<BindQueryCodeResponse>('/api/query/bind-code', request)
+}
+
+export type BindTokenResponse = {
+  bind_token: string
+  expires_at: string
+  message: string
+}
+
+// Admin-only: issue a one-time bind token for a user without a query code.
+// The plaintext token exists only in this single response.
+export function createQueryCodeBindToken(userID: string): Promise<BindTokenResponse> {
+  return postJSON<BindTokenResponse>(`/api/admin/users/${encodeURIComponent(userID)}/query-code-bind-token`, {})
+}
+
 // QueryOrderItem is the regular-user-facing shape: no internal ids, no
 // import batch/source-file tracking fields. Those exist only on the admin
 // side (see the "技术标识" panels).
@@ -632,6 +661,9 @@ export type AdminUserDetailResponse = {
   payments: AdminUserDetailPayment[]
   import_filenames: string[]
   merges: AdminUserMergeLogEntry[]
+  // Bind-token status only — the token plaintext or hash never appears here.
+  has_active_bind_token: boolean
+  bind_token_expires_at?: string
 }
 
 export type AdminUserMergeLogEntry = {

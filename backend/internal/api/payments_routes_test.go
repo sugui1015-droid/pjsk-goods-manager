@@ -35,6 +35,7 @@ func TestAdminPaymentAndUserRoutesRequireAuth(t *testing.T) {
 		{http.MethodGet, "/api/admin/users"},
 		{http.MethodGet, "/api/admin/users/11111111-1111-1111-1111-111111111111"},
 		{http.MethodPost, "/api/admin/users/11111111-1111-1111-1111-111111111111/query-code"},
+		{http.MethodPost, "/api/admin/users/11111111-1111-1111-1111-111111111111/query-code-bind-token"},
 		{http.MethodPatch, "/api/admin/users/11111111-1111-1111-1111-111111111111/status"},
 		{http.MethodGet, "/api/admin/users/merge-preview?source_id=11111111-1111-1111-1111-111111111111&target_cn=CN002"},
 		{http.MethodPost, "/api/admin/users/merge"},

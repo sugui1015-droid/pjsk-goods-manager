@@ -24,6 +24,9 @@ func (stubStore) FindUserBySession(context.Context, string) (User, error) {
 }
 func (stubStore) DeleteSession(context.Context, string) error           { return nil }
 func (stubStore) ChangeQueryCode(context.Context, string, string) error { return nil }
+func (stubStore) BindQueryCode(context.Context, string, string, string) error {
+	return ErrBindRejected
+}
 func (stubStore) ListOrdersForUser(context.Context, string) (OrdersResponse, error) {
 	return OrdersResponse{}, nil
 }
@@ -207,6 +210,9 @@ func (s *changeCodeStore) ChangeQueryCode(_ context.Context, userID string, quer
 	s.changedHash = queryCodeHash
 	return nil
 }
+func (s *changeCodeStore) BindQueryCode(context.Context, string, string, string) error {
+	return ErrBindRejected
+}
 func (s *changeCodeStore) ListOrdersForUser(context.Context, string) (OrdersResponse, error) {
 	return OrdersResponse{}, nil
 }
@@ -338,5 +344,59 @@ func TestChangeCodeRateLimitedAfterWrongOldCode(t *testing.T) {
 	}
 	if code := doChange(); code != http.StatusTooManyRequests {
 		t.Fatalf("blocked attempt status = %d, want 429", code)
+	}
+}
+
+func TestBindCodeValidationAndUnifiedRejection(t *testing.T) {
+	handler := NewHandler(stubStore{}, time.Hour, false)
+
+	doBind := func(body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/query/bind-code", strings.NewReader(body))
+		request.RemoteAddr = "10.0.9.1:50000"
+		recorder := httptest.NewRecorder()
+		handler.BindCode(recorder, request)
+		return recorder
+	}
+
+	// Missing fields.
+	if got := doBind(`{"cn":"","bind_token":"","new_query_code":"","confirm_query_code":""}`); got.Code != http.StatusBadRequest {
+		t.Fatalf("empty fields: status = %d, want 400", got.Code)
+	}
+	// Mismatched confirmation.
+	if got := doBind(`{"cn":"succ","bind_token":"ABCDEFG234","new_query_code":"NewCode123","confirm_query_code":"Other12345"}`); got.Code != http.StatusBadRequest {
+		t.Fatalf("mismatch: status = %d, want 400", got.Code)
+	}
+	// Invalid format (too short).
+	if got := doBind(`{"cn":"succ","bind_token":"ABCDEFG234","new_query_code":"abc","confirm_query_code":"abc"}`); got.Code != http.StatusBadRequest {
+		t.Fatalf("format: status = %d, want 400", got.Code)
+	}
+	// Store rejection collapses to one unified Chinese message.
+	got := doBind(`{"cn":"succ","bind_token":"ABCDEFG234","new_query_code":"NewCode123","confirm_query_code":"NewCode123"}`)
+	if got.Code != http.StatusUnauthorized {
+		t.Fatalf("rejected: status = %d, want 401", got.Code)
+	}
+	if !strings.Contains(got.Body.String(), "CN 或绑定码不正确") {
+		t.Fatalf("rejected body = %s, want unified message", got.Body.String())
+	}
+}
+
+func TestBindCodeRateLimitedAfterRepeatedRejections(t *testing.T) {
+	handler := NewHandler(stubStore{}, time.Hour, false)
+
+	doBind := func() int {
+		request := httptest.NewRequest(http.MethodPost, "/api/query/bind-code", strings.NewReader(`{"cn":"succ","bind_token":"WRONGTOKEN","new_query_code":"NewCode123","confirm_query_code":"NewCode123"}`))
+		request.RemoteAddr = "10.0.9.2:50000"
+		recorder := httptest.NewRecorder()
+		handler.BindCode(recorder, request)
+		return recorder.Code
+	}
+
+	for i := 0; i < handler.limiter.maxFailures; i++ {
+		if code := doBind(); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401", i+1, code)
+		}
+	}
+	if code := doBind(); code != http.StatusTooManyRequests {
+		t.Fatalf("blocked attempt: status = %d, want 429", code)
 	}
 }
