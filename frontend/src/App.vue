@@ -2448,7 +2448,12 @@ onMounted(() => {
                 <h2>{{ order.project_name }}</h2>
                 <p class="muted">{{ order.order_no }} / {{ formatDate(order.created_at) }}</p>
               </div>
-              <div class="query-order-total"><strong>{{ formatMoney(order.total_amount) }}</strong><span>{{ order.total_quantity }} 件 / 已付 {{ formatMoney(order.paid_amount) }} / 未付 {{ formatMoney(order.remaining_amount) }}</span></div>
+              <div class="query-order-summary">
+                <span><em>总金额</em><strong>{{ formatMoney(order.total_amount) }}</strong></span>
+                <span><em>共</em><strong>{{ order.total_quantity }}</strong><em>件</em></span>
+                <span><em>已付</em><strong>{{ formatMoney(order.paid_amount) }}</strong></span>
+                <span class="is-unpaid"><em>未付</em><strong>{{ formatMoney(order.remaining_amount) }}</strong></span>
+              </div>
             </div>
             <div class="table-scroll detail-table">
               <table>
