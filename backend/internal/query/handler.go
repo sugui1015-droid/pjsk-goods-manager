@@ -206,7 +206,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		passwordHash = []byte(*user.QueryCodeHash)
 	} else if err == nil {
 		h.limiter.recordFailure(ip, cn, h.now())
-		writeError(w, http.StatusUnauthorized, "该 CN 尚未设置查询码，请联系管理员")
+		writeError(w, http.StatusUnauthorized, "CN 或查询码不正确")
 		return
 	}
 
@@ -319,8 +319,14 @@ func (s *PostgresStore) FindUserByCN(ctx context.Context, cn string) (User, erro
 
 func (s *PostgresStore) CreateSession(ctx context.Context, userID string, tokenHash string, expiresAt time.Time) error {
 	_, err := s.pool.Exec(ctx, `
-		insert into query_sessions (user_id, token_hash, expires_at)
-		values ($1::uuid, $2, $3)
+		with inserted_session as (
+			insert into query_sessions (user_id, token_hash, expires_at)
+			values ($1::uuid, $2, $3)
+			returning user_id
+		)
+		update users
+		set last_query_login_at = now(), updated_at = now()
+		where id in (select user_id from inserted_session)
 	`, userID, tokenHash, expiresAt)
 	return err
 }

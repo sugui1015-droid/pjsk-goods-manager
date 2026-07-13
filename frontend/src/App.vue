@@ -6,6 +6,7 @@ import {
   getJSON,
   postForm,
   postJSON,
+  patchJSON,
   type Admin,
   type AdminUserDetailResponse,
   type AdminUserListItem,
@@ -102,6 +103,10 @@ const mergePreview = ref<AdminUserMergePreviewResponse | null>(null)
 const mergePreviewLoading = ref(false)
 const mergeSaving = ref(false)
 const mergeMessage = ref('')
+const queryCodeDraft = ref('')
+const queryCodeSaving = ref(false)
+const queryAccessSaving = ref(false)
+const queryAccountMessage = ref('')
 
 const admin = ref<Admin | null>(null)
 const authChecked = ref(false)
@@ -964,6 +969,8 @@ async function loadAdminUserDetail(id: string) {
   mergeReason.value = ''
   mergePreview.value = null
   mergeMessage.value = ''
+  queryCodeDraft.value = ''
+  queryAccountMessage.value = ''
   try {
     adminUserDetail.value = await getJSON<AdminUserDetailResponse>('/api/admin/users/' + encodeURIComponent(id))
   } catch (error) {
@@ -978,6 +985,72 @@ async function loadAdminUserDetail(id: string) {
   }
 }
 
+function updateAdminUserInList(user: AdminUserListItem) {
+  adminUsers.value = adminUsers.value.map((item) => (item.id === user.id ? user : item))
+  if (adminUserDetail.value?.user.id === user.id) {
+    adminUserDetail.value = { ...adminUserDetail.value, user }
+  }
+}
+
+async function saveQueryCode() {
+  if (!adminUserDetail.value || queryCodeSaving.value) return
+  const code = queryCodeDraft.value.trim()
+  if (code.length < 6 || code.length > 32) {
+    queryAccountMessage.value = '查询码需为 6-32 位，可使用字母、数字及 - _ @ # .。'
+    return
+  }
+  const user = adminUserDetail.value.user
+  const action = user.has_query_code ? '重置' : '设置'
+  const message = user.has_query_code
+    ? `确认重置 ${user.cn_code} 的查询码？旧查询码和已登录查询会话会立即失效，管理员不能查看原查询码。`
+    : `确认为 ${user.cn_code} 设置查询码？明文只会用于本次保存，页面不会显示或记录。`
+  if (!window.confirm(message)) return
+  queryCodeSaving.value = true
+  queryAccountMessage.value = ''
+  try {
+    const response = await postJSON<{ user: AdminUserListItem }>(`/api/admin/users/${encodeURIComponent(user.id)}/query-code`, { query_code: code })
+    updateAdminUserInList(response.user)
+    queryCodeDraft.value = ''
+    queryAccountMessage.value = `${action}查询码成功，旧查询会话已失效。`
+    await loadAdminUsers()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    queryAccountMessage.value = error instanceof Error ? error.message : `${action}查询码失败`
+  } finally {
+    queryCodeSaving.value = false
+  }
+}
+
+async function setQueryAccessStatus(status: 'active' | 'disabled') {
+  if (!adminUserDetail.value || queryAccessSaving.value) return
+  const user = adminUserDetail.value.user
+  const disabling = status === 'disabled'
+  const message = disabling
+    ? `确认停用 ${user.cn_code} 的查询权限？该用户将无法登录，当前查询会话会立即失效。`
+    : `确认启用 ${user.cn_code} 的查询权限？原查询码将继续有效，除非已被重置。`
+  if (!window.confirm(message)) return
+  queryAccessSaving.value = true
+  queryAccountMessage.value = ''
+  try {
+    const response = await patchJSON<{ user: AdminUserListItem }>(`/api/admin/users/${encodeURIComponent(user.id)}/status`, { status })
+    updateAdminUserInList(response.user)
+    queryAccountMessage.value = disabling ? '查询权限已停用，旧查询会话已失效。' : '查询权限已启用。'
+    await loadAdminUsers()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    queryAccountMessage.value = error instanceof Error ? error.message : '查询权限更新失败'
+  } finally {
+    queryAccessSaving.value = false
+  }
+}
 async function previewCNMerge() {
   if (!adminUserDetail.value) return
   const target = mergeTargetCN.value.trim()
@@ -987,6 +1060,8 @@ async function previewCNMerge() {
   }
   mergePreviewLoading.value = true
   mergeMessage.value = ''
+  queryCodeDraft.value = ''
+  queryAccountMessage.value = ''
   mergePreview.value = null
   try {
     mergePreview.value = await getJSON<AdminUserMergePreviewResponse>(
@@ -1023,6 +1098,8 @@ async function confirmCNMerge() {
   if (!window.confirm(confirmMessage)) return
   mergeSaving.value = true
   mergeMessage.value = ''
+  queryCodeDraft.value = ''
+  queryAccountMessage.value = ''
   try {
     const response = await postJSON<AdminUserMergeResponse>('/api/admin/users/merge', {
       source_user_id: preview.source.id,
@@ -2136,7 +2213,7 @@ onMounted(() => {
               <article class="metric-tile"><span>有效已付总额</span><strong>{{ formatMoney(adminUsersSummary.paid_amount) }}</strong></article>
               <article class="metric-tile"><span>剩余待付总额</span><strong>{{ formatMoney(adminUsersSummary.remaining_amount) }}</strong></article>
             </div>
-            <div class="table-scroll history-table"><table><thead><tr><th>CN</th><th>查询码</th><th>状态</th><th>订单数</th><th>订单总金额</th><th>已付金额</th><th>剩余金额</th><th>创建时间</th><th></th></tr></thead><tbody><tr v-if="!adminUsersLoading && adminUsers.length === 0"><td colspan="9">暂无用户。</td></tr><tr v-for="user in adminUsers" :key="user.id"><td><strong>{{ user.cn_code }}</strong><small>{{ user.display_name || '-' }}</small></td><td>{{ user.has_query_code ? '已设置' : '未设置' }}</td><td>{{ userStatusLabel(user.status) }}</td><td>{{ user.order_count }}</td><td>{{ formatMoney(user.total_amount) }}</td><td>{{ formatMoney(user.paid_amount) }}</td><td :class="{ danger: user.remaining_amount > 0 }">{{ formatMoney(user.remaining_amount) }}</td><td>{{ formatDate(user.created_at) }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/users/' + user.id)">详情</button></td></tr></tbody></table></div>
+            <div class="table-scroll history-table"><table><thead><tr><th>CN</th><th>查询权限</th><th>查询码</th><th>创建时间</th><th>最后登录</th><th>订单数</th><th>订单总金额</th><th>已付金额</th><th>剩余金额</th><th></th></tr></thead><tbody><tr v-if="!adminUsersLoading && adminUsers.length === 0"><td colspan="10">暂无用户。</td></tr><tr v-for="user in adminUsers" :key="user.id"><td><strong>{{ user.cn_code }}</strong><small>{{ user.display_name || '-' }}</small></td><td><span class="status-chip" :data-state="user.status">{{ userStatusLabel(user.status) }}</span></td><td>{{ user.has_query_code ? '已设置' : '未设置' }}<small v-if="user.query_code_updated_at">{{ formatDate(user.query_code_updated_at) }}</small></td><td>{{ formatDate(user.created_at) }}</td><td>{{ user.last_login_at ? formatDate(user.last_login_at) : '-' }}</td><td>{{ user.order_count }}</td><td>{{ formatMoney(user.total_amount) }}</td><td>{{ formatMoney(user.paid_amount) }}</td><td :class="{ danger: user.remaining_amount > 0 }">{{ formatMoney(user.remaining_amount) }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/users/' + user.id)">详情</button></td></tr></tbody></table></div>
           </section>
         </template>
 
@@ -2149,13 +2226,22 @@ onMounted(() => {
                 <article class="metric-tile"><span>CN</span><strong>{{ adminUserDetail.user.cn_code }}</strong></article>
                 <article class="metric-tile"><span>显示名称</span><strong>{{ adminUserDetail.user.display_name || '-' }}</strong></article>
                 <article class="metric-tile"><span>查询码</span><strong>{{ adminUserDetail.user.has_query_code ? '已设置' : '未设置' }}</strong></article>
-                <article class="metric-tile"><span>状态</span><strong>{{ userStatusLabel(adminUserDetail.user.status) }}</strong></article>
+                <article class="metric-tile"><span>状态</span><strong>{{ userStatusLabel(adminUserDetail.user.status) }}</strong></article><article class="metric-tile"><span>查询码更新时间</span><strong>{{ adminUserDetail.user.query_code_updated_at ? formatDate(adminUserDetail.user.query_code_updated_at) : '-' }}</strong></article><article class="metric-tile"><span>最后登录</span><strong>{{ adminUserDetail.user.last_login_at ? formatDate(adminUserDetail.user.last_login_at) : '-' }}</strong></article>
                 <article class="metric-tile"><span>订单数</span><strong>{{ adminUserDetail.user.order_count }}</strong></article>
                 <article class="metric-tile"><span>订单总金额</span><strong>{{ formatMoney(adminUserDetail.user.total_amount) }}</strong></article>
                 <article class="metric-tile"><span>已付金额</span><strong>{{ formatMoney(adminUserDetail.user.paid_amount) }}</strong></article>
                 <article class="metric-tile"><span>剩余金额</span><strong :class="{ danger: adminUserDetail.user.remaining_amount > 0 }">{{ formatMoney(adminUserDetail.user.remaining_amount) }}</strong></article>
               </div>
-              <p v-if="adminUserDetail.import_filenames.length > 0" class="muted">导入来源：{{ adminUserDetail.import_filenames.join('、') }}</p>
+              <p v-if="adminUserDetail.import_filenames.length > 0" class="muted">导入来源：{{ adminUserDetail.import_filenames.join('、') }}</p>              <section v-if="adminUserDetail.user.status !== 'merged'" class="panel nested-panel query-account-panel">
+                <div class="panel__header"><div><h2>查询权限</h2><p class="muted">管理员只能设置或重置查询码；页面不会显示原查询码、明文或哈希。设置、重置和停用会立即清除该用户已登录的查询会话。</p></div><span class="status-chip" :data-state="adminUserDetail.user.status">{{ userStatusLabel(adminUserDetail.user.status) }}</span></div>
+                <div class="query-account-grid">
+                  <label><span>{{ adminUserDetail.user.has_query_code ? '新查询码' : '查询码' }}</span><input v-model="queryCodeDraft" type="password" autocomplete="new-password" minlength="6" maxlength="32" placeholder="6-32 位" /></label>
+                  <button class="primary-button" type="button" :disabled="queryCodeSaving || queryCodeDraft.trim().length === 0" @click="saveQueryCode">{{ queryCodeSaving ? '保存中' : (adminUserDetail.user.has_query_code ? '重置查询码' : '设置查询码') }}</button>
+                  <button v-if="adminUserDetail.user.status === 'active'" class="danger-button" type="button" :disabled="queryAccessSaving" @click="setQueryAccessStatus('disabled')">{{ queryAccessSaving ? '处理中' : '停用查询权限' }}</button>
+                  <button v-else class="secondary-button" type="button" :disabled="queryAccessSaving" @click="setQueryAccessStatus('active')">{{ queryAccessSaving ? '处理中' : '启用查询权限' }}</button>
+                </div>
+                <div v-if="queryAccountMessage" class="inline-alert">{{ queryAccountMessage }}</div>
+              </section>
               <section v-if="adminUserDetail.user.status === 'active'" class="panel nested-panel danger-panel">
                 <div class="panel__header"><div><h2>CN 合并</h2><p class="muted">将当前 CN 的订单、付款和查询记录全部迁移到目标 CN，当前 CN 标记为“已合并”。此操作不可撤销，请先预览影响范围。</p></div></div>
                 <div class="payment-cn-form">

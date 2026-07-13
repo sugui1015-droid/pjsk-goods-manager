@@ -17,7 +17,7 @@ cd frontend
 pnpm dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://127.0.0.1:5173`.
 
 ## Run New Backend
 
@@ -26,7 +26,7 @@ cd backend
 go run .
 ```
 
-The backend listens on `http://localhost:8080` and exposes:
+The backend listens on `http://127.0.0.1:8080` for local development and exposes:
 
 - `GET /health`
 - `GET /api/config`

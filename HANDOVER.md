@@ -43,7 +43,7 @@ go run .
 # or: backend\run.cmd (sets GOCACHE/GOPATH/GOMODCACHE under D:\pjsk\.cache and D:\go\bin PATH)
 ```
 
-Listens on `http://localhost:8080` by default (`APP_PORT` / `SERVER_PORT` / `BACKEND_PORT` env, in that priority order). Exposes `GET /health` and `GET /api/config` unauthenticated; everything else under `/api/admin/*` requires an admin session cookie, `/api/query/*` requires a query session cookie.
+Listens on `http://127.0.0.1:8080` in local development (`APP_PORT` / `SERVER_PORT` / `BACKEND_PORT` env, in that priority order). Exposes `GET /health` and `GET /api/config` unauthenticated; everything else under `/api/admin/*` requires an admin session cookie, `/api/query/*` requires a query session cookie.
 
 Frontend:
 
@@ -54,7 +54,7 @@ pnpm dev
 # or: frontend\run.cmd (binds --host 0.0.0.0)
 ```
 
-Opens on `http://localhost:5173`. `VITE_API_BASE_URL` controls which backend it talks to.
+Opens on `http://127.0.0.1:5173` in local development. Dev requests use relative `/api` and `/health`; Vite proxies them to `http://127.0.0.1:8080`. `VITE_API_BASE_URL` is for non-development builds.
 
 First admin account (interactive, password never echoed or logged):
 

@@ -80,6 +80,13 @@ func newAPITestPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("connect database: %v", err)
 	}
+	if _, err := pool.Exec(context.Background(), `
+	alter table users
+		add column if not exists query_code_updated_at timestamptz,
+		add column if not exists last_query_login_at timestamptz
+`); err != nil {
+		t.Fatalf("ensure user query account columns: %v", err)
+	}
 	t.Cleanup(func() { pool.Close() })
 	return pool
 }

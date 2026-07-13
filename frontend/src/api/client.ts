@@ -1,4 +1,5 @@
-﻿const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+﻿const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+const apiBaseUrl = import.meta.env.DEV ? '' : configuredApiBaseUrl
 
 export class ApiError extends Error {
   status: number
@@ -183,6 +184,17 @@ export async function postJSON<T>(path: string, body: unknown): Promise<T> {
   return parseResponse<T>(response)
 }
 
+export async function patchJSON<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(endpoint(path), {
+    method: 'PATCH',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  return parseResponse<T>(response)
+}
 export async function postForm<T>(path: string, body: FormData): Promise<T> {
   const response = await fetch(endpoint(path), {
     method: 'POST',
@@ -536,6 +548,8 @@ export type AdminUserListItem = {
   paid_amount: number
   remaining_amount: number
   created_at: string
+  query_code_updated_at?: string
+  last_login_at?: string
 }
 
 export type AdminUserListSummary = {

@@ -14,9 +14,16 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
 
-var ErrUserNotFound = errors.New("user not found")
+var (
+	ErrUserNotFound        = errors.New("user not found")
+	ErrInvalidQueryCode    = errors.New("invalid query code")
+	ErrInvalidQueryStatus  = errors.New("invalid query status")
+	ErrQueryCodeAlreadySet = errors.New("query code already set")
+	ErrQueryCodeNotSet     = errors.New("query code not set")
+)
 
 type Handler struct {
 	store Store
@@ -25,6 +32,8 @@ type Handler struct {
 type Store interface {
 	ListUsers(context.Context, Filters) (ListResponse, error)
 	GetUserDetail(context.Context, string) (DetailResponse, error)
+	SetQueryCode(context.Context, string, string, bool) (ListItem, error)
+	SetQueryAccessStatus(context.Context, string, string) (ListItem, error)
 	PreviewMerge(context.Context, string, string) (MergePreviewResponse, error)
 	MergeUsers(context.Context, MergeRequest, string) (MergeResponse, error)
 }
@@ -36,18 +45,27 @@ type Filters struct {
 }
 
 type ListItem struct {
-	ID              string  `json:"id"`
-	CNCode          string  `json:"cn_code"`
-	DisplayName     string  `json:"display_name,omitempty"`
-	HasQueryCode    bool    `json:"has_query_code"`
-	Status          string  `json:"status"`
-	OrderCount      int     `json:"order_count"`
-	TotalAmount     float64 `json:"total_amount"`
-	PaidAmount      float64 `json:"paid_amount"`
-	RemainingAmount float64 `json:"remaining_amount"`
-	CreatedAt       string  `json:"created_at"`
+	ID                 string  `json:"id"`
+	CNCode             string  `json:"cn_code"`
+	DisplayName        string  `json:"display_name,omitempty"`
+	HasQueryCode       bool    `json:"has_query_code"`
+	Status             string  `json:"status"`
+	OrderCount         int     `json:"order_count"`
+	TotalAmount        float64 `json:"total_amount"`
+	PaidAmount         float64 `json:"paid_amount"`
+	RemainingAmount    float64 `json:"remaining_amount"`
+	CreatedAt          string  `json:"created_at"`
+	QueryCodeUpdatedAt string  `json:"query_code_updated_at,omitempty"`
+	LastLoginAt        string  `json:"last_login_at,omitempty"`
 }
 
+type queryCodeRequest struct {
+	QueryCode string `json:"query_code"`
+}
+
+type queryAccessStatusRequest struct {
+	Status string `json:"status"`
+}
 type ListSummary struct {
 	UserCount       int     `json:"user_count"`
 	UsersWithOrders int     `json:"users_with_orders"`
@@ -153,18 +171,30 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
-		return
-	}
-
-	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/users/"), "/")
+	id, action := userIDAndAction(r.URL.Path)
 	if id == "" || strings.Contains(id, "/") {
 		writeError(w, http.StatusNotFound, "user not found")
 		return
 	}
 	if !isUUIDLike(id) {
 		writeError(w, http.StatusBadRequest, "user id is invalid")
+		return
+	}
+
+	if action != "" {
+		switch action {
+		case "query-code":
+			h.UpdateQueryCode(w, r, id)
+		case "status":
+			h.UpdateQueryAccessStatus(w, r, id)
+		default:
+			writeError(w, http.StatusNotFound, "user not found")
+		}
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
 		return
 	}
 
@@ -181,6 +211,90 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) UpdateQueryCode(w http.ResponseWriter, r *http.Request, userID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+	var request queryCodeRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	queryCode := strings.TrimSpace(request.QueryCode)
+	if err := validateQueryCode(queryCode); err != nil {
+		writeError(w, http.StatusBadRequest, "查询码格式不正确")
+		return
+	}
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(queryCode), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("hash user query code: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	current, err := h.store.GetUserDetail(ctx, userID)
+	if errors.Is(err, ErrUserNotFound) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		log.Printf("load user before query code update: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	user, err := h.store.SetQueryCode(ctx, userID, string(hashBytes), current.User.HasQueryCode)
+	if errors.Is(err, ErrUserNotFound) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if errors.Is(err, ErrQueryCodeAlreadySet) || errors.Is(err, ErrQueryCodeNotSet) {
+		writeError(w, http.StatusConflict, "查询码状态已变化，请刷新后重试")
+		return
+	}
+	if err != nil {
+		log.Printf("update user query code: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]ListItem{"user": user})
+}
+
+func (h *Handler) UpdateQueryAccessStatus(w http.ResponseWriter, r *http.Request, userID string) {
+	if r.Method != http.MethodPatch && r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+	var request queryAccessStatusRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	status := strings.TrimSpace(request.Status)
+	if status != "active" && status != "disabled" {
+		writeError(w, http.StatusBadRequest, "用户状态不正确")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	user, err := h.store.SetQueryAccessStatus(ctx, userID, status)
+	if errors.Is(err, ErrUserNotFound) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if errors.Is(err, ErrInvalidQueryStatus) {
+		writeError(w, http.StatusBadRequest, "用户状态不正确")
+		return
+	}
+	if err != nil {
+		log.Printf("update user query status: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]ListItem{"user": user})
 }
 
 type PostgresStore struct {
@@ -244,7 +358,9 @@ func (s *PostgresStore) ListUsers(ctx context.Context, filters Filters) (ListRes
 			coalesce(t.total_amount, 0),
 			coalesce(t.paid_amount, 0),
 			greatest(coalesce(t.total_amount, 0) - coalesce(t.paid_amount, 0), 0),
-			to_char(u.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+			to_char(u.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(to_char(u.query_code_updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(to_char(u.last_query_login_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
 		from users u
 		left join user_totals t on t.user_id = u.id
 		where `+strings.Join(conditions, " and ")+`
@@ -269,6 +385,8 @@ func (s *PostgresStore) ListUsers(ctx context.Context, filters Filters) (ListRes
 			&item.PaidAmount,
 			&item.RemainingAmount,
 			&item.CreatedAt,
+			&item.QueryCodeUpdatedAt,
+			&item.LastLoginAt,
 		); err != nil {
 			return ListResponse{}, err
 		}
@@ -301,7 +419,9 @@ func (s *PostgresStore) GetUserDetail(ctx context.Context, userID string) (Detai
 			coalesce(t.total_amount, 0),
 			coalesce(t.paid_amount, 0),
 			greatest(coalesce(t.total_amount, 0) - coalesce(t.paid_amount, 0), 0),
-			to_char(u.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+			to_char(u.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(to_char(u.query_code_updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(to_char(u.last_query_login_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
 		from users u
 		left join user_totals t on t.user_id = u.id
 		where u.id = $1::uuid
@@ -316,6 +436,8 @@ func (s *PostgresStore) GetUserDetail(ctx context.Context, userID string) (Detai
 		&detail.User.PaidAmount,
 		&detail.User.RemainingAmount,
 		&detail.User.CreatedAt,
+		&detail.User.QueryCodeUpdatedAt,
+		&detail.User.LastLoginAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DetailResponse{}, ErrUserNotFound
@@ -353,6 +475,129 @@ func (s *PostgresStore) GetUserDetail(ctx context.Context, userID string) (Detai
 	return detail, nil
 }
 
+func (s *PostgresStore) SetQueryCode(ctx context.Context, userID string, queryCodeHash string, reset bool) (ListItem, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ListItem{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var hasQueryCode bool
+	err = tx.QueryRow(ctx, `
+		select (coalesce(query_code_hash, '') <> '')
+		from users
+		where id = $1::uuid
+		for update
+	`, userID).Scan(&hasQueryCode)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ListItem{}, ErrUserNotFound
+	}
+	if err != nil {
+		return ListItem{}, err
+	}
+	if reset && !hasQueryCode {
+		return ListItem{}, ErrQueryCodeNotSet
+	}
+	if !reset && hasQueryCode {
+		return ListItem{}, ErrQueryCodeAlreadySet
+	}
+	if _, err := tx.Exec(ctx, `
+		update users
+		set query_code_hash = $2,
+			query_code_updated_at = now(),
+			updated_at = now()
+		where id = $1::uuid
+	`, userID, queryCodeHash); err != nil {
+		return ListItem{}, err
+	}
+	if _, err := tx.Exec(ctx, `delete from query_sessions where user_id = $1::uuid`, userID); err != nil {
+		return ListItem{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ListItem{}, err
+	}
+	return s.getListItem(ctx, userID)
+}
+
+func (s *PostgresStore) SetQueryAccessStatus(ctx context.Context, userID string, status string) (ListItem, error) {
+	if status != "active" && status != "disabled" {
+		return ListItem{}, ErrInvalidQueryStatus
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ListItem{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
+		update users
+		set status = $2,
+			updated_at = now()
+		where id = $1::uuid
+		  and status <> 'merged'
+	`, userID, status)
+	if err != nil {
+		return ListItem{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return ListItem{}, ErrUserNotFound
+	}
+	if status == "disabled" {
+		if _, err := tx.Exec(ctx, `delete from query_sessions where user_id = $1::uuid`, userID); err != nil {
+			return ListItem{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ListItem{}, err
+	}
+	return s.getListItem(ctx, userID)
+}
+
+func (s *PostgresStore) getListItem(ctx context.Context, userID string) (ListItem, error) {
+	var item ListItem
+	err := s.pool.QueryRow(ctx, `
+		with `+paidByItemCTE+`
+		select
+			u.id::text,
+			u.cn_code,
+			coalesce(u.display_name, ''),
+			(coalesce(u.query_code_hash, '') <> ''),
+			u.status,
+			coalesce(t.order_count, 0),
+			coalesce(t.total_amount, 0),
+			coalesce(t.paid_amount, 0),
+			greatest(coalesce(t.total_amount, 0) - coalesce(t.paid_amount, 0), 0),
+			to_char(u.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+			coalesce(to_char(u.query_code_updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
+			coalesce(to_char(u.last_query_login_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
+		from users u
+		left join user_totals t on t.user_id = u.id
+		where u.id = $1::uuid
+	`, userID).Scan(
+		&item.ID,
+		&item.CNCode,
+		&item.DisplayName,
+		&item.HasQueryCode,
+		&item.Status,
+		&item.OrderCount,
+		&item.TotalAmount,
+		&item.PaidAmount,
+		&item.RemainingAmount,
+		&item.CreatedAt,
+		&item.QueryCodeUpdatedAt,
+		&item.LastLoginAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ListItem{}, ErrUserNotFound
+	}
+	if err != nil {
+		return ListItem{}, err
+	}
+	item.TotalAmount = round2(item.TotalAmount)
+	item.PaidAmount = round2(item.PaidAmount)
+	item.RemainingAmount = round2(item.RemainingAmount)
+	return item, nil
+}
 func (s *PostgresStore) listOrdersForUser(ctx context.Context, userID string) ([]DetailOrder, error) {
 	rows, err := s.pool.Query(ctx, `
 		with paid_by_item as (
@@ -573,6 +818,43 @@ func (s *PostgresStore) listImportFilenames(ctx context.Context, userID string) 
 	return filenames, rows.Err()
 }
 
+func userIDAndAction(path string) (string, string) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(path, "/api/admin/users/"), "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", ""
+	}
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return parts[0], strings.Join(parts[1:], "/")
+}
+
+func validateQueryCode(value string) error {
+	if len(value) < 6 || len(value) > 32 {
+		return ErrInvalidQueryCode
+	}
+	hasLetterOrDigit := false
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z':
+			hasLetterOrDigit = true
+		case char >= 'A' && char <= 'Z':
+			hasLetterOrDigit = true
+		case char >= '0' && char <= '9':
+			hasLetterOrDigit = true
+		case char == '-' || char == '_' || char == '@' || char == '#' || char == '.':
+		default:
+			return ErrInvalidQueryCode
+		}
+	}
+	if !hasLetterOrDigit {
+		return ErrInvalidQueryCode
+	}
+	return nil
+}
 func isUUIDLike(value string) bool {
 	if len(value) != 36 {
 		return false

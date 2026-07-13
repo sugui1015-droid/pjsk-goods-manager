@@ -34,6 +34,21 @@ func (s *stubStore) GetUserDetail(_ context.Context, id string) (DetailResponse,
 	return s.detailResponse, s.detailErr
 }
 
+func (s *stubStore) SetQueryCode(_ context.Context, id string, hash string, reset bool) (ListItem, error) {
+	if s.detailErr != nil {
+		return ListItem{}, s.detailErr
+	}
+	s.detailID = id
+	return ListItem{ID: id, CNCode: "succ", HasQueryCode: true, Status: "active"}, nil
+}
+
+func (s *stubStore) SetQueryAccessStatus(_ context.Context, id string, status string) (ListItem, error) {
+	if s.detailErr != nil {
+		return ListItem{}, s.detailErr
+	}
+	s.detailID = id
+	return ListItem{ID: id, CNCode: "succ", Status: status}, nil
+}
 func (s *stubStore) PreviewMerge(_ context.Context, _ string, _ string) (MergePreviewResponse, error) {
 	return MergePreviewResponse{}, s.previewErr
 }
