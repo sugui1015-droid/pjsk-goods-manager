@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,6 +29,9 @@ type OrderFilters struct {
 	Project       string
 	ProjectID     string
 	Item          string
+	Series        string // product series_code ("谷子系列"), independent of Category/Role
+	Category      string // product category ("谷子种类/分类"), independent of Series/Role
+	Role          string // product character_name ("谷子角色"), independent of Series/Category
 	ImportBatchID string
 	Status        string
 	CreatedFrom   string
@@ -54,23 +58,25 @@ type OrderSummary struct {
 }
 
 type OrderItem struct {
-	ID             string  `json:"id"`
-	ProductID      string  `json:"product_id"`
-	ProductName    string  `json:"product_name"`
-	CharacterName  string  `json:"character_name,omitempty"`
-	Category       string  `json:"category,omitempty"`
-	SeriesCode     string  `json:"series_code,omitempty"`
-	DisplayName    string  `json:"display_name,omitempty"`
-	SKU            string  `json:"sku,omitempty"`
-	Quantity       float64 `json:"quantity"`
-	UnitPrice      float64 `json:"unit_price"`
-	Amount         float64 `json:"amount"`
-	PaymentStatus  string  `json:"payment_status"`
-	ImportBatchID  string  `json:"import_batch_id,omitempty"`
-	ImportFilename string  `json:"import_filename,omitempty"`
-	SourceSheet    string  `json:"source_sheet,omitempty"`
-	SourceRowKey   string  `json:"source_row_key,omitempty"`
-	CreatedAt      string  `json:"created_at"`
+	ID              string  `json:"id"`
+	ProductID       string  `json:"product_id"`
+	ProductName     string  `json:"product_name"`
+	CharacterName   string  `json:"character_name,omitempty"`
+	Category        string  `json:"category,omitempty"`
+	SeriesCode      string  `json:"series_code,omitempty"`
+	DisplayName     string  `json:"display_name,omitempty"`
+	SKU             string  `json:"sku,omitempty"`
+	Quantity        float64 `json:"quantity"`
+	UnitPrice       float64 `json:"unit_price"`
+	Amount          float64 `json:"amount"`
+	PaidAmount      float64 `json:"paid_amount"`
+	RemainingAmount float64 `json:"remaining_amount"`
+	PaymentStatus   string  `json:"payment_status"`
+	ImportBatchID   string  `json:"import_batch_id,omitempty"`
+	ImportFilename  string  `json:"import_filename,omitempty"`
+	SourceSheet     string  `json:"source_sheet,omitempty"`
+	SourceRowKey    string  `json:"source_row_key,omitempty"`
+	CreatedAt       string  `json:"created_at"`
 }
 
 type OrderDetail struct {
@@ -153,6 +159,9 @@ func orderFiltersFromRequest(r *http.Request) OrderFilters {
 		Project:       strings.TrimSpace(query.Get("project")),
 		ProjectID:     strings.TrimSpace(query.Get("project_id")),
 		Item:          strings.TrimSpace(query.Get("item")),
+		Series:        strings.TrimSpace(query.Get("series")),
+		Category:      strings.TrimSpace(query.Get("category")),
+		Role:          strings.TrimSpace(query.Get("role")),
 		ImportBatchID: strings.TrimSpace(query.Get("import_batch_id")),
 		Status:        strings.TrimSpace(query.Get("status")),
 		CreatedFrom:   strings.TrimSpace(query.Get("created_from")),
@@ -191,7 +200,23 @@ func (s *PostgresStore) ListOrders(ctx context.Context, filters OrderFilters) (O
 	}
 	if filters.Item != "" {
 		placeholder := addArg("%" + filters.Item + "%")
-		conditions = append(conditions, "exists (select 1 from order_items oi_filter join products pr_filter on pr_filter.id = oi_filter.product_id where oi_filter.order_id = o.id and oi_filter.revoked_at is null and (pr_filter.name ilike "+placeholder+" or coalesce(pr_filter.category, '') ilike "+placeholder+" or coalesce(pr_filter.series_code, '') ilike "+placeholder+" or coalesce(pr_filter.character_name, '') ilike "+placeholder+"))")
+		conditions = append(conditions, "exists (select 1 from order_items oi_filter join products pr_filter on pr_filter.id = oi_filter.product_id where oi_filter.order_id = o.id and oi_filter.revoked_at is null and pr_filter.name ilike "+placeholder+")")
+	}
+	// Series (谷子系列), Category (谷子种类/分类), and Role (谷子角色) are
+	// independent conditions — each narrows down which order_items must
+	// exist, and multiple filters combine with AND, not by matching the
+	// same search term against every field at once.
+	if filters.Series != "" {
+		placeholder := addArg("%" + filters.Series + "%")
+		conditions = append(conditions, "exists (select 1 from order_items oi_series join products pr_series on pr_series.id = oi_series.product_id where oi_series.order_id = o.id and oi_series.revoked_at is null and coalesce(pr_series.series_code, '') ilike "+placeholder+")")
+	}
+	if filters.Category != "" {
+		placeholder := addArg("%" + filters.Category + "%")
+		conditions = append(conditions, "exists (select 1 from order_items oi_category join products pr_category on pr_category.id = oi_category.product_id where oi_category.order_id = o.id and oi_category.revoked_at is null and coalesce(pr_category.category, '') ilike "+placeholder+")")
+	}
+	if filters.Role != "" {
+		placeholder := addArg("%" + filters.Role + "%")
+		conditions = append(conditions, "exists (select 1 from order_items oi_role join products pr_role on pr_role.id = oi_role.product_id where oi_role.order_id = o.id and oi_role.revoked_at is null and coalesce(pr_role.character_name, '') ilike "+placeholder+")")
 	}
 	if filters.ImportBatchID != "" {
 		placeholder := addArg(filters.ImportBatchID)
@@ -328,6 +353,14 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 	}
 
 	rows, err := s.pool.Query(ctx, `
+		with paid_by_item as (
+			select
+				pi.order_item_id,
+				coalesce(sum(pi.applied_amount) filter (where p.status = 'approved'), 0) as paid_amount
+			from payment_items pi
+			join payments p on p.id = pi.payment_id
+			group by pi.order_item_id
+		)
 		select
 			oi.id::text,
 			product.id::text,
@@ -335,12 +368,18 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
 			coalesce(product.series_code, ''),
-			case when coalesce(product.category, '') = '' or product.category = '默认分类' then product.name else product.name || '-' || product.category end,
+			product.name,
 			coalesce(product.sku, ''),
 			oi.quantity::float8,
 			oi.unit_price::float8,
 			oi.amount::float8,
-			oi.payment_status,
+			least(coalesce(paid.paid_amount, 0), oi.amount)::float8,
+			greatest(oi.amount - coalesce(paid.paid_amount, 0), 0)::float8,
+			case
+				when coalesce(paid.paid_amount, 0) <= 0 then 'unpaid'
+				when coalesce(paid.paid_amount, 0) + 0.004 >= oi.amount then 'paid'
+				else 'partial'
+			end,
 			coalesce(oi.import_batch_id::text, ''),
 			coalesce(ib.original_filename, ''),
 			coalesce(oi.source_sheet, ''),
@@ -349,6 +388,7 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 		from order_items oi
 		join products product on product.id = oi.product_id
 		left join import_batches ib on ib.id = oi.import_batch_id
+		left join paid_by_item paid on paid.order_item_id = oi.id
 		where oi.order_id = $1::uuid
 		  and oi.revoked_at is null
 		order by product.sort_order, product.name, oi.created_at, oi.id
@@ -373,6 +413,8 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 			&item.Quantity,
 			&item.UnitPrice,
 			&item.Amount,
+			&item.PaidAmount,
+			&item.RemainingAmount,
 			&item.PaymentStatus,
 			&item.ImportBatchID,
 			&item.ImportFilename,
@@ -382,6 +424,9 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 		); err != nil {
 			return OrderDetailResponse{}, err
 		}
+		item.Amount = round2(item.Amount)
+		item.PaidAmount = round2(item.PaidAmount)
+		item.RemainingAmount = round2(item.RemainingAmount)
 		detail.Items = append(detail.Items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -392,6 +437,10 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
+}
+
+func round2(value float64) float64 {
+	return math.Round(value*100) / 100
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
