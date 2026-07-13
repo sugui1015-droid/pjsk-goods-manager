@@ -141,12 +141,24 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.Users)),
 	)
 	mux.Handle(
+		"/api/admin/export/users.xlsx",
+		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.UsersExcel)),
+	)
+	mux.Handle(
 		"/api/admin/export/payments.csv",
 		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.Payments)),
 	)
 	mux.Handle(
+		"/api/admin/export/payments.xlsx",
+		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.PaymentsExcel)),
+	)
+	mux.Handle(
 		"/api/admin/export/order-items.csv",
 		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.OrderItems)),
+	)
+	mux.Handle(
+		"/api/admin/export/order-items.xlsx",
+		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.OrderItemsExcel)),
 	)
 
 	queryHandler := query.NewHandler(
