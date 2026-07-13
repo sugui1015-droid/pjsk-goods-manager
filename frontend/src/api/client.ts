@@ -302,6 +302,8 @@ export type OrderItem = {
   quantity: number
   unit_price: number
   amount: number
+  paid_amount: number
+  remaining_amount: number
   payment_status: string
   import_batch_id?: string
   import_filename?: string
@@ -338,6 +340,7 @@ export type PaymentItemRow = {
   order_no: string
   project_name: string
   product_name: string
+  product_id?: string
   character_name?: string
   category?: string
   series_code?: string
@@ -420,11 +423,17 @@ export type PaymentDetailItem = {
   order_no: string
   project_name: string
   product_name: string
+  product_id?: string
   character_name?: string
   category?: string
   series_code?: string
   display_name?: string
   sku?: string
+  quantity: number
+  unit_price: number
+  amount: number
+  paid_amount: number
+  remaining_amount: number
   applied_amount: number
   payment_status: string
   import_filename?: string
@@ -442,7 +451,6 @@ export type PaymentDetailResponse = {
 }
 
 export type QueryUser = {
-  id: string
   cn_code: string
   display_name?: string
 }
@@ -451,8 +459,10 @@ export type QueryLoginResponse = {
   user: QueryUser
 }
 
+// QueryOrderItem is the regular-user-facing shape: no internal ids, no
+// import batch/source-file tracking fields. Those exist only on the admin
+// side (see the "技术标识" panels).
 export type QueryOrderItem = {
-  id: string
   goods_name: string
   category?: string
   character_name?: string
@@ -464,13 +474,9 @@ export type QueryOrderItem = {
   paid_amount: number
   remaining_amount: number
   payment_status: string
-  import_batch_id?: string
-  import_filename?: string
-  source_sheet?: string
 }
 
 export type QueryOrder = {
-  id: string
   order_no: string
   status: string
   project_name: string
@@ -479,19 +485,34 @@ export type QueryOrder = {
   paid_amount: number
   remaining_amount: number
   created_at: string
-  import_filenames: string[]
   items: QueryOrderItem[]
 }
 
+// QueryPaymentItem is the regular-user-facing view of how one payment was
+// split across order items: business fields only, no order numbers, project
+// names, internal ids, import/source tracking, or admin/audit info.
+// display_name is the composed business name and is always non-empty;
+// amount is the item's own subtotal (小计); applied_amount is the portion of
+// THIS payment allocated to the item (本次付款金额).
+export type QueryPaymentItem = {
+  display_name: string
+  character_name?: string
+  category?: string
+  quantity: number
+  unit_price: number
+  amount: number
+  applied_amount: number
+  payment_status: string
+}
+
 export type QueryPaymentRecord = {
-  id: string
   principal_amount: number
   fee_amount: number
   total_amount: number
   payment_method?: string
   status: string
   paid_at: string
-  voided_at?: string
+  items: QueryPaymentItem[]
 }
 
 export type QueryOrdersResponse = {
@@ -517,8 +538,37 @@ export type AdminUserListItem = {
   created_at: string
 }
 
+export type AdminUserListSummary = {
+  user_count: number
+  users_with_orders: number
+  total_amount: number
+  paid_amount: number
+  remaining_amount: number
+}
+
 export type AdminUserListResponse = {
   items: AdminUserListItem[]
+  summary: AdminUserListSummary
+}
+
+export type AdminUserDetailOrderItem = {
+  id: string
+  product_name: string
+  product_id?: string
+  character_name?: string
+  category?: string
+  series_code?: string
+  display_name?: string
+  sku?: string
+  quantity: number
+  unit_price: number
+  amount: number
+  paid_amount: number
+  remaining_amount: number
+  payment_status: string
+  import_filename?: string
+  source_sheet?: string
+  source_row_key?: string
 }
 
 export type AdminUserDetailOrder = {
@@ -531,6 +581,7 @@ export type AdminUserDetailOrder = {
   paid_amount: number
   remaining_amount: number
   created_at: string
+  items: AdminUserDetailOrderItem[]
 }
 
 export type AdminUserDetailPayment = {
@@ -569,6 +620,7 @@ export type AdminUserMergePreviewResponse = {
   target: AdminUserListItem
   move_order_count: number
   move_payment_count: number
+  move_query_session_count: number
 }
 
 export type AdminUserMergeResponse = {

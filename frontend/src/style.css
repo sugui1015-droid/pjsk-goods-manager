@@ -235,6 +235,25 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+/* Payable-amount emphasis: a clearly distinct, but not eye-searing, red
+   used everywhere the final paid-out amount needs to stand out from
+   surrounding metrics (payment detail, payment lists, amount cards). */
+.metric-tile--emphasis {
+  border-color: #e3b3ae;
+  background: #fdf2f1;
+}
+
+.metric-tile--emphasis span {
+  color: #9a4a43;
+  font-weight: 700;
+}
+
+.metric-tile--emphasis strong {
+  color: #b3261e;
+  font-size: 26px;
+  font-weight: 800;
+}
+
 .panel {
   padding: 16px;
   min-width: 0;
@@ -279,8 +298,13 @@ h2 {
 
 .danger-button {
   color: #ffffff;
-  background: #b42318;
-  border-color: #b42318;
+  background: #c1443a;
+  border-color: #c1443a;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #a8362d;
+  border-color: #a8362d;
 }
 
 .login-form,
@@ -377,6 +401,33 @@ h2 {
   background: #ecfdf3;
   color: #067647;
 }
+
+.status-chip[data-state="submitted"] {
+  color: #7d4a12;
+  background: #fff0d8;
+}
+
+.status-chip[data-state="partially_paid"] {
+  color: #7a4a9c;
+  background: #f4ecfa;
+}
+
+.status-chip[data-state="paid"],
+.status-chip[data-state="approved"] {
+  background: #ecfdf3;
+  color: #067647;
+}
+
+.status-chip[data-state="cancelled"],
+.status-chip[data-state="voided"] {
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
+.status-chip[data-state="rejected"] {
+  color: #9a3412;
+  background: #fdece5;
+}
 .endpoint-list {
   display: grid;
   gap: 10px;
@@ -426,6 +477,18 @@ th {
 
 .detail-table {
   max-height: 360px;
+}
+
+/* Long project/product names get clipped with an ellipsis and a native
+   title tooltip instead of forcing the whole table to scroll further right.
+   Never applied to amount cells — money must stay fully visible. */
+.cell-clip {
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
 .compact-table {
@@ -546,6 +609,31 @@ th {
   flex-wrap: wrap;
 }
 
+.payment-method-group--flow {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+/* Uniform-height option "tabs". Each stays an independent rounded pill
+   (rather than a visually joined strip) so the layout holds up cleanly
+   whether it fits on one line or wraps in a narrow grid column. */
+.payment-method-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Entry-page flow: exactly two equal-width, equal-height buttons on one
+   row. No text-length-driven sizing — both stay identical no matter how
+   many characters each label has, and never overlap or shrink on narrow
+   screens (they stack full-width instead). */
+.payment-method-options--flow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
 .payment-method-label {
   font-size: 13px;
   color: #34495d;
@@ -557,24 +645,73 @@ th {
   align-items: center;
   gap: 6px;
   min-height: 36px;
-  padding: 0 14px;
+  padding: 0 16px;
   border: 1px solid #ccd7e0;
   border-radius: 6px;
   background: #fff;
   cursor: pointer;
   font-size: 14px;
+  color: #405468;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 
 .payment-method-option.active {
   border-color: #315b7d;
-  background: #edf4fb;
+  background: #315b7d;
+  color: #ffffff;
+}
+
+.payment-method-option:has(input:focus-visible) {
+  outline: 2px solid #315b7d;
+  outline-offset: 2px;
 }
 
 .payment-method-option input[type="radio"] {
   width: 16px;
   height: 16px;
-  accent-color: #315b7d;
+  accent-color: currentColor;
   margin: 0;
+}
+
+/* Entry-page flow buttons: full-height, equal-size, one row of two.
+   Alipay = blue family, WeChat = green family. Both share identical
+   sizing/padding/radius so neither ever looks bigger than the other. */
+.payment-method-options--flow .payment-method-option {
+  justify-content: center;
+  min-height: 52px;
+  padding: 0 20px;
+  font-size: 16px;
+  font-weight: 700;
+  border-width: 2px;
+  border-radius: 10px;
+}
+
+.payment-method-options--flow .payment-method-option--alipay {
+  border-color: #9dc2ea;
+  color: #1a5fa8;
+  background: #eef6fe;
+}
+
+.payment-method-options--flow .payment-method-option--alipay.active {
+  border-color: #1a5fa8;
+  background: #1a5fa8;
+  color: #ffffff;
+}
+
+.payment-method-options--flow .payment-method-option--wechat {
+  border-color: #9bd6a8;
+  color: #1a7a3c;
+  background: #eefbf1;
+}
+
+.payment-method-options--flow .payment-method-option--wechat.active {
+  border-color: #1a7a3c;
+  background: #1a7a3c;
+  color: #ffffff;
+}
+
+.payment-method-options--flow .payment-method-option:hover {
+  filter: brightness(0.97);
 }
 
 .payment-method-hint {
@@ -598,20 +735,87 @@ th {
   background: #fdf6e9;
 }
 
-.payment-fee-preview {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 10px 12px;
-  margin: 10px 0;
-  border: 1px solid #cfe2d7;
+.payment-allocation-hint {
+  font-size: 13px;
+  color: #375170;
+  padding: 8px 12px;
+  margin: 10px 0 0;
+  border: 1px solid #cddcea;
   border-radius: 8px;
-  background: #f0faf4;
+  background: #eef4fa;
 }
 
-.payment-fee-preview span {
-  font-size: 14px;
+.payment-flow-steps {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #5c6b7a;
+  letter-spacing: 0.02em;
+}
+
+.payment-amount-section {
+  display: grid;
+  gap: 8px;
+}
+
+/* Three equal-width amount cards: 本金 / 手续费 / 实付金额. 实付金额 is
+   visually the odd one out (via .amount-card--payable / .metric-tile--emphasis)
+   so it reads as the headline number, not just another statistic. */
+.amount-card-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.amount-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid #dce4ea;
+  border-radius: 10px;
+  background: #ffffff;
+  min-width: 0;
+}
+
+.amount-card span {
+  font-size: 13px;
+  color: #667085;
+}
+
+.amount-card strong {
+  font-size: 20px;
   color: #1f2937;
+  overflow-wrap: anywhere;
+}
+
+.amount-card--payable {
+  border-color: #e3b3ae;
+  background: #fdf2f1;
+}
+
+.amount-card--payable span {
+  color: #9a4a43;
+  font-weight: 700;
+}
+
+.amount-card--payable strong {
+  color: #b3261e;
+  font-size: 26px;
+  font-weight: 800;
+}
+
+.payment-confirm-row {
+  display: grid;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid #e4ebf2;
+}
+
+.payment-confirm-button {
+  min-height: 44px;
+  font-size: 15px;
+  padding: 0 28px;
 }
 
 .danger {
@@ -755,6 +959,114 @@ th {
   font-size: 12px;
 }
 
+.ghost-button {
+  background: #ffffff;
+  color: #5c6b7a;
+}
+
+
+.technical-section details {
+  display: block;
+}
+
+.technical-section summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: #316b9a;
+  font-size: 13px;
+  font-weight: 800;
+  list-style: none;
+  user-select: none;
+}
+
+.technical-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.technical-section .open-label {
+  display: none;
+}
+
+.technical-section details[open] .closed-label {
+  display: none;
+}
+
+.technical-section details[open] .open-label {
+  display: inline;
+}
+
+.technical-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  max-width: 100%;
+}
+
+.technical-item {
+  border: 1px solid #dbe4ec;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f9fbfd;
+  min-width: 0;
+}
+
+.technical-item__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.technical-item__type {
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 12px;
+  color: #315b7d;
+  background: #e7eff7;
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.technical-item__context {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: #4c5b6a;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.technical-item__value {
+  display: block;
+  margin-top: 6px;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  user-select: text;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #253242;
+}
+
+.copy-button {
+  min-height: 24px;
+  border: 1px solid #c8d5df;
+  border-radius: 6px;
+  padding: 2px 8px;
+  background: #ffffff;
+  color: #316b9a;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .nested-panel {
   margin-top: 14px;
   padding: 14px;
@@ -788,10 +1100,63 @@ th {
   background: #ffffff;
 }
 
+/* Excel-header-style filter affordance: a field with an active value gets
+   a highlighted label + a "●" marker (set inline via template text) so it's
+   obvious which columns are currently narrowing the table, without being
+   as loud as a full colored badge. */
+.filter-field--active span:first-child {
+  color: #1a5fa8;
+  font-weight: 700;
+}
+
+.filter-field--active input {
+  border-color: #9dc2ea;
+  background: #f5faff;
+}
+
+.filter-field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-field-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.filter-clear-button {
+  flex: 0 0 auto;
+  min-width: 26px;
+  min-height: 26px;
+  border: 1px solid #ccd7e0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #667085;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.filter-clear-button:hover {
+  background: #f2f5f8;
+  color: #1f2937;
+}
+
 .filter-actions {
   display: flex;
   align-items: end;
   gap: 8px;
+}
+
+.filter-label--strong span {
+  font-weight: 700;
+  color: #1f2a37;
+}
+
+.col-emphasis {
+  font-weight: 700;
+  color: #b3261e;
 }
 
 @media (max-width: 1040px) {
@@ -1119,6 +1484,15 @@ th {
   margin-bottom: 14px;
 }
 
+/* The entry-page flow overrides the generic 4-column layout above: the
+   flow reads top-to-bottom (method → amount → note → confirm), one section
+   per row, not side-by-side columns. */
+.payment-form.payment-flow {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 16px;
+}
+
 .payment-form label {
   display: grid;
   gap: 6px;
@@ -1140,9 +1514,9 @@ th {
 }
 
 .payment-actions {
-  display: grid;
-  gap: 6px;
-  justify-items: end;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   color: #667085;
 }
 
@@ -1168,6 +1542,46 @@ th {
   text-decoration: none;
 }
 
+/* Regular-user payment history: per-payment associated items live in a
+   collapsed <details> row right under the payment row. Same open/close
+   label pattern as the admin technical-identifier panels. */
+.query-payment-items-row > td {
+  background: #f7fafc;
+  padding: 8px 12px;
+}
+
+.query-payment-items summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: #316b9a;
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+  user-select: none;
+}
+
+.query-payment-items summary::-webkit-details-marker {
+  display: none;
+}
+
+.query-payment-items .open-label {
+  display: none;
+}
+
+.query-payment-items[open] .closed-label {
+  display: none;
+}
+
+.query-payment-items[open] .open-label {
+  display: inline;
+}
+
+.query-payment-items .table-scroll {
+  margin-top: 8px;
+}
+
 .payment-history-panel {
   background: #ffffff;
 }
@@ -1178,8 +1592,12 @@ th {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .payment-form.payment-flow {
+    grid-template-columns: 1fr;
+  }
+
   .payment-actions {
-    justify-items: stretch;
+    flex-wrap: wrap;
   }
 }
 
@@ -1192,4 +1610,32 @@ th {
   .amount-input {
     width: 100%;
   }
+
+  /* Payment method buttons and amount cards stack full-width on narrow
+     screens instead of shrinking side-by-side — never squeezed, never
+     mismatched sizes. */
+  .payment-method-options--flow,
+  .amount-card-row {
+    grid-template-columns: 1fr;
+  }
+
+  .payment-confirm-button {
+    width: 100%;
+  }
+}
+
+.user-order-card {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #e4ebf2;
+}
+
+.compact-header {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.compact-header h3 {
+  margin: 0;
+  font-size: 16px;
 }
