@@ -206,3 +206,95 @@ func TestMergePreviewValidatesParams(t *testing.T) {
 		t.Fatalf("status = %d, want 400", recorder.Code)
 	}
 }
+
+func TestListReturnsSummaryAmounts(t *testing.T) {
+	store := &stubStore{listResponse: ListResponse{
+		Items:   []ListItem{{CNCode: "succ", OrderCount: 1, TotalAmount: 100, PaidAmount: 40, RemainingAmount: 60}},
+		Summary: ListSummary{UserCount: 1, UsersWithOrders: 1, TotalAmount: 100, PaidAmount: 40, RemainingAmount: 60},
+	}}
+	handler := NewHandler(store)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	response := httptest.NewRecorder()
+	handler.List(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	var payload ListResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Summary.UserCount != 1 || payload.Summary.UsersWithOrders != 1 || payload.Summary.TotalAmount != 100 || payload.Summary.PaidAmount != 40 || payload.Summary.RemainingAmount != 60 {
+		t.Fatalf("summary = %#v", payload.Summary)
+	}
+}
+
+func TestDetailReturnsOrderItemRoleAndAmounts(t *testing.T) {
+	store := &stubStore{detailResponse: DetailResponse{
+		User: ListItem{ID: "6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a", CNCode: "succ"},
+		Orders: []DetailOrder{{
+			ID: "order-1", OrderNo: "O-1", ProjectName: "Project", TotalAmount: 100, PaidAmount: 40, RemainingAmount: 60,
+			Items: []DetailOrderItem{{ProductName: "Badge", CharacterName: "Miku", Category: "badge", Quantity: 2, UnitPrice: 50, Amount: 100, PaidAmount: 40, RemainingAmount: 60, PaymentStatus: "partial"}},
+		}},
+	}}
+	handler := NewHandler(store)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/users/6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a", nil)
+	response := httptest.NewRecorder()
+	handler.Detail(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	var payload DetailResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	item := payload.Orders[0].Items[0]
+	if item.CharacterName != "Miku" || item.Category != "badge" || item.PaidAmount != 40 || item.RemainingAmount != 60 {
+		t.Fatalf("item = %#v", item)
+	}
+}
+
+func TestUserListAndDetailRequireAdmin(t *testing.T) {
+	handler := NewHandler(&stubStore{})
+	for _, tc := range []struct {
+		name string
+		h    http.HandlerFunc
+		path string
+	}{
+		{"list", handler.List, "/api/admin/users"},
+		{"detail", handler.Detail, "/api/admin/users/6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			response := httptest.NewRecorder()
+			authenticatedHandler(tc.h).ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", response.Code)
+			}
+		})
+	}
+}
+
+func TestMergePreviewMapsSameAndMergedUserErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"same", ErrMergeSameUser},
+		{"source merged", ErrMergeSourceNotActive},
+		{"target merged", ErrMergeTargetNotActive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewHandler(&stubStore{previewErr: tc.err})
+			request := httptest.NewRequest(http.MethodGet, "/api/admin/users/merge-preview?source_id=6b1f6ec1-8b5a-4b2e-b3f0-1f2e3d4c5b6a&target_cn=succ", nil)
+			response := httptest.NewRecorder()
+			handler.MergePreview(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", response.Code)
+			}
+		})
+	}
+}

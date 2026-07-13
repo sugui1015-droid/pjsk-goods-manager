@@ -21,10 +21,11 @@ var (
 )
 
 type MergePreviewResponse struct {
-	Source           ListItem `json:"source"`
-	Target           ListItem `json:"target"`
-	MoveOrderCount   int      `json:"move_order_count"`
-	MovePaymentCount int      `json:"move_payment_count"`
+	Source                ListItem `json:"source"`
+	Target                ListItem `json:"target"`
+	MoveOrderCount        int      `json:"move_order_count"`
+	MovePaymentCount      int      `json:"move_payment_count"`
+	MoveQuerySessionCount int      `json:"move_query_session_count"`
 }
 
 type MergeRequest struct {
@@ -147,20 +148,22 @@ func (s *PostgresStore) PreviewMerge(ctx context.Context, sourceID string, targe
 		return MergePreviewResponse{}, ErrMergeTargetNotActive
 	}
 
-	var orderCount, paymentCount int
+	var orderCount, paymentCount, querySessionCount int
 	if err := s.pool.QueryRow(ctx, `
 		select
 			(select count(*) from orders where user_id = $1::uuid),
-			(select count(*) from payments where user_id = $1::uuid)
-	`, source.ID).Scan(&orderCount, &paymentCount); err != nil {
+			(select count(*) from payments where user_id = $1::uuid),
+			(select count(*) from query_sessions where user_id = $1::uuid)
+	`, source.ID).Scan(&orderCount, &paymentCount, &querySessionCount); err != nil {
 		return MergePreviewResponse{}, err
 	}
 
 	return MergePreviewResponse{
-		Source:           source,
-		Target:           target,
-		MoveOrderCount:   orderCount,
-		MovePaymentCount: paymentCount,
+		Source:                source,
+		Target:                target,
+		MoveOrderCount:        orderCount,
+		MovePaymentCount:      paymentCount,
+		MoveQuerySessionCount: querySessionCount,
 	}, nil
 }
 

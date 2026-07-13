@@ -48,20 +48,50 @@ type ListItem struct {
 	CreatedAt       string  `json:"created_at"`
 }
 
-type ListResponse struct {
-	Items []ListItem `json:"items"`
-}
-
-type DetailOrder struct {
-	ID              string  `json:"id"`
-	OrderNo         string  `json:"order_no"`
-	Status          string  `json:"status"`
-	ProjectName     string  `json:"project_name"`
-	ItemCount       int     `json:"item_count"`
+type ListSummary struct {
+	UserCount       int     `json:"user_count"`
+	UsersWithOrders int     `json:"users_with_orders"`
 	TotalAmount     float64 `json:"total_amount"`
 	PaidAmount      float64 `json:"paid_amount"`
 	RemainingAmount float64 `json:"remaining_amount"`
-	CreatedAt       string  `json:"created_at"`
+}
+
+type ListResponse struct {
+	Items   []ListItem  `json:"items"`
+	Summary ListSummary `json:"summary"`
+}
+
+type DetailOrder struct {
+	ID              string            `json:"id"`
+	OrderNo         string            `json:"order_no"`
+	Status          string            `json:"status"`
+	ProjectName     string            `json:"project_name"`
+	ItemCount       int               `json:"item_count"`
+	TotalAmount     float64           `json:"total_amount"`
+	PaidAmount      float64           `json:"paid_amount"`
+	RemainingAmount float64           `json:"remaining_amount"`
+	CreatedAt       string            `json:"created_at"`
+	Items           []DetailOrderItem `json:"items"`
+}
+
+type DetailOrderItem struct {
+	ID              string  `json:"id"`
+	ProductName     string  `json:"product_name"`
+	ProductID       string  `json:"product_id,omitempty"`
+	CharacterName   string  `json:"character_name,omitempty"`
+	Category        string  `json:"category,omitempty"`
+	SeriesCode      string  `json:"series_code,omitempty"`
+	DisplayName     string  `json:"display_name,omitempty"`
+	SKU             string  `json:"sku,omitempty"`
+	Quantity        float64 `json:"quantity"`
+	UnitPrice       float64 `json:"unit_price"`
+	Amount          float64 `json:"amount"`
+	PaidAmount      float64 `json:"paid_amount"`
+	RemainingAmount float64 `json:"remaining_amount"`
+	PaymentStatus   string  `json:"payment_status"`
+	ImportFilename  string  `json:"import_filename,omitempty"`
+	SourceSheet     string  `json:"source_sheet,omitempty"`
+	SourceRowKey    string  `json:"source_row_key,omitempty"`
 }
 
 type DetailPayment struct {
@@ -245,6 +275,13 @@ func (s *PostgresStore) ListUsers(ctx context.Context, filters Filters) (ListRes
 		item.TotalAmount = round2(item.TotalAmount)
 		item.PaidAmount = round2(item.PaidAmount)
 		item.RemainingAmount = round2(item.RemainingAmount)
+		response.Summary.UserCount++
+		if item.OrderCount > 0 {
+			response.Summary.UsersWithOrders++
+		}
+		response.Summary.TotalAmount = round2(response.Summary.TotalAmount + item.TotalAmount)
+		response.Summary.PaidAmount = round2(response.Summary.PaidAmount + item.PaidAmount)
+		response.Summary.RemainingAmount = round2(response.Summary.RemainingAmount + item.RemainingAmount)
 		response.Items = append(response.Items, item)
 	}
 	return response, rows.Err()
@@ -370,9 +407,91 @@ func (s *PostgresStore) listOrdersForUser(ctx context.Context, userID string) ([
 		if order.RemainingAmount < 0 {
 			order.RemainingAmount = 0
 		}
+		items, err := s.listOrderItemsForUserDetail(ctx, order.ID)
+		if err != nil {
+			return nil, err
+		}
+		order.Items = items
 		orders = append(orders, order)
 	}
 	return orders, rows.Err()
+}
+
+func (s *PostgresStore) listOrderItemsForUserDetail(ctx context.Context, orderID string) ([]DetailOrderItem, error) {
+	rows, err := s.pool.Query(ctx, `
+		with paid_by_item as (
+			select
+				pi.order_item_id,
+				coalesce(sum(pi.applied_amount) filter (where p.status = 'approved'), 0) as paid_amount
+			from payment_items pi
+			join payments p on p.id = pi.payment_id
+			group by pi.order_item_id
+		)
+		select
+			oi.id::text,
+			product.name,
+			product.id::text,
+			coalesce(product.character_name, ''),
+			coalesce(product.category, ''),
+			coalesce(product.series_code, ''),
+			product.name,
+			coalesce(product.sku, ''),
+			oi.quantity::float8,
+			oi.unit_price::float8,
+			oi.amount::float8,
+			least(coalesce(paid.paid_amount, 0), oi.amount)::float8,
+			greatest(oi.amount - coalesce(paid.paid_amount, 0), 0)::float8,
+			case
+				when coalesce(paid.paid_amount, 0) <= 0 then 'unpaid'
+				when coalesce(paid.paid_amount, 0) + 0.004 >= oi.amount then 'paid'
+				else 'partial'
+			end,
+			coalesce(ib.original_filename, ''),
+			coalesce(oi.source_sheet, ''),
+			coalesce(oi.source_row_key, '')
+		from order_items oi
+		join products product on product.id = oi.product_id
+		left join import_batches ib on ib.id = oi.import_batch_id
+		left join paid_by_item paid on paid.order_item_id = oi.id
+		where oi.order_id = $1::uuid
+		  and oi.revoked_at is null
+		order by product.sort_order, product.name, product.character_name, oi.created_at, oi.id
+	`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := []DetailOrderItem{}
+	for rows.Next() {
+		var item DetailOrderItem
+		if err := rows.Scan(
+			&item.ID,
+			&item.ProductName,
+			&item.ProductID,
+			&item.CharacterName,
+			&item.Category,
+			&item.SeriesCode,
+			&item.DisplayName,
+			&item.SKU,
+			&item.Quantity,
+			&item.UnitPrice,
+			&item.Amount,
+			&item.PaidAmount,
+			&item.RemainingAmount,
+			&item.PaymentStatus,
+			&item.ImportFilename,
+			&item.SourceSheet,
+			&item.SourceRowKey,
+		); err != nil {
+			return nil, err
+		}
+		item.Amount = round2(item.Amount)
+		item.PaidAmount = round2(item.PaidAmount)
+		item.RemainingAmount = round2(item.RemainingAmount)
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *PostgresStore) listPaymentsForUser(ctx context.Context, userID string) ([]DetailPayment, error) {
