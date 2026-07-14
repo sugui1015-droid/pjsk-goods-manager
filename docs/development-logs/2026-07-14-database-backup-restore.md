@@ -211,3 +211,14 @@
 - 推荐提交范围：`.gitignore`、`docs/database-backup-restore.md`、本开发日志、`scripts/database/Backup-Postgres.ps1`、`scripts/database/Restore-PostgresTest.ps1`、`scripts/database/Test-PostgresBackup.ps1`、`scripts/database/Invoke-ScriptSafetyTests.ps1`、`scripts/database/Remove-PostgresRestoreTest.ps1`。
 - 排除提交：`.claude/settings.local.json`、`.local-secrets`、仓库外演练目录、dump、metadata、validation、任何密码/DSN/真实 `.env`、无关业务代码。
 - 本阶段未提交、未推送；下一步为精确暂存上述允许文件，创建提交并普通推送。
+
+## 阶段 15：主提交与首次推送结果记录
+
+- 主提交已创建：`1a89c957970c6035d27c89352f27072157b3e304`。
+- 主提交标题：`feat: add PostgreSQL backup and restore tooling`。
+- 主提交文件范围：`.gitignore`、`docs/database-backup-restore.md`、本开发日志、`scripts/database/Backup-Postgres.ps1`、`scripts/database/Restore-PostgresTest.ps1`、`scripts/database/Test-PostgresBackup.ps1`、`scripts/database/Invoke-ScriptSafetyTests.ps1`、`scripts/database/Remove-PostgresRestoreTest.ps1`。
+- 首次普通推送结果：成功，`main -> origin/main`，未使用强制推送，未改写历史。
+- 首次推送后 `HEAD` 与 `origin/main` 一致，均为 `1a89c957970c6035d27c89352f27072157b3e304`。
+- 清理后确认：两个隔离数据库已删除；正式数据库 `pjsk` 在清理后确认仍存在；`D:\pjsk\.local-secrets` 已删除；仓库外 dump、metadata、validation 均保留。
+- 本条为满足提交与推送结果留痕的日志收尾记录；后续仅将本日志追加作为日志-only 收尾提交并普通推送。
+- 未记录密码、DSN、密码文件内容或真实业务数据。
