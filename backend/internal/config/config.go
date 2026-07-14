@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/url"
@@ -13,13 +14,15 @@ import (
 )
 
 type Config struct {
-	Port            string
-	DatabaseURL     string
-	LegacyAdminPort string
-	LegacyUserPort  string
-	FrontendOrigins []string
-	AdminSessionTTL time.Duration
-	CookieSecure    bool
+	Port                       string
+	DatabaseURL                string
+	LegacyAdminPort            string
+	LegacyUserPort             string
+	FrontendOrigins            []string
+	AdminSessionTTL            time.Duration
+	CookieSecure               bool
+	RecoveryEmailEncryptionKey []byte
+	RecoveryEmailHMACKey       []byte
 }
 
 func Load() (Config, error) {
@@ -42,6 +45,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("ADMIN_COOKIE_SECURE must be true or false")
 	}
 
+	recoveryEmailEncryptionKey, recoveryEmailHMACKey, err := loadRecoveryEmailKeys()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Port:            EnvOr("APP_PORT", EnvOr("SERVER_PORT", EnvOr("BACKEND_PORT", "8080"))),
 		DatabaseURL:     databaseURL,
@@ -51,9 +59,32 @@ func Load() (Config, error) {
 			"http://localhost:5173",
 			"http://127.0.0.1:5173",
 		},
-		AdminSessionTTL: adminSessionTTL,
-		CookieSecure:    cookieSecure,
+		AdminSessionTTL:            adminSessionTTL,
+		CookieSecure:               cookieSecure,
+		RecoveryEmailEncryptionKey: recoveryEmailEncryptionKey,
+		RecoveryEmailHMACKey:       recoveryEmailHMACKey,
 	}, nil
+}
+
+func loadRecoveryEmailKeys() ([]byte, []byte, error) {
+	encryptionValue := strings.TrimSpace(os.Getenv("RECOVERY_EMAIL_ENCRYPTION_KEY"))
+	hmacValue := strings.TrimSpace(os.Getenv("RECOVERY_EMAIL_HMAC_KEY"))
+	if encryptionValue == "" && hmacValue == "" {
+		return nil, nil, nil
+	}
+	if encryptionValue == "" || hmacValue == "" {
+		return nil, nil, fmt.Errorf("RECOVERY_EMAIL_ENCRYPTION_KEY and RECOVERY_EMAIL_HMAC_KEY must be configured together")
+	}
+
+	encryptionKey, err := base64.StdEncoding.DecodeString(encryptionValue)
+	if err != nil || len(encryptionKey) != 32 {
+		return nil, nil, fmt.Errorf("RECOVERY_EMAIL_ENCRYPTION_KEY must be base64-encoded 32-byte data")
+	}
+	hmacKey, err := base64.StdEncoding.DecodeString(hmacValue)
+	if err != nil || len(hmacKey) < 32 {
+		return nil, nil, fmt.Errorf("RECOVERY_EMAIL_HMAC_KEY must be base64-encoded data of at least 32 bytes")
+	}
+	return encryptionKey, hmacKey, nil
 }
 
 func EnvOr(name string, fallback string) string {

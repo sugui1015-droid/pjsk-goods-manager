@@ -1,4 +1,4 @@
-﻿const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 const apiBaseUrl = import.meta.env.DEV ? '' : configuredApiBaseUrl
 
 export class ApiError extends Error {
@@ -187,6 +187,29 @@ export async function postJSON<T>(path: string, body: unknown): Promise<T> {
 export async function patchJSON<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(endpoint(path), {
     method: 'PATCH',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  return parseResponse<T>(response)
+}
+export async function putJSON<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(endpoint(path), {
+    method: 'PUT',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  return parseResponse<T>(response)
+}
+
+export async function deleteJSON<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(endpoint(path), {
+    method: 'DELETE',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
@@ -514,6 +537,30 @@ export function createQueryCodeBindToken(userID: string): Promise<BindTokenRespo
   return postJSON<BindTokenResponse>(`/api/admin/users/${encodeURIComponent(userID)}/query-code-bind-token`, {})
 }
 
+export type RecoveryEmailState = {
+  has_recovery_email: boolean
+  status?: 'pending' | 'verified' | 'disabled'
+  masked_email?: string
+  verified_at?: string
+  updated_at?: string
+  message?: string
+}
+
+export function getAdminRecoveryEmail(userID: string): Promise<RecoveryEmailState> {
+  return getJSON<RecoveryEmailState>(`/api/admin/users/${encodeURIComponent(userID)}/recovery-email`)
+}
+
+export function putAdminRecoveryEmail(userID: string, email: string, reason: string): Promise<RecoveryEmailState> {
+  return putJSON<RecoveryEmailState>(`/api/admin/users/${encodeURIComponent(userID)}/recovery-email`, { email, reason })
+}
+
+export function deleteAdminRecoveryEmail(userID: string, reason: string): Promise<RecoveryEmailState> {
+  return deleteJSON<RecoveryEmailState>(`/api/admin/users/${encodeURIComponent(userID)}/recovery-email`, { reason })
+}
+
+export function getQueryRecoveryEmail(): Promise<RecoveryEmailState> {
+  return getJSON<RecoveryEmailState>('/api/query/recovery-email')
+}
 // QueryOrderItem is the regular-user-facing shape: no internal ids, no
 // import batch/source-file tracking fields. Those exist only on the admin
 // side (see the "技术标识" panels).

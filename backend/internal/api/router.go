@@ -15,6 +15,7 @@ import (
 	"pjsk/backend/internal/orders"
 	"pjsk/backend/internal/payments"
 	"pjsk/backend/internal/query"
+	"pjsk/backend/internal/recoveryemail"
 	"pjsk/backend/internal/users"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -95,7 +96,13 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		adminHandler.RequireAuthentication(http.HandlerFunc(ordersHandler.Detail)),
 	)
 
-	usersHandler := users.NewHandler(users.NewPostgresStore(dbPool))
+	usersStore := users.NewPostgresStore(dbPool)
+	usersHandler := users.NewHandler(usersStore)
+	recoveryEmailProtector, _ := recoveryemail.NewProtector(
+		cfg.RecoveryEmailEncryptionKey,
+		cfg.RecoveryEmailHMACKey,
+	)
+	usersHandler.ConfigureRecoveryEmail(usersStore, recoveryEmailProtector)
 	mux.Handle(
 		"/api/admin/users",
 		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.List)),
@@ -166,9 +173,11 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		cfg.AdminSessionTTL,
 		cfg.CookieSecure,
 	)
+	queryHandler.ConfigureRecoveryEmail(usersStore, recoveryEmailProtector)
 	mux.HandleFunc("/api/query/login", queryHandler.Login)
 	mux.HandleFunc("/api/query/change-code", queryHandler.ChangeCode)
 	mux.HandleFunc("/api/query/bind-code", queryHandler.BindCode)
+	mux.HandleFunc("/api/query/recovery-email", queryHandler.RecoveryEmail)
 	mux.HandleFunc("/api/query/orders", queryHandler.Orders)
 	mux.HandleFunc("/api/query/logout", queryHandler.Logout)
 
@@ -277,7 +286,7 @@ func withCORS(next http.Handler, allowedOrigins []string) http.Handler {
 			w.Header().Set("Vary", "Origin")
 		}
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set(
 			"Access-Control-Allow-Headers",
 			"Content-Type, Authorization",

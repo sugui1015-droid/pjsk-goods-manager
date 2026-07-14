@@ -28,7 +28,9 @@ var (
 )
 
 type Handler struct {
-	store Store
+	store                  Store
+	recoveryEmailStore     RecoveryEmailStore
+	recoveryEmailProtector RecoveryEmailProtector
 }
 
 type Store interface {
@@ -196,6 +198,8 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 			h.UpdateQueryAccessStatus(w, r, id)
 		case "query-code-bind-token":
 			h.CreateBindToken(w, r, id)
+		case "recovery-email":
+			h.RecoveryEmail(w, r, id)
 		default:
 			writeError(w, http.StatusNotFound, "user not found")
 		}

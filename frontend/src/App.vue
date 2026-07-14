@@ -6,6 +6,10 @@ import {
   bindQueryCode,
   changeQueryCode,
   createQueryCodeBindToken,
+  deleteAdminRecoveryEmail,
+  getAdminRecoveryEmail,
+  getQueryRecoveryEmail,
+  putAdminRecoveryEmail,
   getJSON,
   postForm,
   postJSON,
@@ -39,6 +43,7 @@ import {
   type PaymentListResponse,
   type QueryLoginResponse,
   type QueryOrdersResponse,
+  type RecoveryEmailState,
   type QueryUser,
 } from './api/client'
 import {
@@ -115,7 +120,12 @@ const queryAccountMessage = ref('')
 const bindTokenGenerating = ref(false)
 const bindTokenResult = ref<{ token: string; expiresAt: string } | null>(null)
 const bindTokenMessage = ref('')
-
+const adminRecoveryEmail = ref<RecoveryEmailState | null>(null)
+const adminRecoveryEmailLoading = ref(false)
+const adminRecoveryEmailSaving = ref(false)
+const adminRecoveryEmailDraft = ref('')
+const adminRecoveryEmailReason = ref('')
+const adminRecoveryEmailMessage = ref('')
 const admin = ref<Admin | null>(null)
 const authChecked = ref(false)
 const authMessage = ref('')
@@ -214,7 +224,9 @@ const queryNewCode = ref('')
 const queryConfirmCode = ref('')
 const queryCodeChanging = ref(false)
 const querySecurityMessage = ref('')
-// First-time bind flow on the user login page. The bind token is held only
+const queryRecoveryEmail = ref<RecoveryEmailState | null>(null)
+const queryRecoveryEmailLoading = ref(false)
+const queryRecoveryEmailMessage = ref('')// First-time bind flow on the user login page. The bind token is held only
 // in this in-memory form state — never persisted, gone on refresh.
 const queryView = ref<'login' | 'bind'>('login')
 const bindCN = ref('')
@@ -995,8 +1007,13 @@ async function loadAdminUserDetail(id: string) {
   queryAccountMessage.value = ''
   bindTokenResult.value = null
   bindTokenMessage.value = ''
+  adminRecoveryEmail.value = null
+  adminRecoveryEmailDraft.value = ''
+  adminRecoveryEmailReason.value = ''
+  adminRecoveryEmailMessage.value = ''
   try {
     adminUserDetail.value = await getJSON<AdminUserDetailResponse>('/api/admin/users/' + encodeURIComponent(id))
+    await loadAdminRecoveryEmail(id)
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
@@ -1016,6 +1033,90 @@ function updateAdminUserInList(user: AdminUserListItem) {
   }
 }
 
+async function loadAdminRecoveryEmail(userID: string) {
+  adminRecoveryEmailLoading.value = true
+  adminRecoveryEmailMessage.value = ''
+  try {
+    adminRecoveryEmail.value = await getAdminRecoveryEmail(userID)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    adminRecoveryEmail.value = null
+    adminRecoveryEmailMessage.value = error instanceof Error ? error.message : '找回邮箱状态加载失败'
+  } finally {
+    adminRecoveryEmailLoading.value = false
+  }
+}
+
+async function saveAdminRecoveryEmail() {
+  if (!adminUserDetail.value || adminRecoveryEmailSaving.value || adminUserDetail.value.user.status === 'merged') return
+  const email = adminRecoveryEmailDraft.value.trim()
+  const reason = adminRecoveryEmailReason.value.trim()
+  if (!email) {
+    adminRecoveryEmailMessage.value = '请输入新的找回邮箱。'
+    return
+  }
+  if (!reason) {
+    adminRecoveryEmailMessage.value = '请填写操作原因。'
+    return
+  }
+  const replacing = adminRecoveryEmail.value?.has_recovery_email === true
+  const maskedCurrent = adminRecoveryEmail.value?.masked_email || '当前邮箱'
+  const confirmation = replacing
+    ? `确认替换 ${maskedCurrent}？旧记录将立即失效，新邮箱状态为待验证。`
+    : '确认登记新的找回邮箱？保存后页面只显示脱敏邮箱，状态为待验证。'
+  if (!window.confirm(confirmation)) return
+
+  adminRecoveryEmailSaving.value = true
+  adminRecoveryEmailMessage.value = ''
+  try {
+    adminRecoveryEmail.value = await putAdminRecoveryEmail(adminUserDetail.value.user.id, email, reason)
+    adminRecoveryEmailDraft.value = ''
+    adminRecoveryEmailReason.value = ''
+    adminRecoveryEmailMessage.value = adminRecoveryEmail.value.message || (replacing ? '找回邮箱已替换。' : '找回邮箱已登记。')
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    adminRecoveryEmailMessage.value = error instanceof Error ? error.message : '找回邮箱保存失败'
+  } finally {
+    adminRecoveryEmailSaving.value = false
+  }
+}
+
+async function unbindAdminRecoveryEmail() {
+  if (!adminUserDetail.value || !adminRecoveryEmail.value?.has_recovery_email || adminRecoveryEmailSaving.value || adminUserDetail.value.user.status === 'merged') return
+  const reason = adminRecoveryEmailReason.value.trim()
+  if (!reason) {
+    adminRecoveryEmailMessage.value = '请填写解绑原因。'
+    return
+  }
+  const maskedCurrent = adminRecoveryEmail.value.masked_email || '当前脱敏邮箱'
+  if (!window.confirm(`确认解绑 ${maskedCurrent}？历史记录会保留用于安全审计，但该邮箱不再是当前找回邮箱。`)) return
+
+  adminRecoveryEmailSaving.value = true
+  adminRecoveryEmailMessage.value = ''
+  try {
+    adminRecoveryEmail.value = await deleteAdminRecoveryEmail(adminUserDetail.value.user.id, reason)
+    adminRecoveryEmailDraft.value = ''
+    adminRecoveryEmailReason.value = ''
+    adminRecoveryEmailMessage.value = adminRecoveryEmail.value.message || '找回邮箱已解绑。'
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    adminRecoveryEmailMessage.value = error instanceof Error ? error.message : '找回邮箱解绑失败'
+  } finally {
+    adminRecoveryEmailSaving.value = false
+  }
+}
 async function saveQueryCode() {
   if (!adminUserDetail.value || queryCodeSaving.value) return
   const code = queryCodeDraft.value.trim()
@@ -1390,6 +1491,7 @@ async function loadQueryOrders(showMessage = true) {
     queryOrders.value = response
     queryUser.value = response.user
     queryCN.value = response.user.cn_code
+    await loadQueryRecoveryEmail()
   } catch (error) {
     queryOrders.value = null
     queryUser.value = null
@@ -1401,6 +1503,24 @@ async function loadQueryOrders(showMessage = true) {
   }
 }
 
+async function loadQueryRecoveryEmail() {
+  queryRecoveryEmailLoading.value = true
+  queryRecoveryEmailMessage.value = ''
+  try {
+    queryRecoveryEmail.value = await getQueryRecoveryEmail()
+  } catch (error) {
+    queryRecoveryEmail.value = null
+    if (error instanceof ApiError && error.status === 401) {
+      queryUser.value = null
+      queryOrders.value = null
+      queryMessage.value = error.message
+      return
+    }
+    queryRecoveryEmailMessage.value = error instanceof Error ? error.message : '找回邮箱状态加载失败'
+  } finally {
+    queryRecoveryEmailLoading.value = false
+  }
+}
 async function logoutQuery() {
   queryLoading.value = true
   queryMessage.value = ''
@@ -1413,6 +1533,8 @@ async function logoutQuery() {
     queryNewCode.value = ''
     queryConfirmCode.value = ''
     querySecurityMessage.value = ''
+    queryRecoveryEmail.value = null
+    queryRecoveryEmailMessage.value = ''
     queryMessage.value = '已退出查询。'
   } catch (error) {
     queryMessage.value = error instanceof Error ? error.message : '退出失败'
@@ -1494,6 +1616,8 @@ async function submitQueryCodeChange() {
     queryConfirmCode.value = ''
     queryUser.value = null
     queryOrders.value = null
+    queryRecoveryEmail.value = null
+    queryRecoveryEmailMessage.value = ''
     queryCode.value = ''
     queryMessage.value = response.message
   } catch (error) {
@@ -1910,6 +2034,12 @@ function paymentStatusLabel(status: string) {
   return labels[status] ?? status
 }
 
+function recoveryEmailStatusLabel(status?: string) {
+  if (status === 'pending') return '待验证'
+  if (status === 'verified') return '已验证'
+  if (status === 'disabled') return '已停用'
+  return '未登记'
+}
 function userStatusLabel(status: string) {
   const labels: Record<string, string> = {
     active: '正常',
@@ -2414,7 +2544,27 @@ onMounted(() => {
                   <div v-if="bindTokenMessage" class="inline-alert">{{ bindTokenMessage }}</div>
                 </div>
               </section>
-              <section v-if="adminUserDetail.user.status === 'active'" class="panel nested-panel danger-panel">
+              <section class="panel nested-panel recovery-email-panel">
+                <div class="panel__header">
+                  <div><h2>找回邮箱</h2><p class="muted">管理员只能登记新邮箱或查看脱敏状态，不能读取、回填或复制完整邮箱。当前阶段尚未开放邮箱自助找回。</p></div>
+                  <span class="status-chip" :data-state="adminRecoveryEmail?.status || 'disabled'">{{ recoveryEmailStatusLabel(adminRecoveryEmail?.status) }}</span>
+                </div>
+                <p v-if="adminRecoveryEmailLoading" class="muted">正在加载找回邮箱状态。</p>
+                <div v-else class="recovery-email-state">
+                  <div><span>当前邮箱</span><strong class="recovery-email-masked">{{ adminRecoveryEmail?.has_recovery_email ? (adminRecoveryEmail.masked_email || '-') : '未登记' }}</strong></div>
+                  <div><span>更新时间</span><strong>{{ adminRecoveryEmail?.updated_at ? formatDate(adminRecoveryEmail.updated_at) : '-' }}</strong></div>
+                </div>
+                <p v-if="adminUserDetail.user.status === 'merged'" class="inline-alert">已合并用户不能新增、替换或解绑找回邮箱。</p>
+                <form v-else class="recovery-email-form" @submit.prevent="saveAdminRecoveryEmail">
+                  <label><span>{{ adminRecoveryEmail?.has_recovery_email ? '新的找回邮箱' : '找回邮箱' }}</span><input v-model="adminRecoveryEmailDraft" type="email" autocomplete="off" maxlength="254" placeholder="重新输入完整新邮箱" /></label>
+                  <label><span>操作原因（必填）</span><input v-model="adminRecoveryEmailReason" maxlength="200" placeholder="说明登记、替换或解绑原因" /></label>
+                  <div class="recovery-email-actions">
+                    <button class="primary-button" type="submit" :disabled="adminRecoveryEmailSaving || !adminRecoveryEmailDraft.trim() || !adminRecoveryEmailReason.trim()">{{ adminRecoveryEmailSaving ? '保存中' : (adminRecoveryEmail?.has_recovery_email ? '替换邮箱' : '登记邮箱') }}</button>
+                    <button v-if="adminRecoveryEmail?.has_recovery_email" class="danger-button" type="button" :disabled="adminRecoveryEmailSaving || !adminRecoveryEmailReason.trim()" @click="unbindAdminRecoveryEmail">{{ adminRecoveryEmailSaving ? '处理中' : '解绑邮箱' }}</button>
+                  </div>
+                </form>
+                <div v-if="adminRecoveryEmailMessage" class="inline-alert">{{ adminRecoveryEmailMessage }}</div>
+              </section>              <section v-if="adminUserDetail.user.status === 'active'" class="panel nested-panel danger-panel">
                 <div class="panel__header"><div><h2>CN 合并</h2><p class="muted">将当前 CN 的订单、付款和查询记录全部迁移到目标 CN，当前 CN 标记为“已合并”。此操作不可撤销，请先预览影响范围。</p></div></div>
                 <div class="payment-cn-form">
                   <label><span>合并到目标 CN</span><input v-model="mergeTargetCN" placeholder="输入目标 CN" /></label>
@@ -2719,8 +2869,16 @@ onMounted(() => {
               <button class="primary-button" type="submit" :disabled="queryCodeChanging">{{ queryCodeChanging ? '修改中' : '修改查询码' }}</button>
             </form>
             <div v-if="querySecurityMessage" class="inline-alert">{{ querySecurityMessage }}</div>
+            <div class="query-recovery-email-readonly">
+              <div class="panel__header"><div><h3>找回邮箱</h3><p class="muted">当前仅完成找回邮箱登记，尚未开放邮箱自助找回。</p></div><span class="status-chip" :data-state="queryRecoveryEmail?.status || 'disabled'">{{ recoveryEmailStatusLabel(queryRecoveryEmail?.status) }}</span></div>
+              <p v-if="queryRecoveryEmailLoading" class="muted">正在加载找回邮箱状态。</p>
+              <div v-else class="recovery-email-state">
+                <div><span>当前邮箱</span><strong class="recovery-email-masked">{{ queryRecoveryEmail?.has_recovery_email ? (queryRecoveryEmail.masked_email || '-') : '未登记' }}</strong></div>
+                <div><span>更新时间</span><strong>{{ queryRecoveryEmail?.updated_at ? formatDate(queryRecoveryEmail.updated_at) : '-' }}</strong></div>
+              </div>
+              <div v-if="queryRecoveryEmailMessage" class="inline-alert">{{ queryRecoveryEmailMessage }}</div>
+            </div>
           </section>
-
           <section class="summary-grid">
             <article class="metric-tile"><span>CN</span><strong>{{ queryOrders.user.cn_code }}</strong></article>
             <article class="metric-tile"><span>订单数</span><strong>{{ queryOrders.orders.length }}</strong></article>
