@@ -299,6 +299,9 @@ func (s *PostgresStore) PutRecoveryEmail(ctx context.Context, userID string, adm
 		`, currentID); err != nil {
 			return RecoveryEmailMutation{}, err
 		}
+		if err := invalidateQueryCodeRecoveryForEmail(ctx, tx, currentID); err != nil {
+			return RecoveryEmailMutation{}, err
+		}
 	}
 
 	var record RecoveryEmailRecord
@@ -386,6 +389,9 @@ func (s *PostgresStore) UnbindRecoveryEmail(ctx context.Context, userID string, 
 	`, currentID); err != nil {
 		return false, err
 	}
+	if err := invalidateQueryCodeRecoveryForEmail(ctx, tx, currentID); err != nil {
+		return false, err
+	}
 	metadata, err := json.Marshal(map[string]any{
 		"new_status":        "disabled",
 		"old_record_exists": true,
@@ -405,4 +411,24 @@ func (s *PostgresStore) UnbindRecoveryEmail(ctx context.Context, userID string, 
 		return false, err
 	}
 	return true, nil
+}
+
+func invalidateQueryCodeRecoveryForEmail(ctx context.Context, tx pgx.Tx, recoveryEmailID string) error {
+	if _, err := tx.Exec(ctx, `
+		update query_code_recovery_codes
+		set status = 'invalidated', invalidated_at = coalesce(invalidated_at, now()), updated_at = now()
+		where recovery_email_id = $1::uuid and purpose = 'query_code_recovery'
+		  and status in ('sending', 'active') and invalidated_at is null
+	`, recoveryEmailID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		update query_code_recovery_sessions
+		set status = 'invalidated', invalidated_at = coalesce(invalidated_at, now()), updated_at = now()
+		where recovery_email_id = $1::uuid and purpose = 'query_code_recovery'
+		  and status = 'active' and invalidated_at is null
+	`, recoveryEmailID); err != nil {
+		return err
+	}
+	return nil
 }

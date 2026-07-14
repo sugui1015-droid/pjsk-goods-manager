@@ -15,6 +15,7 @@ import (
 	"pjsk/backend/internal/orders"
 	"pjsk/backend/internal/payments"
 	"pjsk/backend/internal/query"
+	"pjsk/backend/internal/querycoderecovery"
 	"pjsk/backend/internal/recoveryemail"
 	"pjsk/backend/internal/recoveryemailverification"
 	"pjsk/backend/internal/users"
@@ -192,6 +193,14 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		queryHandler.ConfigureRecoveryEmailVerification(
 			recoveryemailverification.NewService(verificationStore, recoveryEmailProtector, sender, verificationManager.Policy()),
 		)
+		if recoveryManager, recoveryErr := querycoderecovery.NewManager(cfg.RecoveryEmailVerificationHMACKey); recoveryErr == nil {
+			if recoverySender, ok := sender.(querycoderecovery.Sender); ok {
+				recoveryStore := querycoderecovery.NewPostgresStore(dbPool, recoveryManager)
+				queryHandler.ConfigureQueryCodeRecovery(
+					querycoderecovery.NewService(recoveryStore, recoveryEmailProtector, recoverySender, recoveryManager),
+				)
+			}
+		}
 	}
 	mux.HandleFunc("/api/query/login", queryHandler.Login)
 	mux.HandleFunc("/api/query/change-code", queryHandler.ChangeCode)
@@ -199,6 +208,9 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("/api/query/recovery-email", queryHandler.RecoveryEmail)
 	mux.HandleFunc("/api/query/recovery-email/send-verification", queryHandler.SendRecoveryEmailVerification)
 	mux.HandleFunc("/api/query/recovery-email/verify", queryHandler.VerifyRecoveryEmail)
+	mux.HandleFunc("/api/query/recovery/request", queryHandler.RequestQueryCodeRecovery)
+	mux.HandleFunc("/api/query/recovery/verify", queryHandler.VerifyQueryCodeRecovery)
+	mux.HandleFunc("/api/query/recovery/reset", queryHandler.ResetRecoveredQueryCode)
 	mux.HandleFunc("/api/query/orders", queryHandler.Orders)
 	mux.HandleFunc("/api/query/logout", queryHandler.Logout)
 

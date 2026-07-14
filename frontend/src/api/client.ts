@@ -528,6 +528,38 @@ export type BindQueryCodeResponse = {
 export function bindQueryCode(request: BindQueryCodeRequest): Promise<BindQueryCodeResponse> {
   return postJSON<BindQueryCodeResponse>('/api/query/bind-code', request)
 }
+export type QueryCodeRecoveryRequestResponse = {
+  success: boolean
+  message: string
+}
+
+export type QueryCodeRecoveryVerifyResponse = {
+  success: boolean
+  message: string
+  reset_token: string
+  expires_at: string
+}
+
+export type QueryCodeRecoveryResetResponse = {
+  success: boolean
+  message: string
+}
+
+export function requestQueryCodeRecovery(cn: string): Promise<QueryCodeRecoveryRequestResponse> {
+  return postJSON<QueryCodeRecoveryRequestResponse>('/api/query/recovery/request', { cn })
+}
+
+export function verifyQueryCodeRecovery(cn: string, code: string): Promise<QueryCodeRecoveryVerifyResponse> {
+  return postJSON<QueryCodeRecoveryVerifyResponse>('/api/query/recovery/verify', { cn, code })
+}
+
+export function resetRecoveredQueryCode(resetToken: string, newQueryCode: string, confirmQueryCode: string): Promise<QueryCodeRecoveryResetResponse> {
+  return postJSON<QueryCodeRecoveryResetResponse>('/api/query/recovery/reset', {
+    reset_token: resetToken,
+    new_query_code: newQueryCode,
+    confirm_query_code: confirmQueryCode,
+  })
+}
 
 export type BindTokenResponse = {
   bind_token: string

@@ -10,8 +10,11 @@ import {
   getAdminRecoveryEmail,
   getQueryRecoveryEmail,
   putAdminRecoveryEmail,
+  requestQueryCodeRecovery,
+  resetRecoveredQueryCode,
   sendRecoveryEmailVerification,
   verifyRecoveryEmail,
+  verifyQueryCodeRecovery,
   getJSON,
   postForm,
   postJSON,
@@ -237,13 +240,24 @@ const queryRecoveryExpiresAt = ref('')
 const queryRecoveryClock = ref(Date.now())
 let queryRecoveryClockTimer: number | undefined// First-time bind flow on the user login page. The bind token is held only
 // in this in-memory form state — never persisted, gone on refresh.
-const queryView = ref<'login' | 'bind'>('login')
+const queryView = ref<'login' | 'bind' | 'recovery'>('login')
 const bindCN = ref('')
 const bindTokenInput = ref('')
 const bindNewCode = ref('')
 const bindConfirmCode = ref('')
 const bindSubmitting = ref(false)
 const bindMessage = ref('')
+// Anonymous recovery secrets remain only in Vue memory. They are never put
+// in the URL or browser storage and disappear on refresh or flow exit.
+const anonymousRecoveryStep = ref<'request' | 'verify' | 'reset'>('request')
+const anonymousRecoveryCN = ref('')
+const anonymousRecoveryCode = ref('')
+const anonymousRecoveryResetToken = ref('')
+const anonymousRecoveryTokenExpiresAt = ref('')
+const anonymousRecoveryNewCode = ref('')
+const anonymousRecoveryConfirmCode = ref('')
+const anonymousRecoveryLoading = ref(false)
+const anonymousRecoveryMessage = ref('')
 
 const isBackendOnline = computed(() => health.value?.status === 'ok')
 const queryRecoveryCooldownSeconds = computed(() => Math.max(0, Math.ceil((queryRecoveryCooldownUntil.value - queryRecoveryClock.value) / 1000)))
@@ -1483,6 +1497,8 @@ async function loginQuery() {
       query_code: queryCode.value,
     })
     resetQueryRecoveryVerification()
+    resetAnonymousQueryRecovery()
+    queryView.value = 'login'
     queryUser.value = response.user
     queryCode.value = ''
     await loadQueryOrders(true)
@@ -1633,7 +1649,109 @@ async function logoutQuery() {
   }
 }
 
+function resetAnonymousQueryRecovery(clearCN = true) {
+  anonymousRecoveryStep.value = 'request'
+  if (clearCN) anonymousRecoveryCN.value = ''
+  anonymousRecoveryCode.value = ''
+  anonymousRecoveryResetToken.value = ''
+  anonymousRecoveryTokenExpiresAt.value = ''
+  anonymousRecoveryNewCode.value = ''
+  anonymousRecoveryConfirmCode.value = ''
+  anonymousRecoveryLoading.value = false
+  anonymousRecoveryMessage.value = ''
+}
+
+function openRecoveryView() {
+  resetAnonymousQueryRecovery()
+  anonymousRecoveryCN.value = queryCN.value.trim()
+  queryView.value = 'recovery'
+  queryMessage.value = ''
+}
+
+function closeRecoveryView() {
+  resetAnonymousQueryRecovery()
+  queryView.value = 'login'
+}
+
+async function requestAnonymousQueryRecovery() {
+  if (anonymousRecoveryLoading.value) return
+  const cn = anonymousRecoveryCN.value.trim()
+  if (!cn) {
+    anonymousRecoveryMessage.value = '请输入 CN。'
+    return
+  }
+  anonymousRecoveryLoading.value = true
+  anonymousRecoveryMessage.value = ''
+  try {
+    const response = await requestQueryCodeRecovery(cn)
+    anonymousRecoveryCN.value = cn
+    anonymousRecoveryCode.value = ''
+    anonymousRecoveryStep.value = 'verify'
+    anonymousRecoveryMessage.value = response.message
+  } catch (error) {
+    anonymousRecoveryMessage.value = error instanceof Error ? error.message : '请求失败，请稍后再试'
+  } finally {
+    anonymousRecoveryLoading.value = false
+  }
+}
+
+async function verifyAnonymousQueryRecovery() {
+  if (anonymousRecoveryLoading.value) return
+  const code = anonymousRecoveryCode.value.trim()
+  if (!/^\d{6}$/.test(code)) {
+    anonymousRecoveryMessage.value = '请输入 6 位数字验证码。'
+    return
+  }
+  anonymousRecoveryLoading.value = true
+  anonymousRecoveryMessage.value = ''
+  try {
+    const response = await verifyQueryCodeRecovery(anonymousRecoveryCN.value, code)
+    anonymousRecoveryCode.value = ''
+    anonymousRecoveryResetToken.value = response.reset_token
+    anonymousRecoveryTokenExpiresAt.value = response.expires_at
+    anonymousRecoveryStep.value = 'reset'
+    anonymousRecoveryMessage.value = response.message
+  } catch (error) {
+    anonymousRecoveryMessage.value = error instanceof Error ? error.message : '验证码确认失败'
+  } finally {
+    anonymousRecoveryLoading.value = false
+  }
+}
+
+async function submitRecoveredQueryCode() {
+  if (anonymousRecoveryLoading.value) return
+  const newCode = anonymousRecoveryNewCode.value.trim()
+  const confirmCode = anonymousRecoveryConfirmCode.value.trim()
+  if (!newCode || !confirmCode) {
+    anonymousRecoveryMessage.value = '请完整输入新查询码和确认值。'
+    return
+  }
+  if (newCode !== confirmCode) {
+    anonymousRecoveryMessage.value = '两次输入的新查询码不一致。'
+    return
+  }
+  if (!/^[A-Za-z0-9_@#.-]{6,32}$/.test(newCode)) {
+    anonymousRecoveryMessage.value = '查询码需为 6-32 位，可使用字母、数字及 - _ @ # .。'
+    return
+  }
+  anonymousRecoveryLoading.value = true
+  anonymousRecoveryMessage.value = ''
+  const retainedCN = anonymousRecoveryCN.value
+  try {
+    const response = await resetRecoveredQueryCode(anonymousRecoveryResetToken.value, newCode, confirmCode)
+    resetAnonymousQueryRecovery()
+    queryView.value = 'login'
+    queryCN.value = retainedCN
+    queryCode.value = ''
+    queryMessage.value = response.message
+  } catch (error) {
+    anonymousRecoveryMessage.value = error instanceof Error ? error.message : '查询码重置失败'
+  } finally {
+    anonymousRecoveryLoading.value = false
+  }
+}
 function openBindView() {
+  resetAnonymousQueryRecovery()
   queryView.value = 'bind'
   bindMessage.value = ''
   queryMessage.value = ''
@@ -2936,7 +3054,10 @@ onUnmounted(() => {
               <label><span>查询码</span><input v-model="queryCode" type="password" autocomplete="current-password" required placeholder="管理员提供的查询码" /></label>
               <button class="primary-button" type="submit" :disabled="queryLoading">{{ queryLoading ? '查询中' : '查询订单' }}</button>
             </form>
-            <p class="query-bind-entry"><button class="link-button" type="button" @click="openBindView">首次设置查询码</button><span class="muted">（需要管理员提供的一次性绑定码）</span></p>
+            <div class="query-entry-list">
+              <p class="query-bind-entry"><button class="link-button" type="button" @click="openRecoveryView">忘记查询码</button><span class="muted">（通过已验证找回邮箱重置）</span></p>
+              <p class="query-bind-entry"><button class="link-button" type="button" @click="openBindView">首次设置查询码</button><span class="muted">（仅限尚未设置查询码，需要管理员提供一次性绑定码）</span></p>
+            </div>
           </template>
           <template v-else-if="!queryUser && queryView === 'bind'">
             <form class="login-form query-login query-bind-form" @submit.prevent="submitBindCode">
@@ -2948,6 +3069,38 @@ onUnmounted(() => {
               <button class="secondary-button" type="button" :disabled="bindSubmitting" @click="closeBindView">返回登录</button>
             </form>
             <div v-if="bindMessage" class="inline-alert">{{ bindMessage }}</div>
+          </template>
+          <template v-else-if="!queryUser && queryView === 'recovery'">
+            <section class="query-recovery-flow" aria-labelledby="query-recovery-title">
+              <div class="query-recovery-flow__header">
+                <div><h3 id="query-recovery-title">忘记查询码</h3><p class="muted">通过管理员登记且已经验证的找回邮箱重置查询码。</p></div>
+                <span class="status-chip" data-state="active">步骤 {{ anonymousRecoveryStep === 'request' ? '1' : (anonymousRecoveryStep === 'verify' ? '2' : '3') }} / 3</span>
+              </div>
+              <ol class="query-recovery-steps" aria-label="查询码找回步骤">
+                <li :data-active="anonymousRecoveryStep === 'request'">输入 CN</li>
+                <li :data-active="anonymousRecoveryStep === 'verify'">邮箱验证</li>
+                <li :data-active="anonymousRecoveryStep === 'reset'">设置新查询码</li>
+              </ol>
+              <form v-if="anonymousRecoveryStep === 'request'" class="login-form query-login query-recovery-form" @submit.prevent="requestAnonymousQueryRecovery">
+                <label><span>CN</span><input v-model="anonymousRecoveryCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
+                <p class="muted query-recovery-notice">无论账号是否存在或是否符合找回条件，页面都会显示相同提示，不会展示邮箱或账户状态。</p>
+                <button class="primary-button" type="submit" :disabled="anonymousRecoveryLoading">{{ anonymousRecoveryLoading ? '请求中' : '发送邮箱验证码' }}</button>
+              </form>
+              <form v-else-if="anonymousRecoveryStep === 'verify'" class="login-form query-login query-recovery-form" @submit.prevent="verifyAnonymousQueryRecovery">
+                <label><span>CN</span><input :value="anonymousRecoveryCN" autocomplete="username" disabled /></label>
+                <label><span>邮箱验证码</span><input v-model="anonymousRecoveryCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required placeholder="输入 6 位数字验证码" /></label>
+                <p class="muted query-recovery-notice">验证码有效期为 10 分钟；页面不会显示邮箱地址。</p>
+                <button class="primary-button" type="submit" :disabled="anonymousRecoveryLoading || anonymousRecoveryCode.trim().length !== 6">{{ anonymousRecoveryLoading ? '验证中' : '确认邮箱验证码' }}</button>
+              </form>
+              <form v-else class="login-form query-login query-recovery-form" @submit.prevent="submitRecoveredQueryCode">
+                <label><span>新查询码</span><input v-model="anonymousRecoveryNewCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="6-32 位" /></label>
+                <label><span>确认新查询码</span><input v-model="anonymousRecoveryConfirmCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="再次输入新查询码" /></label>
+                <p v-if="anonymousRecoveryTokenExpiresAt" class="muted query-recovery-notice">本次重置授权将在 {{ formatDate(anonymousRecoveryTokenExpiresAt) }} 过期；刷新页面后需要重新开始。</p>
+                <button class="primary-button" type="submit" :disabled="anonymousRecoveryLoading">{{ anonymousRecoveryLoading ? '重置中' : '重置查询码' }}</button>
+              </form>
+              <button class="secondary-button query-recovery-back" type="button" :disabled="anonymousRecoveryLoading" @click="closeRecoveryView">返回查询登录</button>
+            </section>
+            <div v-if="anonymousRecoveryMessage" class="inline-alert">{{ anonymousRecoveryMessage }}</div>
           </template>
           <div v-if="queryMessage" class="inline-alert">{{ queryMessage }}</div>
         </section>

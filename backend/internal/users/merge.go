@@ -240,6 +240,22 @@ func (s *PostgresStore) MergeUsers(ctx context.Context, request MergeRequest, ad
 	if _, err := tx.Exec(ctx, `update query_sessions set user_id = $2::uuid where user_id = $1::uuid`, source.id, target.id); err != nil {
 		return MergeResponse{}, err
 	}
+	if _, err := tx.Exec(ctx, `
+		update query_code_recovery_codes
+		set status='invalidated', invalidated_at=coalesce(invalidated_at,now()), updated_at=now()
+		where user_id=$1::uuid and purpose='query_code_recovery'
+		  and status in ('sending','active') and invalidated_at is null
+	`, source.id); err != nil {
+		return MergeResponse{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		update query_code_recovery_sessions
+		set status='invalidated', invalidated_at=coalesce(invalidated_at,now()), updated_at=now()
+		where user_id=$1::uuid and purpose='query_code_recovery'
+		  and status='active' and invalidated_at is null
+	`, source.id); err != nil {
+		return MergeResponse{}, err
+	}
 	if _, err := tx.Exec(ctx, `update users set status = 'merged', query_code_hash = null, updated_at = now() where id = $1::uuid`, source.id); err != nil {
 		return MergeResponse{}, err
 	}

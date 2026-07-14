@@ -39,6 +39,7 @@ type Handler struct {
 	recoveryEmailStore        RecoveryEmailReader
 	recoveryEmailProtector    RecoveryEmailProtector
 	recoveryEmailVerification RecoveryEmailVerificationService
+	queryCodeRecovery         QueryCodeRecoveryService
 }
 
 type Store interface {

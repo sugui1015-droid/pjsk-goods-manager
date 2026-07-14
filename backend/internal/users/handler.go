@@ -570,6 +570,22 @@ func (s *PostgresStore) SetQueryAccessStatus(ctx context.Context, userID string,
 		if _, err := tx.Exec(ctx, `delete from query_sessions where user_id = $1::uuid`, userID); err != nil {
 			return ListItem{}, err
 		}
+		if _, err := tx.Exec(ctx, `
+			update query_code_recovery_codes
+			set status='invalidated', invalidated_at=coalesce(invalidated_at,now()), updated_at=now()
+			where user_id=$1::uuid and purpose='query_code_recovery'
+			  and status in ('sending','active') and invalidated_at is null
+		`, userID); err != nil {
+			return ListItem{}, err
+		}
+		if _, err := tx.Exec(ctx, `
+			update query_code_recovery_sessions
+			set status='invalidated', invalidated_at=coalesce(invalidated_at,now()), updated_at=now()
+			where user_id=$1::uuid and purpose='query_code_recovery'
+			  and status='active' and invalidated_at is null
+		`, userID); err != nil {
+			return ListItem{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ListItem{}, err
