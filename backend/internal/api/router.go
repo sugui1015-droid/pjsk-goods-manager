@@ -63,11 +63,17 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("/health", server.healthHandler)
 	mux.HandleFunc("/api/config", server.configHandler)
 
+	clientIPResolver := clientip.NewResolver(cfg.TrustedProxyCIDRs)
+	resolveClientIP := func(r *http.Request) string {
+		return clientIPResolver.Resolve(r).Key()
+	}
+
 	adminHandler := admin.NewHandler(
 		admin.NewPostgresStore(dbPool),
 		cfg.AdminSessionTTL,
 		cfg.CookieSecure,
 	)
+	adminHandler.ConfigureClientIPResolver(resolveClientIP)
 	mux.HandleFunc("/api/admin/login", adminHandler.Login)
 	mux.Handle("/api/admin/me", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Me)))
 	mux.Handle("/api/admin/logout", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Logout)))
@@ -177,10 +183,7 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		cfg.AdminSessionTTL,
 		cfg.CookieSecure,
 	)
-	clientIPResolver := clientip.NewResolver(cfg.TrustedProxyCIDRs)
-	queryHandler.ConfigureClientIPResolver(func(r *http.Request) string {
-		return clientIPResolver.Resolve(r).Key()
-	})
+	queryHandler.ConfigureClientIPResolver(resolveClientIP)
 	queryHandler.ConfigureRecoveryEmail(usersStore, recoveryEmailProtector)
 	if verificationManager, err := recoveryemailverification.NewManager(cfg.RecoveryEmailVerificationHMACKey); err == nil && recoveryEmailProtector != nil {
 		var sender recoveryemailverification.Sender

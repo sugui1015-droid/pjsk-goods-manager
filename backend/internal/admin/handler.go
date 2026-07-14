@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"pjsk/backend/internal/clientip"
 	"pjsk/backend/internal/logsafe"
 )
 
@@ -26,12 +27,20 @@ var dummyPasswordHash, _ = bcrypt.GenerateFromPassword(
 )
 
 type Handler struct {
-	store        Store
-	sessionTTL   time.Duration
-	cookieSecure bool
-	now          func() time.Time
-	random       io.Reader
+	store           Store
+	sessionTTL      time.Duration
+	cookieSecure    bool
+	now             func() time.Time
+	random          io.Reader
+	limiter         *loginLimiter
+	resolveClientIP ClientIPResolver
 }
+
+// ClientIPResolver returns a stable, already-normalized rate-limit key for
+// the request's client. Trusted-proxy semantics live in the clientip package
+// and are injected by the router; the admin package never inspects
+// RemoteAddr or proxy headers itself.
+type ClientIPResolver func(*http.Request) string
 
 type loginRequest struct {
 	Username string `json:"username"`
@@ -54,12 +63,23 @@ type errorResponse struct {
 }
 
 func NewHandler(store Store, sessionTTL time.Duration, cookieSecure bool) *Handler {
+	defaultResolver := clientip.NewResolver(nil)
 	return &Handler{
-		store:        store,
-		sessionTTL:   sessionTTL,
-		cookieSecure: cookieSecure,
-		now:          time.Now,
-		random:       rand.Reader,
+		store:           store,
+		sessionTTL:      sessionTTL,
+		cookieSecure:    cookieSecure,
+		now:             time.Now,
+		random:          rand.Reader,
+		limiter:         newLoginLimiter(),
+		resolveClientIP: func(r *http.Request) string { return defaultResolver.Resolve(r).Key() },
+	}
+}
+
+// ConfigureClientIPResolver replaces the default no-trusted-proxy resolver,
+// typically with one that honors the deployment's trusted proxy CIDRs.
+func (h *Handler) ConfigureClientIPResolver(resolver ClientIPResolver) {
+	if resolver != nil {
+		h.resolveClientIP = resolver
 	}
 }
 
@@ -81,8 +101,17 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := h.resolveClientIP(r)
+	limiterUsername := normalizeLimiterUsername(username)
+	if !h.limiter.allow(ip, limiterUsername, h.now()) {
+		writeError(w, http.StatusTooManyRequests, "too many login attempts, please try again later")
+		return
+	}
+
 	account, err := h.store.FindByUsername(r.Context(), username)
 	if err != nil && !errors.Is(err, ErrNotFound) {
+		// Transient storage failures are not password failures and must not
+		// count toward the block threshold.
 		log.Printf("find admin for login: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -97,9 +126,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		[]byte(request.Password),
 	) == nil
 	if errors.Is(err, ErrNotFound) || account.Status != "active" || !passwordMatches {
+		h.limiter.recordFailure(ip, limiterUsername, h.now())
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
+	h.limiter.recordSuccess(ip, limiterUsername)
 
 	token, tokenHash, err := newSessionToken(h.random)
 	if err != nil {

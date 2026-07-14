@@ -78,7 +78,7 @@ Connection is resolved in this order:
 1. `DATABASE_URL` if set (full `postgres://...` DSN), else
 2. built from `DATABASE_HOST` / `DATABASE_PORT` / `DATABASE_USER` / `DATABASE_PASSWORD` / `DATABASE_NAME` / `DATABASE_SSLMODE`.
 
-Other env vars actually read by the Go backend: `APP_PORT` / `SERVER_PORT` / `BACKEND_PORT`, `ADMIN_SESSION_TTL` (Go duration string, e.g. `12h`), `ADMIN_COOKIE_SECURE` (`true`/`false`), `LEGACY_STREAMLIT_ADMIN_PORT`, `LEGACY_STREAMLIT_USER_PORT`.
+Other env vars actually read by the Go backend: `APP_ENV`, `APP_PORT` / `SERVER_PORT` / `BACKEND_PORT`, `SERVER_HOST` (bind address, defaults to `127.0.0.1` — loopback only), `ADMIN_SESSION_TTL` (Go duration string, e.g. `12h`), `ADMIN_COOKIE_SECURE` (`true`/`false`), `TRUSTED_PROXY_CIDRS`, `CORS_ALLOWED_ORIGINS`, `LEGACY_STREAMLIT_ADMIN_PORT`, `LEGACY_STREAMLIT_USER_PORT`, plus the recovery-email/SMTP and HMAC key variables (`RECOVERY_EMAIL_*`, `QUERY_CODE_RECOVERY_HMAC_KEY`) documented in [docs/internal-deployment-secrets.md](docs/internal-deployment-secrets.md) and [docs/internal-network-deployment.md](docs/internal-network-deployment.md).
 
 There are two `.env.example` files with different shapes — see [Known Issues](#14-known-issues) below; don't assume they're interchangeable without checking `config.go`.
 
@@ -92,7 +92,7 @@ Never commit a real `.env`. Real credentials belong only in a local, gitignored 
 - Reads all `*.sql` files under `backend/migrations/`, **sorted by filename** (not by any embedded number parsed out separately — the whole filename is the sort key and the stored `version`).
 - For each file not already present in `schema_migrations.version`, runs it inside a transaction and inserts a row keyed by the exact filename.
 
-Current migration files: `0001_core_tables.sql` … `0012_normalize_payment_methods.sql`. There is a known numbering irregularity (two files named `0005_*`, no `0006_*`) — see [Known Issues](#14-known-issues). Do not rename existing migration files without understanding that `schema_migrations.version` is the filename itself; renaming a file makes the migration runner think it's unapplied and try to run it again.
+Current migration files: `0001_core_tables.sql` … `0018_query_code_email_recovery.sql`. There is a known numbering irregularity (two files named `0005_*`, no `0006_*`) — see [Known Issues](#14-known-issues). Do not rename existing migration files without understanding that `schema_migrations.version` is the filename itself; renaming a file makes the migration runner think it's unapplied and try to run it again.
 
 ## 7. Implemented Features
 
@@ -106,6 +106,12 @@ Current migration files: `0001_core_tables.sql` … `0012_normalize_payment_meth
 - Partial payment across multiple payments per order item.
 - Payment detail view.
 - Payment void with mandatory reason and full audit trail (`voided_at` / `voided_by` / `void_reason`), which rolls back item/order payment status.
+- CSV/Excel export of users, payments, and order items (admin-only, `backend/internal/export`).
+- Admin query-account management, one-time query-code bind tokens, user query-code change, CN merge.
+- Recovery email (AES-GCM encrypted + HMAC blind index), logged-in email verification codes, and anonymous query-code recovery by email — with an independent `QUERY_CODE_RECOVERY_HMAC_KEY` root key (required in production, no legacy fallback there).
+- SMTP sender with strict TLS (1.2+, certificate verification always on, `tls`/`starttls` only) and a test-only fake sender (`APP_ENV=test` only; development and production both reject it). `/api/config` exposes a single `emailDeliveryEnabled` boolean.
+- Internal-deployment hardening (commit `8dc21e1b587c7c69214ace268c114e3bdb3eadf0`): trusted-proxy client-IP resolution (`backend/internal/clientip`, `TRUSTED_PROXY_CIDRS`, X-Forwarded-For only, off by default), loopback-default `SERVER_HOST`, strict `CORS_ALLOWED_ORIGINS` (production defaults to none), and sanitized error logging (`backend/internal/logsafe` — no raw database errors, DSNs, or user input in logs). See [docs/internal-network-deployment.md](docs/internal-network-deployment.md).
+- Admin login rate limiting: per-IP 20 attempts/minute and per IP+username 5 failures/10 minutes → 10-minute block (in-memory, process-local; cleared on restart), wired to the shared client-IP resolver.
 
 Full status table: `GET /api/config` and [docs/normal-use-roadmap.md](docs/normal-use-roadmap.md).
 
@@ -198,8 +204,8 @@ There is currently no frontend automated test script (`package.json` only define
 
 Roughly in priority order, per [docs/normal-use-roadmap.md](docs/normal-use-roadmap.md):
 
-1. Decide and execute the migration-numbering fix (see Known Issues) as its own reviewed change — likely continuing new migrations from `0013` and leaving history untouched, but that decision should be made deliberately, not implied by this document.
-2. Data export (CSV/Excel) for orders/payments — high value, low risk, no schema change needed.
+1. Migration numbering already continued from `0013` onward (now at `0018`), leaving the historical duplicate-`0005` pair untouched; the only remaining decision is whether to ever clean up that pair, which still requires its own reviewed pass (see Known Issues).
+2. ~~Data export (CSV/Excel)~~ — done (`backend/internal/export`, admin export routes).
 3. Unified admin audit log spanning imports/orders/payments, not just payment voids.
 4. CN merge and diff-based re-import — both touch import correctness, so they should land with strong test coverage.
 5. Role/category dictionary maintenance UI.
