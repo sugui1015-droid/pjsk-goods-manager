@@ -30,14 +30,15 @@ var (
 )
 
 type Handler struct {
-	store                  Store
-	sessionTTL             time.Duration
-	cookieSecure           bool
-	now                    func() time.Time
-	random                 io.Reader
-	limiter                *loginLimiter
-	recoveryEmailStore     RecoveryEmailReader
-	recoveryEmailProtector RecoveryEmailProtector
+	store                     Store
+	sessionTTL                time.Duration
+	cookieSecure              bool
+	now                       func() time.Time
+	random                    io.Reader
+	limiter                   *loginLimiter
+	recoveryEmailStore        RecoveryEmailReader
+	recoveryEmailProtector    RecoveryEmailProtector
+	recoveryEmailVerification RecoveryEmailVerificationService
 }
 
 type Store interface {

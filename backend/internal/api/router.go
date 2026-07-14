@@ -16,6 +16,7 @@ import (
 	"pjsk/backend/internal/payments"
 	"pjsk/backend/internal/query"
 	"pjsk/backend/internal/recoveryemail"
+	"pjsk/backend/internal/recoveryemailverification"
 	"pjsk/backend/internal/users"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -174,10 +175,30 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		cfg.CookieSecure,
 	)
 	queryHandler.ConfigureRecoveryEmail(usersStore, recoveryEmailProtector)
+	if verificationManager, err := recoveryemailverification.NewManager(cfg.RecoveryEmailVerificationHMACKey); err == nil && recoveryEmailProtector != nil {
+		var sender recoveryemailverification.Sender
+		switch cfg.RecoveryEmailSenderMode {
+		case "fake":
+			sender = recoveryemailverification.NewFakeSender()
+		case "smtp":
+			sender, _ = recoveryemailverification.NewSMTPSender(recoveryemailverification.SMTPConfig{
+				Host: cfg.RecoveryEmailSMTP.Host, Port: cfg.RecoveryEmailSMTP.Port,
+				Username: cfg.RecoveryEmailSMTP.Username, Password: cfg.RecoveryEmailSMTP.Password,
+				From: cfg.RecoveryEmailSMTP.From, FromName: cfg.RecoveryEmailSMTP.FromName,
+				TLSMode: cfg.RecoveryEmailSMTP.TLSMode,
+			})
+		}
+		verificationStore := recoveryemailverification.NewPostgresStore(dbPool, verificationManager)
+		queryHandler.ConfigureRecoveryEmailVerification(
+			recoveryemailverification.NewService(verificationStore, recoveryEmailProtector, sender, verificationManager.Policy()),
+		)
+	}
 	mux.HandleFunc("/api/query/login", queryHandler.Login)
 	mux.HandleFunc("/api/query/change-code", queryHandler.ChangeCode)
 	mux.HandleFunc("/api/query/bind-code", queryHandler.BindCode)
 	mux.HandleFunc("/api/query/recovery-email", queryHandler.RecoveryEmail)
+	mux.HandleFunc("/api/query/recovery-email/send-verification", queryHandler.SendRecoveryEmailVerification)
+	mux.HandleFunc("/api/query/recovery-email/verify", queryHandler.VerifyRecoveryEmail)
 	mux.HandleFunc("/api/query/orders", queryHandler.Orders)
 	mux.HandleFunc("/api/query/logout", queryHandler.Logout)
 

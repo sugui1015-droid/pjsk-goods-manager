@@ -292,6 +292,13 @@ func (s *PostgresStore) PutRecoveryEmail(ctx context.Context, userID string, adm
 		`, currentID, adminID); err != nil {
 			return RecoveryEmailMutation{}, err
 		}
+		if _, err := tx.Exec(ctx, `
+			update recovery_email_verification_codes
+			set status = 'invalidated', invalidated_at = coalesce(invalidated_at, now()), updated_at = now()
+			where recovery_email_id = $1::uuid and status in ('sending', 'active') and invalidated_at is null
+		`, currentID); err != nil {
+			return RecoveryEmailMutation{}, err
+		}
 	}
 
 	var record RecoveryEmailRecord
@@ -370,6 +377,13 @@ func (s *PostgresStore) UnbindRecoveryEmail(ctx context.Context, userID string, 
 		set status = 'disabled', invalidated_at = now(), updated_at = now(), updated_by_admin_id = $2::uuid
 		where id = $1::uuid
 	`, currentID, adminID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		update recovery_email_verification_codes
+		set status = 'invalidated', invalidated_at = coalesce(invalidated_at, now()), updated_at = now()
+		where recovery_email_id = $1::uuid and status in ('sending', 'active') and invalidated_at is null
+	`, currentID); err != nil {
 		return false, err
 	}
 	metadata, err := json.Marshal(map[string]any{

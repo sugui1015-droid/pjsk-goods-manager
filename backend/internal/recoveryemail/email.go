@@ -100,6 +100,10 @@ func (p *Protector) reveal(encrypted []byte) (string, error) {
 	return normalized, nil
 }
 
+func (p *Protector) RevealEncrypted(encrypted []byte) (string, error) {
+	return p.reveal(encrypted)
+}
+
 func (p *Protector) MaskEncrypted(encrypted []byte) (string, error) {
 	value, err := p.reveal(encrypted)
 	if err != nil {

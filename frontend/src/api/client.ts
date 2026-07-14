@@ -3,11 +3,13 @@ const apiBaseUrl = import.meta.env.DEV ? '' : configuredApiBaseUrl
 
 export class ApiError extends Error {
   status: number
+  retryAfterSeconds: number
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, retryAfterSeconds = 0) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.retryAfterSeconds = retryAfterSeconds
   }
 }
 
@@ -151,13 +153,15 @@ export function apiUrl(path: string) {
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = response.statusText
+    let retryAfterSeconds = 0
     try {
-      const payload = (await response.json()) as { error?: string }
-      message = payload.error ?? message
+      const payload = (await response.json()) as { error?: string; message?: string; retry_after_seconds?: number }
+      message = payload.error ?? payload.message ?? message
+      retryAfterSeconds = payload.retry_after_seconds ?? 0
     } catch {
       // Keep the status text when the backend did not return JSON.
     }
-    throw new ApiError(response.status, message)
+    throw new ApiError(response.status, message, retryAfterSeconds)
   }
   if (response.status === 204) {
     return undefined as T
@@ -560,6 +564,24 @@ export function deleteAdminRecoveryEmail(userID: string, reason: string): Promis
 
 export function getQueryRecoveryEmail(): Promise<RecoveryEmailState> {
   return getJSON<RecoveryEmailState>('/api/query/recovery-email')
+}
+
+export type RecoveryEmailVerificationResponse = {
+  success: boolean
+  message: string
+  status?: 'pending' | 'verified'
+  masked_email?: string
+  expires_at?: string
+  verified_at?: string
+  retry_after_seconds?: number
+}
+
+export function sendRecoveryEmailVerification(): Promise<RecoveryEmailVerificationResponse> {
+  return postJSON<RecoveryEmailVerificationResponse>('/api/query/recovery-email/send-verification', {})
+}
+
+export function verifyRecoveryEmail(code: string): Promise<RecoveryEmailVerificationResponse> {
+  return postJSON<RecoveryEmailVerificationResponse>('/api/query/recovery-email/verify', { code })
 }
 // QueryOrderItem is the regular-user-facing shape: no internal ids, no
 // import batch/source-file tracking fields. Those exist only on the admin

@@ -1928,3 +1928,77 @@ th {
   margin: 0;
   font-size: 1rem;
 }
+.recovery-email-empty {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f4f6f8;
+  color: #475467;
+}
+
+.recovery-email-verification {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 14px;
+  border: 1px solid #d8e0e6;
+  border-radius: 10px;
+  background: #fbfcfd;
+  min-width: 0;
+}
+
+.recovery-email-verification__send {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.recovery-email-verification__send .muted {
+  overflow-wrap: anywhere;
+}
+
+.recovery-email-verification__form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  min-width: 0;
+}
+
+.recovery-email-verification__form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.recovery-email-verification__form input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 320px;
+  min-height: 38px;
+  border: 1px solid #ccd7e0;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #ffffff;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
+@media (max-width: 720px) {
+  .recovery-email-verification__send {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recovery-email-verification__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .recovery-email-verification__form input,
+  .recovery-email-verification__form button,
+  .recovery-email-verification__send button {
+    max-width: none;
+    width: 100%;
+  }
+}

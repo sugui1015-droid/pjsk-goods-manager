@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   ApiError,
   apiUrl,
@@ -10,6 +10,8 @@ import {
   getAdminRecoveryEmail,
   getQueryRecoveryEmail,
   putAdminRecoveryEmail,
+  sendRecoveryEmailVerification,
+  verifyRecoveryEmail,
   getJSON,
   postForm,
   postJSON,
@@ -226,7 +228,14 @@ const queryCodeChanging = ref(false)
 const querySecurityMessage = ref('')
 const queryRecoveryEmail = ref<RecoveryEmailState | null>(null)
 const queryRecoveryEmailLoading = ref(false)
-const queryRecoveryEmailMessage = ref('')// First-time bind flow on the user login page. The bind token is held only
+const queryRecoveryEmailMessage = ref('')
+const queryRecoveryVerificationCode = ref('')
+const queryRecoverySending = ref(false)
+const queryRecoveryVerifying = ref(false)
+const queryRecoveryCooldownUntil = ref(0)
+const queryRecoveryExpiresAt = ref('')
+const queryRecoveryClock = ref(Date.now())
+let queryRecoveryClockTimer: number | undefined// First-time bind flow on the user login page. The bind token is held only
 // in this in-memory form state — never persisted, gone on refresh.
 const queryView = ref<'login' | 'bind'>('login')
 const bindCN = ref('')
@@ -237,6 +246,8 @@ const bindSubmitting = ref(false)
 const bindMessage = ref('')
 
 const isBackendOnline = computed(() => health.value?.status === 'ok')
+const queryRecoveryCooldownSeconds = computed(() => Math.max(0, Math.ceil((queryRecoveryCooldownUntil.value - queryRecoveryClock.value) / 1000)))
+const queryRecoveryCanSend = computed(() => queryRecoveryEmail.value?.status === 'pending' && queryRecoveryCooldownSeconds.value === 0 && !queryRecoverySending.value)
 const readyCount = computed(() => config.value.modules.filter((item) => item.status === 'ready').length)
 const queuedCount = computed(() => config.value.modules.filter((item) => item.status === 'queued').length)
 const isAdminRoute = computed(() => routeName.value !== 'home' && routeName.value !== 'query')
@@ -1471,6 +1482,7 @@ async function loginQuery() {
       cn: queryCN.value,
       query_code: queryCode.value,
     })
+    resetQueryRecoveryVerification()
     queryUser.value = response.user
     queryCode.value = ''
     await loadQueryOrders(true)
@@ -1508,6 +1520,7 @@ async function loadQueryRecoveryEmail() {
   queryRecoveryEmailMessage.value = ''
   try {
     queryRecoveryEmail.value = await getQueryRecoveryEmail()
+    if (queryRecoveryEmail.value.status !== 'pending') resetQueryRecoveryVerification()
   } catch (error) {
     queryRecoveryEmail.value = null
     if (error instanceof ApiError && error.status === 401) {
@@ -1521,7 +1534,84 @@ async function loadQueryRecoveryEmail() {
     queryRecoveryEmailLoading.value = false
   }
 }
+function resetQueryRecoveryVerification() {
+  queryRecoveryVerificationCode.value = ''
+  queryRecoveryCooldownUntil.value = 0
+  queryRecoveryExpiresAt.value = ''
+  queryRecoverySending.value = false
+  queryRecoveryVerifying.value = false
+}
+
+function clearExpiredQuerySession(error: unknown) {
+  if (!(error instanceof ApiError) || error.status !== 401) return false
+  resetQueryRecoveryVerification()
+  queryUser.value = null
+  queryOrders.value = null
+  queryRecoveryEmail.value = null
+  queryRecoveryEmailMessage.value = ''
+  queryMessage.value = error.message
+  return true
+}
+
+async function sendQueryRecoveryVerification() {
+  if (!queryRecoveryCanSend.value) return
+  queryRecoverySending.value = true
+  queryRecoveryEmailMessage.value = ''
+  try {
+    const response = await sendRecoveryEmailVerification()
+    queryRecoveryCooldownUntil.value = Date.now() + (response.retry_after_seconds ?? 60) * 1000
+    queryRecoveryExpiresAt.value = response.expires_at ?? ''
+    queryRecoveryEmail.value = {
+      ...(queryRecoveryEmail.value ?? { has_recovery_email: true }),
+      has_recovery_email: true,
+      status: 'pending',
+      masked_email: response.masked_email ?? queryRecoveryEmail.value?.masked_email,
+    }
+    queryRecoveryEmailMessage.value = response.message
+  } catch (error) {
+    if (clearExpiredQuerySession(error)) return
+    if (error instanceof ApiError && error.status === 429 && error.retryAfterSeconds > 0) {
+      queryRecoveryCooldownUntil.value = Date.now() + error.retryAfterSeconds * 1000
+      queryRecoveryEmailMessage.value = `${error.message} 请等待 ${error.retryAfterSeconds} 秒。`
+    } else {
+      queryRecoveryEmailMessage.value = error instanceof Error ? error.message : '验证码发送失败'
+    }
+  } finally {
+    queryRecoverySending.value = false
+  }
+}
+
+async function verifyQueryRecoveryEmail() {
+  if (queryRecoveryVerifying.value) return
+  const code = queryRecoveryVerificationCode.value.trim()
+  if (!/^\d{6}$/.test(code)) {
+    queryRecoveryEmailMessage.value = '请输入 6 位数字验证码。'
+    return
+  }
+  queryRecoveryVerifying.value = true
+  queryRecoveryEmailMessage.value = ''
+  try {
+    const response = await verifyRecoveryEmail(code)
+    queryRecoveryVerificationCode.value = ''
+    queryRecoveryCooldownUntil.value = 0
+    queryRecoveryExpiresAt.value = ''
+    queryRecoveryEmail.value = {
+      ...(queryRecoveryEmail.value ?? { has_recovery_email: true }),
+      has_recovery_email: true,
+      status: 'verified',
+      masked_email: response.masked_email ?? queryRecoveryEmail.value?.masked_email,
+      verified_at: response.verified_at,
+    }
+    queryRecoveryEmailMessage.value = response.message
+  } catch (error) {
+    if (clearExpiredQuerySession(error)) return
+    queryRecoveryEmailMessage.value = error instanceof Error ? error.message : '找回邮箱验证失败'
+  } finally {
+    queryRecoveryVerifying.value = false
+  }
+}
 async function logoutQuery() {
+  resetQueryRecoveryVerification()
   queryLoading.value = true
   queryMessage.value = ''
   try {
@@ -1618,6 +1708,7 @@ async function submitQueryCodeChange() {
     queryOrders.value = null
     queryRecoveryEmail.value = null
     queryRecoveryEmailMessage.value = ''
+    resetQueryRecoveryVerification()
     queryCode.value = ''
     queryMessage.value = response.message
   } catch (error) {
@@ -2110,12 +2201,19 @@ window.addEventListener('popstate', () => {
 })
 
 onMounted(() => {
+  queryRecoveryClockTimer = window.setInterval(() => {
+    queryRecoveryClock.value = Date.now()
+  }, 1000)
   void load()
   if (isAdminRoute.value) void handleRouteEntered()
   else {
     authChecked.value = true
     void handlePublicRouteEntered()
   }
+})
+
+onUnmounted(() => {
+  if (queryRecoveryClockTimer !== undefined) window.clearInterval(queryRecoveryClockTimer)
 })
 </script>
 
@@ -2546,7 +2644,7 @@ onMounted(() => {
               </section>
               <section class="panel nested-panel recovery-email-panel">
                 <div class="panel__header">
-                  <div><h2>找回邮箱</h2><p class="muted">管理员只能登记新邮箱或查看脱敏状态，不能读取、回填或复制完整邮箱。当前阶段尚未开放邮箱自助找回。</p></div>
+                  <div><h2>找回邮箱</h2><p class="muted">管理员只能登记新邮箱或查看脱敏状态，不能读取、回填或复制完整邮箱。邮箱验证由已登录的普通用户完成，管理员没有代验证入口。</p></div>
                   <span class="status-chip" :data-state="adminRecoveryEmail?.status || 'disabled'">{{ recoveryEmailStatusLabel(adminRecoveryEmail?.status) }}</span>
                 </div>
                 <p v-if="adminRecoveryEmailLoading" class="muted">正在加载找回邮箱状态。</p>
@@ -2870,12 +2968,34 @@ onMounted(() => {
             </form>
             <div v-if="querySecurityMessage" class="inline-alert">{{ querySecurityMessage }}</div>
             <div class="query-recovery-email-readonly">
-              <div class="panel__header"><div><h3>找回邮箱</h3><p class="muted">当前仅完成找回邮箱登记，尚未开放邮箱自助找回。</p></div><span class="status-chip" :data-state="queryRecoveryEmail?.status || 'disabled'">{{ recoveryEmailStatusLabel(queryRecoveryEmail?.status) }}</span></div>
-              <p v-if="queryRecoveryEmailLoading" class="muted">正在加载找回邮箱状态。</p>
-              <div v-else class="recovery-email-state">
-                <div><span>当前邮箱</span><strong class="recovery-email-masked">{{ queryRecoveryEmail?.has_recovery_email ? (queryRecoveryEmail.masked_email || '-') : '未登记' }}</strong></div>
-                <div><span>更新时间</span><strong>{{ queryRecoveryEmail?.updated_at ? formatDate(queryRecoveryEmail.updated_at) : '-' }}</strong></div>
+              <div class="panel__header">
+                <div><h3>找回邮箱</h3><p class="muted">验证管理员登记的当前邮箱；普通用户不能在此新增、替换或解绑邮箱。</p></div>
+                <span class="status-chip" :data-state="queryRecoveryEmail?.status || 'disabled'">{{ recoveryEmailStatusLabel(queryRecoveryEmail?.status) }}</span>
               </div>
+              <p v-if="queryRecoveryEmailLoading" class="muted">正在加载找回邮箱状态。</p>
+              <template v-else-if="!queryRecoveryEmail?.has_recovery_email">
+                <p class="recovery-email-empty">尚未登记找回邮箱，请联系管理员登记。</p>
+              </template>
+              <template v-else>
+                <div class="recovery-email-state">
+                  <div><span>当前邮箱</span><strong class="recovery-email-masked">{{ queryRecoveryEmail.masked_email || '-' }}</strong></div>
+                  <div v-if="queryRecoveryEmail.status === 'verified'"><span>验证时间</span><strong>{{ queryRecoveryEmail.verified_at ? formatDate(queryRecoveryEmail.verified_at) : '-' }}</strong></div>
+                  <div v-else><span>更新时间</span><strong>{{ queryRecoveryEmail.updated_at ? formatDate(queryRecoveryEmail.updated_at) : '-' }}</strong></div>
+                </div>
+                <div v-if="queryRecoveryEmail.status === 'pending'" class="recovery-email-verification">
+                  <div class="recovery-email-verification__send">
+                    <button class="secondary-button" type="button" :disabled="!queryRecoveryCanSend" @click="sendQueryRecoveryVerification">
+                      {{ queryRecoverySending ? '发送中' : (queryRecoveryCooldownSeconds > 0 ? `${queryRecoveryCooldownSeconds} 秒后可重发` : '发送验证码') }}
+                    </button>
+                    <span class="muted">验证码有效期为 10 分钟；倒计时仅用于页面提示，发送限制由服务器执行。</span>
+                  </div>
+                  <form class="recovery-email-verification__form" @submit.prevent="verifyQueryRecoveryEmail">
+                    <label><span>邮箱验证码</span><input v-model="queryRecoveryVerificationCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="输入 6 位数字验证码" /></label>
+                    <button class="primary-button" type="submit" :disabled="queryRecoveryVerifying || queryRecoveryVerificationCode.trim().length !== 6">{{ queryRecoveryVerifying ? '验证中' : '确认验证' }}</button>
+                  </form>
+                  <p v-if="queryRecoveryExpiresAt" class="muted">本次验证码将在 {{ formatDate(queryRecoveryExpiresAt) }} 过期。</p>
+                </div>
+              </template>
               <div v-if="queryRecoveryEmailMessage" class="inline-alert">{{ queryRecoveryEmailMessage }}</div>
             </div>
           </section>
