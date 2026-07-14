@@ -50,3 +50,8 @@ backend/*.exe
 
 # Local build caches
 .cache/
+
+# PostgreSQL logical backup artifacts
+*.dump
+*.backup
+*.partial
