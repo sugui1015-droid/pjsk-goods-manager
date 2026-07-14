@@ -11,6 +11,7 @@ import (
 
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/database"
+	"pjsk/backend/internal/logsafe"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -34,7 +35,7 @@ func main() {
 	pool, err := database.Connect(connectCtx, cfg.DatabaseURL)
 	connectCancel()
 	if err != nil {
-		log.Fatalf("connect to database: %v", err)
+		log.Fatalf("connect to database: %s", logsafe.Category(err))
 	}
 	defer pool.Close()
 
@@ -47,7 +48,7 @@ func main() {
 	`, cn).Scan(&userID)
 	checkCancel()
 	if err != nil {
-		log.Fatalf("find CN %q: %v", cn, err)
+		log.Fatalf("find CN %q: %s", cn, logsafe.Category(err))
 	}
 
 	code, err := readPassword("Query code: ")
@@ -78,7 +79,7 @@ func main() {
 	`, userID, string(hash))
 	updateCancel()
 	if err != nil {
-		log.Fatalf("set query code: %v", err)
+		log.Fatalf("set query code: %s", logsafe.Category(err))
 	}
 
 	fmt.Printf("Query code for CN %q has been set.\n", cn)

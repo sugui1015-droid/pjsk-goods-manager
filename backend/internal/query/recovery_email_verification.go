@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/recoveryemailverification"
 )
 
@@ -121,7 +122,7 @@ func (h *Handler) writeRecoveryEmailVerificationError(w http.ResponseWriter, err
 	case errors.Is(err, recoveryemailverification.ErrUnavailable), errors.Is(err, recoveryemailverification.ErrDeliveryFailed):
 		writeError(w, http.StatusServiceUnavailable, "邮箱验证服务暂不可用，请稍后再试")
 	default:
-		log.Printf("%s: %v", operation, err)
+		log.Printf("%s: %s", operation, logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/querycode"
 
 	"github.com/jackc/pgx/v5"
@@ -68,7 +69,7 @@ func (h *Handler) BindCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := clientIP(r)
+	ip := h.resolveClientIP(r)
 	limiterKey := "bind:" + cn
 	if !h.limiter.allow(ip, limiterKey, h.now()) {
 		writeError(w, http.StatusTooManyRequests, "尝试次数过多，请稍后再试")
@@ -91,7 +92,7 @@ func (h *Handler) BindCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("bind query code: %v", err)
+		log.Printf("bind query code: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}

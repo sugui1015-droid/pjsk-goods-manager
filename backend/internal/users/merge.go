@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"pjsk/backend/internal/admin"
+	"pjsk/backend/internal/logsafe"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -124,7 +125,7 @@ func writeMergeError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrMergeReasonRequired):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
-		log.Printf("cn merge error: %v", err)
+		log.Printf("cn merge error: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }

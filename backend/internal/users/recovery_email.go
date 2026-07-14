@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"pjsk/backend/internal/admin"
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/recoveryemail"
 )
 
@@ -94,7 +95,7 @@ func (h *Handler) getRecoveryEmail(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 	if err != nil {
-		log.Printf("get recovery email: %v", err)
+		log.Printf("get recovery email: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -189,7 +190,7 @@ func (h *Handler) writeRecoveryEmailMutationError(w http.ResponseWriter, err err
 	case errors.Is(err, ErrRecoveryEmailUserMerged):
 		writeError(w, http.StatusConflict, "已合并用户不能维护找回邮箱")
 	default:
-		log.Printf("mutate recovery email: %v", err)
+		log.Printf("mutate recovery email: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 	}
 	return true

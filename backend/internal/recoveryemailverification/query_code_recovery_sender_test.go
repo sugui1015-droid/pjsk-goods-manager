@@ -12,7 +12,7 @@ func TestQueryCodeRecoverySenderHasDistinctPurpose(t *testing.T) {
 	if err := sender.SendQueryCodeRecovery(context.Background(), "safe@example.com", "123456", time.Now().Add(time.Minute)); err != nil {
 		t.Fatal("fake query-code recovery sender failed")
 	}
-	if len(sender.Deliveries()) != 1 {
+	if len(sender.Deliveries()) != 1 || sender.Deliveries()[0].Purpose != QueryCodeRecoveryPurpose {
 		t.Fatal("fake sender did not record the purpose-specific delivery")
 	}
 	message, err := buildQueryCodeRecoveryMessage(SMTPConfig{From: "noreply@example.com", FromName: "PJSK"}, "safe@example.com", "123456", time.Now().Add(time.Minute))
@@ -20,7 +20,7 @@ func TestQueryCodeRecoverySenderHasDistinctPurpose(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(message)
-	if !strings.Contains(text, "查询码重置") || strings.Contains(text, "找回邮箱验证码") {
+	if !strings.Contains(text, "查询码重置") || !strings.Contains(text, "不需要提供旧查询码") || !strings.Contains(text, "不会自动登录") || strings.Contains(text, "找回邮箱验证码") {
 		t.Fatal("query-code recovery email did not preserve purpose isolation")
 	}
 	for _, forbidden := range []string{"query_code", "Cookie", "session", "password"} {

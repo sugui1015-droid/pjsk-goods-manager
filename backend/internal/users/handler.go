@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/querycode"
 )
 
@@ -172,7 +173,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	response, err := h.store.ListUsers(ctx, filters)
 	if err != nil {
-		log.Printf("list users: %v", err)
+		log.Printf("list users: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -219,7 +220,7 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("user detail: %v", err)
+		log.Printf("user detail: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -255,7 +256,7 @@ func (h *Handler) UpdateQueryCode(w http.ResponseWriter, r *http.Request, userID
 		return
 	}
 	if err != nil {
-		log.Printf("load user before query code update: %v", err)
+		log.Printf("load user before query code update: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -269,7 +270,7 @@ func (h *Handler) UpdateQueryCode(w http.ResponseWriter, r *http.Request, userID
 		return
 	}
 	if err != nil {
-		log.Printf("update user query code: %v", err)
+		log.Printf("update user query code: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -303,7 +304,7 @@ func (h *Handler) UpdateQueryAccessStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		log.Printf("update user query status: %v", err)
+		log.Printf("update user query status: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}

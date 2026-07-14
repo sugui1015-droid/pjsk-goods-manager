@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/recoveryemail"
 )
 
@@ -51,7 +52,7 @@ func (h *Handler) RecoveryEmail(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	record, err := h.recoveryEmailStore.GetRecoveryEmail(ctx, user.ID)
 	if err != nil {
-		log.Printf("get query recovery email: %v", err)
+		log.Printf("get query recovery email: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}

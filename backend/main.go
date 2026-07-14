@@ -4,12 +4,14 @@ import (
 	"context"
 	"embed"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
 	"pjsk/backend/internal/api"
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/database"
+	"pjsk/backend/internal/logsafe"
 )
 
 //go:embed migrations/*.sql
@@ -26,23 +28,23 @@ func main() {
 
 	dbPool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("connect to database: %v", err)
+		log.Fatalf("connect to database: %s", logsafe.Category(err))
 	}
 	defer dbPool.Close()
 
 	log.Println("database connected")
 
 	if err := database.RunMigrations(ctx, dbPool, migrationFS, "migrations"); err != nil {
-		log.Fatalf("run database migrations: %v", err)
+		log.Fatalf("run database migrations: %s", logsafe.Category(err))
 	}
 
 	server := &http.Server{
-		Addr:              ":" + cfg.Port,
+		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
 		Handler:           api.NewRouter(cfg, dbPool),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("backend listening on http://localhost:%s", cfg.Port)
+	log.Printf("backend listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

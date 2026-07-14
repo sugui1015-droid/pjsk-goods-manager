@@ -7,14 +7,20 @@ import (
 	"time"
 )
 
+const (
+	RecoveryEmailVerificationPurpose = "recovery_email_verification"
+	QueryCodeRecoveryPurpose         = "query_code_recovery"
+)
+
 type FakeDelivery struct {
+	Purpose   string
 	To        string
 	Code      string
 	ExpiresAt time.Time
 }
 
 // FakeSender records deliveries in memory for tests. It is deliberately not
-// an empty success stub: callers can assert the recipient, code and expiry.
+// an empty success stub: callers can assert the purpose, recipient, code and expiry.
 type FakeSender struct {
 	mu         sync.Mutex
 	deliveries []FakeDelivery
@@ -37,7 +43,7 @@ func (s *FakeSender) SendRecoveryVerification(ctx context.Context, to string, co
 	if s.err != nil {
 		return s.err
 	}
-	s.deliveries = append(s.deliveries, FakeDelivery{To: to, Code: code, ExpiresAt: expiresAt})
+	s.deliveries = append(s.deliveries, FakeDelivery{Purpose: RecoveryEmailVerificationPurpose, To: to, Code: code, ExpiresAt: expiresAt})
 	return nil
 }
 

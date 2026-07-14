@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"pjsk/backend/internal/logsafe"
 )
 
 const sessionCookieName = "pjsk_admin_session"
@@ -81,7 +83,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	account, err := h.store.FindByUsername(r.Context(), username)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		log.Printf("find admin for login: %v", err)
+		log.Printf("find admin for login: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -108,7 +110,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	expiresAt := h.now().Add(h.sessionTTL)
 	if err := h.store.CreateSession(r.Context(), account.ID, tokenHash, expiresAt); err != nil {
-		log.Printf("create admin session: %v", err)
+		log.Printf("create admin session: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -144,7 +146,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.DeleteSession(r.Context(), tokenHash); err != nil {
-		log.Printf("delete admin session: %v", err)
+		log.Printf("delete admin session: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}

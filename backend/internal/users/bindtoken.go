@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"pjsk/backend/internal/admin"
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/querycode"
 
 	"github.com/jackc/pgx/v5"
@@ -54,7 +55,7 @@ func (h *Handler) CreateBindToken(w http.ResponseWriter, r *http.Request, userID
 	case errors.Is(err, ErrBindTokenUserInactive):
 		writeError(w, http.StatusConflict, "已停用或已合并的用户不能生成绑定码")
 	case err != nil:
-		log.Printf("create query code bind token: %v", err)
+		log.Printf("create query code bind token: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	default:
 		writeJSON(w, http.StatusOK, response)

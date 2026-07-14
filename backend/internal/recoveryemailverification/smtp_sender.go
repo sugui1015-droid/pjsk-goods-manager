@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+const maxSMTPFromNameBytes = 128
+
+var errSMTPUnavailable = errors.New("SMTP service unavailable")
+
 type SMTPConfig struct {
 	Host     string
 	Port     int
@@ -32,6 +36,7 @@ type SMTPSender struct {
 
 func NewSMTPSender(config SMTPConfig) (*SMTPSender, error) {
 	config.Host = strings.TrimSpace(config.Host)
+	config.Username = strings.TrimSpace(config.Username)
 	config.From = strings.TrimSpace(config.From)
 	config.FromName = strings.TrimSpace(config.FromName)
 	config.TLSMode = strings.ToLower(strings.TrimSpace(config.TLSMode))
@@ -41,14 +46,14 @@ func NewSMTPSender(config SMTPConfig) (*SMTPSender, error) {
 	if config.TLSMode != "starttls" && config.TLSMode != "tls" {
 		return nil, ErrUnavailable
 	}
-	if (config.Username == "") != (config.Password == "") {
+	if strings.ContainsAny(config.Username, "\r\n") || (config.Username == "") != (config.Password == "") {
 		return nil, ErrUnavailable
 	}
 	from, err := mail.ParseAddress(config.From)
 	if err != nil || from.Address != config.From {
 		return nil, ErrUnavailable
 	}
-	if strings.ContainsAny(config.FromName, "\r\n") {
+	if strings.ContainsAny(config.FromName, "\r\n") || len([]byte(config.FromName)) > maxSMTPFromNameBytes {
 		return nil, ErrUnavailable
 	}
 	if config.Timeout <= 0 {
@@ -69,26 +74,35 @@ func (s *SMTPSender) SendRecoveryVerification(ctx context.Context, to string, co
 	if err != nil {
 		return err
 	}
+	return s.sendMessage(ctx, recipient.Address, message)
+}
+
+func (s *SMTPSender) sendMessage(ctx context.Context, recipient string, message []byte) error {
+	operationDeadline := time.Now().Add(s.config.Timeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(operationDeadline) {
+		operationDeadline = contextDeadline
+	}
+	operationCtx, cancelOperation := context.WithDeadline(ctx, operationDeadline)
+	defer cancelOperation()
 
 	address := net.JoinHostPort(s.config.Host, strconv.Itoa(s.config.Port))
 	dialer := &net.Dialer{Timeout: s.config.Timeout}
-	connection, err := dialer.DialContext(ctx, "tcp", address)
+	connection, err := dialer.DialContext(operationCtx, "tcp", address)
 	if err != nil {
-		return errors.New("SMTP service unavailable")
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = connection.SetDeadline(deadline)
-	} else {
-		_ = connection.SetDeadline(time.Now().Add(s.config.Timeout))
+		return controlledSMTPError(ctx)
 	}
 
-	tlsConfig := &tls.Config{ServerName: s.config.Host, MinVersion: tls.VersionTLS12}
+	_ = connection.SetDeadline(operationDeadline)
+	stopCancellation := context.AfterFunc(operationCtx, func() { _ = connection.Close() })
+	defer stopCancellation()
+
+	tlsConfig := smtpTLSConfig(s.config.Host)
 	var client *smtp.Client
 	if s.config.TLSMode == "tls" {
 		tlsConnection := tls.Client(connection, tlsConfig)
-		if err := tlsConnection.HandshakeContext(ctx); err != nil {
+		if err := tlsConnection.HandshakeContext(operationCtx); err != nil {
 			_ = connection.Close()
-			return errors.New("SMTP service unavailable")
+			return controlledSMTPError(ctx)
 		}
 		client, err = smtp.NewClient(tlsConnection, s.config.Host)
 	} else {
@@ -99,41 +113,52 @@ func (s *SMTPSender) SendRecoveryVerification(ctx context.Context, to string, co
 	}
 	if err != nil {
 		_ = connection.Close()
-		return errors.New("SMTP service unavailable")
+		return controlledSMTPError(ctx)
 	}
 	defer client.Close()
 
 	if s.config.Username != "" {
 		if err := client.Auth(smtp.PlainAuth("", s.config.Username, s.config.Password, s.config.Host)); err != nil {
-			return errors.New("SMTP service unavailable")
+			return controlledSMTPError(ctx)
 		}
 	}
 	if err := client.Mail(s.config.From); err != nil {
-		return errors.New("SMTP service unavailable")
+		return controlledSMTPError(ctx)
 	}
-	if err := client.Rcpt(recipient.Address); err != nil {
-		return errors.New("SMTP service unavailable")
+	if err := client.Rcpt(recipient); err != nil {
+		return controlledSMTPError(ctx)
 	}
 	writer, err := client.Data()
 	if err != nil {
-		return errors.New("SMTP service unavailable")
+		return controlledSMTPError(ctx)
 	}
 	buffered := bufio.NewWriter(writer)
 	if _, err := buffered.Write(message); err != nil {
 		_ = writer.Close()
-		return errors.New("SMTP service unavailable")
+		return controlledSMTPError(ctx)
 	}
 	if err := buffered.Flush(); err != nil {
 		_ = writer.Close()
-		return errors.New("SMTP service unavailable")
+		return controlledSMTPError(ctx)
 	}
 	if err := writer.Close(); err != nil {
-		return errors.New("SMTP service unavailable")
+		return controlledSMTPError(ctx)
 	}
 	if err := client.Quit(); err != nil {
-		return errors.New("SMTP service unavailable")
+		return controlledSMTPError(ctx)
 	}
 	return nil
+}
+
+func smtpTLSConfig(host string) *tls.Config {
+	return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+}
+
+func controlledSMTPError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errSMTPUnavailable
 }
 
 func buildVerificationMessage(config SMTPConfig, to string, code string, expiresAt time.Time) ([]byte, error) {
@@ -142,7 +167,7 @@ func buildVerificationMessage(config SMTPConfig, to string, code string, expires
 	}
 	from := (&mail.Address{Name: config.FromName, Address: config.From}).String()
 	subject := mime.QEncoding.Encode("UTF-8", "PJSK 找回邮箱验证码")
-	body := fmt.Sprintf("您的找回邮箱验证码为：%s\r\n\r\n验证码将在 %s 前有效。\r\n如非本人操作，请忽略此邮件，请勿向他人透露验证码。\r\n", code, expiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+	body := fmt.Sprintf("您的找回邮箱验证码为：%s\r\n\r\n验证码将在 %s 前有效。\r\n此验证码仅用于验证找回邮箱归属，不会自动登录。\r\n如非本人操作，请忽略此邮件，请勿向他人透露验证码。\r\n", code, expiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	message := "From: " + from + "\r\n" +
 		"To: " + to + "\r\n" +
 		"Subject: " + subject + "\r\n" +

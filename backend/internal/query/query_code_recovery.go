@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/querycode"
 	"pjsk/backend/internal/querycoderecovery"
 )
@@ -64,7 +65,7 @@ func (h *Handler) RequestQueryCodeRecovery(w http.ResponseWriter, r *http.Reques
 	defer waitForPublicRecoveryResponse(started)
 	if h.queryCodeRecovery != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		_ = h.queryCodeRecovery.Request(ctx, request.CN, clientIP(r))
+		_ = h.queryCodeRecovery.Request(ctx, request.CN, h.resolveClientIP(r))
 		cancel()
 	}
 	writeJSON(w, http.StatusOK, queryCodeRecoveryResponse{Success: true, Message: queryCodeRecoveryPublicMessage})
@@ -96,7 +97,7 @@ func (h *Handler) VerifyQueryCodeRecovery(w http.ResponseWriter, r *http.Request
 		case errors.Is(err, querycoderecovery.ErrUnavailable):
 			writeError(w, http.StatusServiceUnavailable, "查询码找回服务暂不可用")
 		default:
-			log.Printf("verify query code recovery: %v", err)
+			log.Printf("verify query code recovery: %s", logsafe.Category(err))
 			writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		}
 		return
@@ -147,7 +148,7 @@ func (h *Handler) ResetRecoveredQueryCode(w http.ResponseWriter, r *http.Request
 		case errors.Is(err, querycoderecovery.ErrUnavailable):
 			writeError(w, http.StatusServiceUnavailable, "查询码找回服务暂不可用")
 		default:
-			log.Printf("reset recovered query code: %v", err)
+			log.Printf("reset recovered query code: %s", logsafe.Category(err))
 			writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		}
 		return

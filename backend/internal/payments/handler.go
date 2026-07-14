@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"pjsk/backend/internal/admin"
+	"pjsk/backend/internal/logsafe"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -244,7 +245,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	response, err := h.store.ListPaymentRecords(ctx, filters)
 	if err != nil {
-		log.Printf("list payments: %v", err)
+		log.Printf("list payments: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -379,8 +380,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	response, err := h.store.CreatePayment(ctx, request, account.ID)
 	if err != nil {
-		log.Printf("CreatePayment failed: cn=%q method=%q ik=%q item_count=%d err=%v",
-			request.CN, request.PaymentMethod, request.IdempotencyKey, len(request.Items), err)
+		log.Printf("CreatePayment failed: item_count=%d err=%s",
+			len(request.Items), logsafe.Category(err))
 		writePaymentError(w, err)
 		return
 	}
@@ -1430,7 +1431,7 @@ func writePaymentError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrUserNotFound), errors.Is(err, ErrPaymentNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	default:
-		log.Printf("payment handler error: %v", err)
+		log.Printf("payment handler error: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }

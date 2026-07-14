@@ -11,6 +11,7 @@ import (
 
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/database"
+	"pjsk/backend/internal/logsafe"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -34,7 +35,7 @@ func main() {
 	pool, err := database.Connect(connectCtx, cfg.DatabaseURL)
 	connectCancel()
 	if err != nil {
-		log.Fatalf("connect to database: %v", err)
+		log.Fatalf("connect to database: %s", logsafe.Category(err))
 	}
 	defer pool.Close()
 
@@ -47,7 +48,7 @@ func main() {
 	`, username).Scan(&exists)
 	checkCancel()
 	if checkErr != nil {
-		log.Fatalf("check administrator: %v", checkErr)
+		log.Fatalf("check administrator: %s", logsafe.Category(checkErr))
 	}
 	if exists {
 		log.Fatalf("administrator %q already exists", username)
@@ -79,7 +80,7 @@ func main() {
 	`, username, string(passwordHash))
 	createCancel()
 	if err != nil {
-		log.Fatalf("create administrator: %v", err)
+		log.Fatalf("create administrator: %s", logsafe.Category(err))
 	}
 
 	fmt.Printf("Administrator %q created.\n", username)

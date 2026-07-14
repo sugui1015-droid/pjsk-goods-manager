@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/payments"
 	"pjsk/backend/internal/users"
 
@@ -87,7 +88,7 @@ func (h *Handler) UsersExcel(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, excelRow{textCell(item.CNCode), numberCell(item.TotalAmount), numberCell(item.PaidAmount), numberCell(item.RemainingAmount), textCell(item.DisplayName), textCell(queryCode), textCell(userStatusLabel(item.Status)), numberCell(float64(item.OrderCount)), textCell(formatDisplayTime(item.CreatedAt))})
 	}
 	if err := writeExcel(w, "users", columns, rows); err != nil {
-		log.Printf("export users xlsx: %v", err)
+		log.Printf("export users xlsx: %s", logsafe.Category(err))
 	}
 }
 
@@ -115,7 +116,7 @@ func (h *Handler) PaymentsExcel(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, excelRow{textCell(item.CNCode), numberCell(item.TotalAmount), textCell(paymentStatusLabel(item.Status)), numberCell(item.PrincipalAmount), numberCell(item.FeeAmount), textCell(paymentMethodLabel(item.PaymentMethod)), textCell(formatDisplayTime(item.PaidAt)), textCell(item.DisplayName), textCell(item.Note), numberCell(float64(item.PaymentItemCount)), textCell(item.CreatedBy), textCell(formatDisplayTime(item.VoidedAt)), textCell(item.VoidedBy), textCell(item.VoidReason)})
 	}
 	if err := writeExcel(w, "payments", columns, rows); err != nil {
-		log.Printf("export payments xlsx: %v", err)
+		log.Printf("export payments xlsx: %s", logsafe.Category(err))
 	}
 }
 
@@ -143,7 +144,7 @@ func (h *Handler) OrderItemsExcel(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, excelRow{textCell(row.CNCode), numberCell(row.Paid), numberCell(row.Amount), numberCell(row.Remaining), textCell(itemPaymentStatusLabel(row.Status)), textCell(row.GoodsName), textCell(row.Character), textCell(row.Category), numberCell(row.Quantity), numberCell(row.UnitPrice), textCell(row.DisplayName), textCell(row.ProjectName), textCell(row.OrderNo), textCell(row.Filename), textCell(row.SourceSheet), textCell(row.SourceRowKey)})
 	}
 	if err := writeExcel(w, "order-items", columns, rows); err != nil {
-		log.Printf("export order items xlsx: %v", err)
+		log.Printf("export order items xlsx: %s", logsafe.Category(err))
 	}
 }
 
@@ -158,7 +159,7 @@ func (h *Handler) loadUsers(w http.ResponseWriter, r *http.Request) (users.ListR
 	defer cancel()
 	response, err := h.users.ListUsers(ctx, filters)
 	if err != nil {
-		log.Printf("export users: %v", err)
+		log.Printf("export users: %s", logsafe.Category(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return users.ListResponse{}, false
 	}
@@ -176,7 +177,7 @@ func (h *Handler) loadPayments(w http.ResponseWriter, r *http.Request) (payments
 	defer cancel()
 	response, err := h.payments.ListPaymentRecords(ctx, filters)
 	if err != nil {
-		log.Printf("export payments: %v", err)
+		log.Printf("export payments: %s", logsafe.Category(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return payments.PaymentListResponse{}, false
 	}
@@ -252,7 +253,7 @@ func (h *Handler) loadOrderItemRows(w http.ResponseWriter, r *http.Request) ([]o
 		order by u.cn_code, o.order_no, product.sort_order, product.name
 		limit `+strconv.Itoa(maxExportRows), args...)
 	if err != nil {
-		log.Printf("export order items: %v", err)
+		log.Printf("export order items: %s", logsafe.Category(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return nil, false
 	}
@@ -261,14 +262,14 @@ func (h *Handler) loadOrderItemRows(w http.ResponseWriter, r *http.Request) ([]o
 	for rows.Next() {
 		var item orderItemExportRow
 		if err := rows.Scan(&item.CNCode, &item.DisplayName, &item.OrderNo, &item.ProjectName, &item.GoodsName, &item.Character, &item.Category, &item.Quantity, &item.UnitPrice, &item.Amount, &item.Paid, &item.Remaining, &item.Status, &item.Filename, &item.SourceSheet, &item.SourceRowKey); err != nil {
-			log.Printf("export order items scan: %v", err)
+			log.Printf("export order items scan: %s", logsafe.Category(err))
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return nil, false
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("export order items rows: %v", err)
+		log.Printf("export order items rows: %s", logsafe.Category(err))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return nil, false
 	}

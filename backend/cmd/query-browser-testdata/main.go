@@ -10,6 +10,7 @@ import (
 
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/database"
+	"pjsk/backend/internal/logsafe"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -69,7 +70,7 @@ func main() {
 	pool, err := database.Connect(connectCtx, cfg.DatabaseURL)
 	connectCancel()
 	if err != nil {
-		log.Fatalf("connect to database: %v", err)
+		log.Fatalf("connect to database: %s", logsafe.Category(err))
 	}
 	defer pool.Close()
 

@@ -83,6 +83,7 @@ const fallbackConfig: ConfigResponse = {
   legacyAdminPort: '8512',
   legacyUserPort: '8513',
   frontendOrigins: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  emailDeliveryEnabled: false,
   modules: [
     { key: 'frontend-shell', title: '前端工作台', status: 'ready', description: 'Vue 管理端已启动。' },
     { key: 'backend-core', title: 'Go 后端', status: 'queued', description: '等待 /health 与 /api/config。' },
@@ -261,7 +262,7 @@ const anonymousRecoveryMessage = ref('')
 
 const isBackendOnline = computed(() => health.value?.status === 'ok')
 const queryRecoveryCooldownSeconds = computed(() => Math.max(0, Math.ceil((queryRecoveryCooldownUntil.value - queryRecoveryClock.value) / 1000)))
-const queryRecoveryCanSend = computed(() => queryRecoveryEmail.value?.status === 'pending' && queryRecoveryCooldownSeconds.value === 0 && !queryRecoverySending.value)
+const queryRecoveryCanSend = computed(() => config.value.emailDeliveryEnabled && queryRecoveryEmail.value?.status === 'pending' && queryRecoveryCooldownSeconds.value === 0 && !queryRecoverySending.value)
 const readyCount = computed(() => config.value.modules.filter((item) => item.status === 'ready').length)
 const queuedCount = computed(() => config.value.modules.filter((item) => item.status === 'queued').length)
 const isAdminRoute = computed(() => routeName.value !== 'home' && routeName.value !== 'query')
@@ -1662,6 +1663,10 @@ function resetAnonymousQueryRecovery(clearCN = true) {
 }
 
 function openRecoveryView() {
+  if (!config.value.emailDeliveryEnabled) {
+    queryMessage.value = '邮箱找回功能暂不可用。'
+    return
+  }
   resetAnonymousQueryRecovery()
   anonymousRecoveryCN.value = queryCN.value.trim()
   queryView.value = 'recovery'
@@ -1674,6 +1679,10 @@ function closeRecoveryView() {
 }
 
 async function requestAnonymousQueryRecovery() {
+  if (!config.value.emailDeliveryEnabled) {
+    anonymousRecoveryMessage.value = '邮箱找回功能暂不可用。'
+    return
+  }
   if (anonymousRecoveryLoading.value) return
   const cn = anonymousRecoveryCN.value.trim()
   if (!cn) {
@@ -2770,6 +2779,7 @@ onUnmounted(() => {
                   <div><span>当前邮箱</span><strong class="recovery-email-masked">{{ adminRecoveryEmail?.has_recovery_email ? (adminRecoveryEmail.masked_email || '-') : '未登记' }}</strong></div>
                   <div><span>更新时间</span><strong>{{ adminRecoveryEmail?.updated_at ? formatDate(adminRecoveryEmail.updated_at) : '-' }}</strong></div>
                 </div>
+                <p v-if="!config.emailDeliveryEnabled" class="inline-alert">邮件服务未配置；当前只能管理邮箱记录，用户无法接收验证码。</p>
                 <p v-if="adminUserDetail.user.status === 'merged'" class="inline-alert">已合并用户不能新增、替换或解绑找回邮箱。</p>
                 <form v-else class="recovery-email-form" @submit.prevent="saveAdminRecoveryEmail">
                   <label><span>{{ adminRecoveryEmail?.has_recovery_email ? '新的找回邮箱' : '找回邮箱' }}</span><input v-model="adminRecoveryEmailDraft" type="email" autocomplete="off" maxlength="254" placeholder="重新输入完整新邮箱" /></label>
@@ -3055,7 +3065,8 @@ onUnmounted(() => {
               <button class="primary-button" type="submit" :disabled="queryLoading">{{ queryLoading ? '查询中' : '查询订单' }}</button>
             </form>
             <div class="query-entry-list">
-              <p class="query-bind-entry"><button class="link-button" type="button" @click="openRecoveryView">忘记查询码</button><span class="muted">（通过已验证找回邮箱重置）</span></p>
+              <p v-if="config.emailDeliveryEnabled" class="query-bind-entry"><button class="link-button" type="button" @click="openRecoveryView">忘记查询码</button><span class="muted">（通过已验证找回邮箱重置）</span></p>
+              <p v-else class="query-bind-entry muted">邮箱找回功能暂不可用（邮件服务未配置）。</p>
               <p class="query-bind-entry"><button class="link-button" type="button" @click="openBindView">首次设置查询码</button><span class="muted">（仅限尚未设置查询码，需要管理员提供一次性绑定码）</span></p>
             </div>
           </template>
@@ -3135,7 +3146,7 @@ onUnmounted(() => {
                   <div v-if="queryRecoveryEmail.status === 'verified'"><span>验证时间</span><strong>{{ queryRecoveryEmail.verified_at ? formatDate(queryRecoveryEmail.verified_at) : '-' }}</strong></div>
                   <div v-else><span>更新时间</span><strong>{{ queryRecoveryEmail.updated_at ? formatDate(queryRecoveryEmail.updated_at) : '-' }}</strong></div>
                 </div>
-                <div v-if="queryRecoveryEmail.status === 'pending'" class="recovery-email-verification">
+                <div v-if="queryRecoveryEmail.status === 'pending' && config.emailDeliveryEnabled" class="recovery-email-verification">
                   <div class="recovery-email-verification__send">
                     <button class="secondary-button" type="button" :disabled="!queryRecoveryCanSend" @click="sendQueryRecoveryVerification">
                       {{ queryRecoverySending ? '发送中' : (queryRecoveryCooldownSeconds > 0 ? `${queryRecoveryCooldownSeconds} 秒后可重发` : '发送验证码') }}
@@ -3148,6 +3159,7 @@ onUnmounted(() => {
                   </form>
                   <p v-if="queryRecoveryExpiresAt" class="muted">本次验证码将在 {{ formatDate(queryRecoveryExpiresAt) }} 过期。</p>
                 </div>
+                <p v-else-if="queryRecoveryEmail.status === 'pending'" class="inline-alert">邮件服务暂未启用，无法发送验证码。</p>
               </template>
               <div v-if="queryRecoveryEmailMessage" class="inline-alert">{{ queryRecoveryEmailMessage }}</div>
             </div>

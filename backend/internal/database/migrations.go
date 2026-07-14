@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"pjsk/backend/internal/logsafe"
 )
 
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationFS fs.FS, dir string) error {
@@ -42,6 +44,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationFS fs.FS, d
 			continue
 		}
 		if err := applyMigration(ctx, pool, migrationFS, dir, name); err != nil {
+			log.Printf("database migration failed: %s", name)
 			return err
 		}
 		log.Printf("database migration applied: %s", name)
@@ -70,7 +73,7 @@ func applyMigration(ctx context.Context, pool *pgxpool.Pool, migrationFS fs.FS, 
 	defer func() {
 		if !committed {
 			if err := tx.Rollback(ctx); err != nil {
-				log.Printf("rollback migration transaction: %v", err)
+				log.Printf("rollback migration transaction: %s", logsafe.Category(err))
 			}
 		}
 	}()

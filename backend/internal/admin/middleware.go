@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+
+	"pjsk/backend/internal/logsafe"
 )
 
 type contextKey struct{}
@@ -20,7 +22,7 @@ func (h *Handler) RequireAuthentication(next http.Handler) http.Handler {
 		account, err := h.store.FindBySession(r.Context(), tokenHash)
 		if err != nil {
 			if !errors.Is(err, ErrNotFound) {
-				log.Printf("find admin session: %v", err)
+				log.Printf("find admin session: %s", logsafe.Category(err))
 			}
 			h.clearSessionCookie(w)
 			writeError(w, http.StatusUnauthorized, "authentication required")

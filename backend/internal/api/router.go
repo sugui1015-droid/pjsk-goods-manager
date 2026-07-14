@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"pjsk/backend/internal/admin"
+	"pjsk/backend/internal/clientip"
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/export"
 	"pjsk/backend/internal/importpreview"
@@ -36,12 +37,13 @@ type healthResponse struct {
 }
 
 type appConfigResponse struct {
-	Name            string   `json:"name"`
-	Stage           string   `json:"stage"`
-	LegacyAdminPort string   `json:"legacyAdminPort"`
-	LegacyUserPort  string   `json:"legacyUserPort"`
-	FrontendOrigins []string `json:"frontendOrigins"`
-	Modules         []module `json:"modules"`
+	Name                 string   `json:"name"`
+	Stage                string   `json:"stage"`
+	LegacyAdminPort      string   `json:"legacyAdminPort"`
+	LegacyUserPort       string   `json:"legacyUserPort"`
+	FrontendOrigins      []string `json:"frontendOrigins"`
+	EmailDeliveryEnabled bool     `json:"emailDeliveryEnabled"`
+	Modules              []module `json:"modules"`
 }
 
 type module struct {
@@ -175,6 +177,10 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		cfg.AdminSessionTTL,
 		cfg.CookieSecure,
 	)
+	clientIPResolver := clientip.NewResolver(cfg.TrustedProxyCIDRs)
+	queryHandler.ConfigureClientIPResolver(func(r *http.Request) string {
+		return clientIPResolver.Resolve(r).Key()
+	})
 	queryHandler.ConfigureRecoveryEmail(usersStore, recoveryEmailProtector)
 	if verificationManager, err := recoveryemailverification.NewManager(cfg.RecoveryEmailVerificationHMACKey); err == nil && recoveryEmailProtector != nil {
 		var sender recoveryemailverification.Sender
@@ -193,7 +199,7 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		queryHandler.ConfigureRecoveryEmailVerification(
 			recoveryemailverification.NewService(verificationStore, recoveryEmailProtector, sender, verificationManager.Policy()),
 		)
-		if recoveryManager, recoveryErr := querycoderecovery.NewManager(cfg.RecoveryEmailVerificationHMACKey); recoveryErr == nil {
+		if recoveryManager, recoveryErr := querycoderecovery.NewManager(cfg.QueryCodeRecoveryHMACKey); recoveryErr == nil {
 			if recoverySender, ok := sender.(querycoderecovery.Sender); ok {
 				recoveryStore := querycoderecovery.NewPostgresStore(dbPool, recoveryManager)
 				queryHandler.ConfigureQueryCodeRecovery(
@@ -255,11 +261,12 @@ func (s *server) configHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	configResponse := appConfigResponse{
-		Name:            "PJSK Goods Next",
-		Stage:           "foundation",
-		LegacyAdminPort: s.config.LegacyAdminPort,
-		LegacyUserPort:  s.config.LegacyUserPort,
-		FrontendOrigins: s.config.FrontendOrigins,
+		Name:                 "PJSK Goods Next",
+		Stage:                "foundation",
+		LegacyAdminPort:      s.config.LegacyAdminPort,
+		LegacyUserPort:       s.config.LegacyUserPort,
+		FrontendOrigins:      s.config.FrontendOrigins,
+		EmailDeliveryEnabled: s.config.RecoveryEmailSenderMode == "smtp" || s.config.RecoveryEmailSenderMode == "fake",
 		Modules: []module{
 			{
 				Key:         "frontend-shell",
@@ -310,28 +317,63 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// corsAllowedMethods and corsAllowedHeaders mirror what the frontend
+// actually sends (fetch with GET/POST/PATCH/PUT/DELETE and a JSON
+// Content-Type); they are deliberately not wide open.
+const (
+	corsAllowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+	corsAllowedHeaders = "Content-Type"
+)
+
 func withCORS(next http.Handler, allowedOrigins []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" && isAllowedOrigin(origin, allowedOrigins) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Vary", "Origin")
+		if origin == "" {
+			// Same-origin or non-browser request: no CORS headers at all.
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
 		}
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set(
-			"Access-Control-Allow-Headers",
-			"Content-Type, Authorization",
-		)
+		appendVaryOrigin(w.Header())
 
+		if isAllowedOrigin(origin, allowedOrigins) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			if r.Method == http.MethodOptions {
+				w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)
+				w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Disallowed origin: no allow headers; the browser blocks the
+		// cross-origin read, and preflights fail for lack of an ACAO header.
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
+}
+
+// appendVaryOrigin adds Origin to the Vary header without clobbering or
+// duplicating existing values.
+func appendVaryOrigin(header http.Header) {
+	for _, value := range header.Values("Vary") {
+		for _, member := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(member), "Origin") {
+				return
+			}
+		}
+	}
+	header.Add("Vary", "Origin")
 }
 
 func isAllowedOrigin(origin string, allowedOrigins []string) bool {

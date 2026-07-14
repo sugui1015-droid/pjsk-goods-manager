@@ -44,6 +44,7 @@ export type ConfigResponse = {
   legacyAdminPort: string
   legacyUserPort: string
   frontendOrigins: string[]
+  emailDeliveryEnabled: boolean
   modules: ModuleInfo[]
 }
 

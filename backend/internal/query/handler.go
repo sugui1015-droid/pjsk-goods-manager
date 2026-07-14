@@ -19,6 +19,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
+	"pjsk/backend/internal/clientip"
+	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/querycode"
 )
 
@@ -40,7 +42,14 @@ type Handler struct {
 	recoveryEmailProtector    RecoveryEmailProtector
 	recoveryEmailVerification RecoveryEmailVerificationService
 	queryCodeRecovery         QueryCodeRecoveryService
+	resolveClientIP           ClientIPResolver
 }
+
+// ClientIPResolver returns a stable, already-normalized rate-limit key for
+// the request's client. The query package never inspects RemoteAddr or proxy
+// headers itself — trusted-proxy semantics live in the clientip package and
+// are injected by the router.
+type ClientIPResolver func(*http.Request) string
 
 type Store interface {
 	FindUserByCN(context.Context, string) (User, error)
@@ -173,13 +182,23 @@ type PostgresStore struct {
 }
 
 func NewHandler(store Store, sessionTTL time.Duration, cookieSecure bool) *Handler {
+	defaultResolver := clientip.NewResolver(nil)
 	return &Handler{
-		store:        store,
-		sessionTTL:   sessionTTL,
-		cookieSecure: cookieSecure,
-		now:          time.Now,
-		random:       rand.Reader,
-		limiter:      newLoginLimiter(),
+		store:           store,
+		sessionTTL:      sessionTTL,
+		cookieSecure:    cookieSecure,
+		now:             time.Now,
+		random:          rand.Reader,
+		limiter:         newLoginLimiter(),
+		resolveClientIP: func(r *http.Request) string { return defaultResolver.Resolve(r).Key() },
+	}
+}
+
+// ConfigureClientIPResolver replaces the default no-trusted-proxy resolver,
+// typically with one that honors the deployment's trusted proxy CIDRs.
+func (h *Handler) ConfigureClientIPResolver(resolver ClientIPResolver) {
+	if resolver != nil {
+		h.resolveClientIP = resolver
 	}
 }
 
@@ -204,7 +223,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := clientIP(r)
+	ip := h.resolveClientIP(r)
 	if !h.limiter.allow(ip, cn, h.now()) {
 		writeError(w, http.StatusTooManyRequests, "尝试次数过多，请稍后再试")
 		return
@@ -214,7 +233,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	user, err := h.store.FindUserByCN(ctx, cn)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		log.Printf("find query user: %v", err)
+		log.Printf("find query user: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -243,7 +262,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	expiresAt := h.now().Add(h.sessionTTL)
 	if err := h.store.CreateSession(ctx, user.ID, tokenHash, expiresAt); err != nil {
-		log.Printf("create query session: %v", err)
+		log.Printf("create query session: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -269,7 +288,7 @@ func (h *Handler) Orders(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	response, err := h.store.ListOrdersForUser(ctx, user.ID)
 	if err != nil {
-		log.Printf("list query orders: %v", err)
+		log.Printf("list query orders: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -292,7 +311,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if err := h.store.DeleteSession(ctx, hashToken(cookie.Value)); err != nil {
-		log.Printf("delete query session: %v", err)
+		log.Printf("delete query session: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -341,7 +360,7 @@ func (h *Handler) ChangeCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limiterKey := "change:" + user.ID
-	ip := clientIP(r)
+	ip := h.resolveClientIP(r)
 	if !h.limiter.allow(ip, limiterKey, h.now()) {
 		writeError(w, http.StatusTooManyRequests, "尝试次数过多，请稍后再试")
 		return
@@ -367,7 +386,7 @@ func (h *Handler) ChangeCode(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	if err := h.store.ChangeQueryCode(ctx, user.ID, string(hashBytes)); err != nil {
-		log.Printf("change query code: %v", err)
+		log.Printf("change query code: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -392,7 +411,7 @@ func (h *Handler) userFromRequestWithHash(w http.ResponseWriter, r *http.Request
 	user, err := h.store.FindUserBySession(ctx, hashToken(cookie.Value))
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
-			log.Printf("find query session: %v", err)
+			log.Printf("find query session: %s", logsafe.Category(err))
 		}
 		h.clearSessionCookie(w)
 		writeError(w, http.StatusUnauthorized, "查询登录已过期，请重新输入查询码")

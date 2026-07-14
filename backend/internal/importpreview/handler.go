@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"pjsk/backend/internal/admin"
+	"pjsk/backend/internal/logsafe"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -101,7 +102,7 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 		Size:     int64(len(data)),
 	})
 	if err != nil {
-		log.Printf("parse xlsx preview: %v", err)
+		log.Printf("parse xlsx preview: %s", logsafe.Category(err))
 		writeError(w, http.StatusBadRequest, "无法解析该 xlsx 文件")
 		return
 	}
@@ -110,7 +111,7 @@ func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	state, err := h.store.SavePreview(ctx, preview, account.ID)
 	if err != nil {
-		log.Printf("save import preview: %v", err)
+		log.Printf("save import preview: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -176,7 +177,7 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrInvalidImportRules):
 			writeError(w, http.StatusBadRequest, "导入调整规则不合法")
 		default:
-			log.Printf("confirm import: %v", err)
+			log.Printf("confirm import: %s", logsafe.Category(err))
 			writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		}
 		return
@@ -195,7 +196,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	response, err := h.store.ListImports(ctx)
 	if err != nil {
-		log.Printf("list imports: %v", err)
+		log.Printf("list imports: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -237,7 +238,7 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 			case errors.Is(err, ErrImportNotConfirmed):
 				writeError(w, http.StatusConflict, "只有已确认导入的批次才能撤销")
 			default:
-				log.Printf("revoke import: %v", err)
+				log.Printf("revoke import: %s", logsafe.Category(err))
 				writeError(w, http.StatusInternalServerError, "服务器内部错误")
 			}
 			return
@@ -263,7 +264,7 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "找不到导入批次")
 			return
 		}
-		log.Printf("get import detail: %v", err)
+		log.Printf("get import detail: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}

@@ -1,8 +1,6 @@
 package query
 
 import (
-	"net"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -121,15 +119,4 @@ func (l *loginLimiter) cleanupLocked(now time.Time) {
 
 func failureKey(ip string, cn string) string {
 	return ip + "|" + cn
-}
-
-// clientIP extracts the remote IP. The backend is expected to sit behind a
-// trusted reverse proxy in production; forwarding headers are deliberately
-// not trusted here until that proxy is in place.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }

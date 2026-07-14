@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"pjsk/backend/internal/logsafe"
 )
 
 type Handler struct {
@@ -114,7 +116,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	response, err := h.store.ListOrders(ctx, filters)
 	if err != nil {
-		log.Printf("list admin orders: %v", err)
+		log.Printf("list admin orders: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -141,7 +143,7 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "order not found")
 			return
 		}
-		log.Printf("get admin order detail: %v", err)
+		log.Printf("get admin order detail: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
