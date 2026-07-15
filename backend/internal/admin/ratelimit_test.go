@@ -187,3 +187,26 @@ func TestNormalizeLimiterUsernameMatchesLoginSemantics(t *testing.T) {
 		}
 	}
 }
+
+func TestLoginLimiterRateLimitAuditDedupes(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := limiterEpoch
+
+	if !limiter.shouldAuditRateLimited("203.0.113.1", "admin", now) {
+		t.Fatal("first rate-limit audit should be recorded")
+	}
+	if limiter.shouldAuditRateLimited("203.0.113.1", "admin", now.Add(30*time.Second)) {
+		t.Fatal("duplicate rate-limit audit inside the audit window was allowed")
+	}
+	if !limiter.shouldAuditRateLimited("203.0.113.1", "admin", now.Add(limiter.rateLimitAuditWindow)) {
+		t.Fatal("rate-limit audit did not reset after the audit window")
+	}
+	if !limiter.shouldAuditRateLimited("203.0.113.1", "other-admin", now.Add(30*time.Second)) {
+		t.Fatal("different username should have an independent rate-limit audit key")
+	}
+
+	limiter.recordSuccess("203.0.113.1", "admin")
+	if !limiter.shouldAuditRateLimited("203.0.113.1", "admin", now.Add(31*time.Second)) {
+		t.Fatal("successful login should clear the pair's audit dedupe state")
+	}
+}

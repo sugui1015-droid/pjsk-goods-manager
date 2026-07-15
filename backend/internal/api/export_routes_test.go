@@ -87,6 +87,38 @@ func newAPITestPool(t *testing.T) *pgxpool.Pool {
 `); err != nil {
 		t.Fatalf("ensure user query account columns: %v", err)
 	}
+	if _, err := pool.Exec(context.Background(), `
+	create table if not exists admin_auth_audit_events (
+		id uuid primary key default gen_random_uuid(),
+		event_type text not null check (event_type in (
+			'admin_login_succeeded',
+			'admin_login_failed',
+			'admin_login_rate_limited',
+			'admin_logout_succeeded'
+		)),
+		occurred_at timestamptz not null default now(),
+		admin_id uuid references admins(id) on delete set null,
+		username_normalized text not null check (char_length(username_normalized) <= 128),
+		client_ip text not null check (char_length(client_ip) <= 128),
+		result text not null check (result in ('success', 'failure')),
+		reason_code text not null check (reason_code in (
+			'none',
+			'invalid_credentials',
+			'account_disabled',
+			'rate_limited',
+			'database_error',
+			'audit_write_error'
+		)),
+		user_agent_summary text check (user_agent_summary is null or char_length(user_agent_summary) <= 256),
+		created_at timestamptz not null default now(),
+		constraint admin_auth_audit_reason_result check (
+			(result = 'success' and reason_code = 'none')
+			or (result = 'failure' and reason_code <> 'none')
+		)
+	)
+`); err != nil {
+		t.Fatalf("ensure admin auth audit table: %v", err)
+	}
 	t.Cleanup(func() { pool.Close() })
 	return pool
 }
@@ -145,6 +177,9 @@ func cleanupAPITestAdmin(t *testing.T, pool *pgxpool.Pool, prefix string) {
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `delete from admin_sessions where admin_id in (select id from admins where username like $1)`, prefix+"%"); err != nil {
 		t.Fatalf("cleanup admin sessions: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `delete from admin_auth_audit_events where username_normalized like lower($1)`, prefix+"%"); err != nil {
+		t.Fatalf("cleanup admin auth audit events: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `delete from admins where username like $1`, prefix+"%"); err != nil {
 		t.Fatalf("cleanup admins: %v", err)

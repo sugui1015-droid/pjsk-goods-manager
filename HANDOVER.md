@@ -226,3 +226,12 @@ Roughly in priority order, per [docs/normal-use-roadmap.md](docs/normal-use-road
 - **Don't run destructive SQL against a database with real data** without a fresh backup and explicit sign-off — `backups/` and `pjsk-data-backup/` exist for a reason, treat them as important, not disposable.
 - **`idempotency_key` matters for payment creation** — don't strip or auto-generate it client-side in a way that could collide across different real payments, or duplicate-submission protection breaks.
 - **CORS / cookie settings**: `CORS_ALLOWED_ORIGINS` is now configurable (production defaults to no cross-origin access; development/test keep the two local Vite origins) — the old "hardcoded to localhost in `Load()`" note no longer applies. For a reverse-proxy deployment serve frontend and API from the same origin (leave `CORS_ALLOWED_ORIGINS` empty) and set `ADMIN_COOKIE_SECURE=true` under HTTPS. See [docs/internal-https-reverse-proxy.md](docs/internal-https-reverse-proxy.md) and [docs/internal-network-deployment.md](docs/internal-network-deployment.md).
+
+## Admin authentication security audit
+
+- Admin authentication events are recorded in `admin_auth_audit_events` via migration `0019_admin_auth_audit_events.sql`.
+- Covered events: login success, login failure, login rate-limited, and logout success.
+- Successful login writes the session, `last_login_at`, and audit row in one transaction. If that audit write fails, no session cookie is issued.
+- Failed login, rate-limited login, and logout audits are best-effort and preserve existing user-facing responses; logs use sanitized error categories.
+- Audit storage intentionally excludes passwords, password hashes, cookies, session tokens, Authorization headers, query/binding/recovery codes, DSNs, and environment secret values.
+- No admin audit query UI/API exists yet; future work can add read-only paginated access and a retention policy.

@@ -22,7 +22,8 @@ type Admin struct {
 
 type Store interface {
 	FindByUsername(context.Context, string) (Admin, error)
-	CreateSession(context.Context, string, string, time.Time) error
+	CreateSessionWithAudit(context.Context, string, string, time.Time, AdminAuthAuditEvent) error
+	RecordAdminAuthEvent(context.Context, AdminAuthAuditEvent) error
 	FindBySession(context.Context, string) (Admin, error)
 	DeleteSession(context.Context, string) error
 }
@@ -55,11 +56,12 @@ func (s *PostgresStore) FindByUsername(ctx context.Context, username string) (Ad
 	return account, err
 }
 
-func (s *PostgresStore) CreateSession(
+func (s *PostgresStore) CreateSessionWithAudit(
 	ctx context.Context,
 	adminID string,
 	tokenHash string,
 	expiresAt time.Time,
+	event AdminAuthAuditEvent,
 ) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -80,7 +82,37 @@ func (s *PostgresStore) CreateSession(
 		return err
 	}
 
+	event.AdminID = &adminID
+	if err := validateAdminAuthAuditEvent(event); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into admin_auth_audit_events (
+			event_type, occurred_at, admin_id, username_normalized,
+			client_ip, result, reason_code, user_agent_summary
+		) values ($1, $2, $3::uuid, $4, $5, $6, $7, $8)
+	`, event.EventType, event.OccurredAt, adminID, event.UsernameNormalized, event.ClientIP, event.Result, event.ReasonCode, event.UserAgentSummary); err != nil {
+		return err
+	}
+
 	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) RecordAdminAuthEvent(ctx context.Context, event AdminAuthAuditEvent) error {
+	if err := validateAdminAuthAuditEvent(event); err != nil {
+		return err
+	}
+	var adminID any
+	if event.AdminID != nil {
+		adminID = *event.AdminID
+	}
+	_, err := s.pool.Exec(ctx, `
+		insert into admin_auth_audit_events (
+			event_type, occurred_at, admin_id, username_normalized,
+			client_ip, result, reason_code, user_agent_summary
+		) values ($1, $2, $3::uuid, $4, $5, $6, $7, $8)
+	`, event.EventType, event.OccurredAt, adminID, event.UsernameNormalized, event.ClientIP, event.Result, event.ReasonCode, event.UserAgentSummary)
+	return err
 }
 
 func (s *PostgresStore) FindBySession(ctx context.Context, tokenHash string) (Admin, error) {

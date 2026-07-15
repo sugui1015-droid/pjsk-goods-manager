@@ -103,7 +103,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	ip := h.resolveClientIP(r)
 	limiterUsername := normalizeLimiterUsername(username)
-	if !h.limiter.allow(ip, limiterUsername, h.now()) {
+	now := h.now()
+	if !h.limiter.allow(ip, limiterUsername, now) {
+		if h.limiter.shouldAuditRateLimited(ip, limiterUsername, now) {
+			h.recordAdminAuthEventBestEffort(r, AdminAuthEventLoginRateLimited, nil, username, ip, AdminAuthResultFailure, AdminAuthReasonRateLimited)
+		}
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, please try again later")
 		return
 	}
@@ -113,6 +117,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		// Transient storage failures are not password failures and must not
 		// count toward the block threshold.
 		log.Printf("find admin for login: %s", logsafe.Category(err))
+		h.recordAdminAuthEventBestEffort(r, AdminAuthEventLoginFailed, nil, username, ip, AdminAuthResultFailure, AdminAuthReasonDatabaseError)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -127,6 +132,17 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	) == nil
 	if errors.Is(err, ErrNotFound) || account.Status != "active" || !passwordMatches {
 		h.limiter.recordFailure(ip, limiterUsername, h.now())
+		reason := AdminAuthReasonInvalidCredentials
+		var adminID *string
+		auditUsername := username
+		if !errors.Is(err, ErrNotFound) {
+			auditUsername = account.Username
+			adminID = &account.ID
+			if account.Status != "active" {
+				reason = AdminAuthReasonAccountDisabled
+			}
+		}
+		h.recordAdminAuthEventBestEffort(r, AdminAuthEventLoginFailed, adminID, auditUsername, ip, AdminAuthResultFailure, reason)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
@@ -140,7 +156,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expiresAt := h.now().Add(h.sessionTTL)
-	if err := h.store.CreateSession(r.Context(), account.ID, tokenHash, expiresAt); err != nil {
+	successEvent := h.adminAuthAuditEvent(r, AdminAuthEventLoginSucceeded, &account.ID, account.Username, ip, AdminAuthResultSuccess, AdminAuthReasonNone)
+	if err := h.store.CreateSessionWithAudit(r.Context(), account.ID, tokenHash, expiresAt, successEvent); err != nil {
 		log.Printf("create admin session: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -176,14 +193,53 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	account, _ := CurrentAdmin(r.Context())
 	if err := h.store.DeleteSession(r.Context(), tokenHash); err != nil {
 		log.Printf("delete admin session: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	adminID := account.ID
+	h.recordAdminAuthEventBestEffort(r, AdminAuthEventLogoutSucceeded, &adminID, account.Username, h.resolveClientIP(r), AdminAuthResultSuccess, AdminAuthReasonNone)
 
 	h.clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) recordAdminAuthEventBestEffort(
+	r *http.Request,
+	eventType AdminAuthEventType,
+	adminID *string,
+	username string,
+	clientIP string,
+	result AdminAuthAuditResult,
+	reason AdminAuthReasonCode,
+) {
+	event := h.adminAuthAuditEvent(r, eventType, adminID, username, clientIP, result, reason)
+	if err := h.store.RecordAdminAuthEvent(r.Context(), event); err != nil {
+		log.Printf("record admin auth audit event: %s", logsafe.Category(err))
+	}
+}
+
+func (h *Handler) adminAuthAuditEvent(
+	r *http.Request,
+	eventType AdminAuthEventType,
+	adminID *string,
+	username string,
+	clientIP string,
+	result AdminAuthAuditResult,
+	reason AdminAuthReasonCode,
+) AdminAuthAuditEvent {
+	return buildAdminAuthAuditEvent(
+		&httpRequestSummary{UserAgent: r.UserAgent()},
+		eventType,
+		adminID,
+		username,
+		clientIP,
+		result,
+		reason,
+		h.now(),
+	)
 }
 
 func newSessionToken(random io.Reader) (string, string, error) {

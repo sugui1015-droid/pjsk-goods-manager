@@ -849,9 +849,11 @@ func (authStore) FindByUsername(context.Context, string) (admin.Admin, error) {
 	return admin.Admin{}, admin.ErrNotFound
 }
 
-func (authStore) CreateSession(context.Context, string, string, time.Time) error {
+func (authStore) CreateSessionWithAudit(context.Context, string, string, time.Time, admin.AdminAuthAuditEvent) error {
 	return nil
 }
+
+func (authStore) RecordAdminAuthEvent(context.Context, admin.AdminAuthAuditEvent) error { return nil }
 
 func (authStore) FindBySession(context.Context, string) (admin.Admin, error) {
 	return admin.Admin{ID: "admin-1", Username: "admin", Status: "active"}, nil

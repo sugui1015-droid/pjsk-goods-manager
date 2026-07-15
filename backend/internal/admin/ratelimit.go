@@ -32,6 +32,9 @@ type loginLimiter struct {
 	blockDuration time.Duration
 	failures      map[string]*failureState
 
+	rateLimitAuditWindow time.Duration
+	rateLimitAudits      map[string]time.Time
+
 	maxTrackedKeys int
 }
 
@@ -48,14 +51,16 @@ type failureState struct {
 
 func newLoginLimiter() *loginLimiter {
 	return &loginLimiter{
-		attemptWindow:  time.Minute,
-		maxAttempts:    20,
-		attempts:       map[string]*windowCounter{},
-		failureWindow:  10 * time.Minute,
-		maxFailures:    5,
-		blockDuration:  10 * time.Minute,
-		failures:       map[string]*failureState{},
-		maxTrackedKeys: 10000,
+		attemptWindow:        time.Minute,
+		maxAttempts:          20,
+		attempts:             map[string]*windowCounter{},
+		failureWindow:        10 * time.Minute,
+		maxFailures:          5,
+		blockDuration:        10 * time.Minute,
+		failures:             map[string]*failureState{},
+		rateLimitAuditWindow: time.Minute,
+		rateLimitAudits:      map[string]time.Time{},
+		maxTrackedKeys:       10000,
 	}
 }
 
@@ -130,7 +135,30 @@ func (l *loginLimiter) recordFailure(ip string, username string, now time.Time) 
 func (l *loginLimiter) recordSuccess(ip string, username string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.failures, failureKey(ip, username))
+	key := failureKey(ip, username)
+	delete(l.failures, key)
+	delete(l.rateLimitAudits, key)
+}
+
+// shouldAuditRateLimited returns true at most once per IP+username pair per
+// audit window. The limiter can reject many requests while a block is active;
+// without this separate gate, a tight retry loop would create noisy audit rows
+// without adding investigative value.
+func (l *loginLimiter) shouldAuditRateLimited(ip string, username string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.cleanupLocked(now)
+
+	key := failureKey(ip, username)
+	if last, ok := l.rateLimitAudits[key]; ok && now.Sub(last) < l.rateLimitAuditWindow {
+		return false
+	}
+	if _, ok := l.rateLimitAudits[key]; !ok && len(l.rateLimitAudits) >= l.maxTrackedKeys {
+		return false
+	}
+	l.rateLimitAudits[key] = now
+	return true
 }
 
 func (l *loginLimiter) cleanupLocked(now time.Time) {
@@ -142,6 +170,11 @@ func (l *loginLimiter) cleanupLocked(now time.Time) {
 	for key, state := range l.failures {
 		if now.Sub(state.windowStart) >= l.failureWindow && now.After(state.blockedUntil) {
 			delete(l.failures, key)
+		}
+	}
+	for key, last := range l.rateLimitAudits {
+		if now.Sub(last) >= l.rateLimitAuditWindow {
+			delete(l.rateLimitAudits, key)
 		}
 	}
 }
