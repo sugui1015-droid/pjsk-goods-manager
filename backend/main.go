@@ -17,16 +17,30 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
+const (
+	// databaseConnectTimeout bounds pool creation and the first Ping only, so a
+	// bad DSN or an unreachable database fails startup fast instead of stalling
+	// the service wrapper's restart-with-backoff loop.
+	databaseConnectTimeout = 10 * time.Second
+
+	// databaseMigrationTimeout is deliberately separate from — and much larger
+	// than — the connect budget: a fresh database applies every migration in
+	// sequence, which is on the order of a hundred round trips and can take real
+	// time against a remote database. It stays finite so a migration blocked on a
+	// lock can never hang startup forever.
+	databaseMigrationTimeout = 2 * time.Minute
+)
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), databaseConnectTimeout)
+	defer cancelConnect()
 
-	dbPool, err := database.Connect(ctx, cfg.DatabaseURL)
+	dbPool, err := database.Connect(connectCtx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("connect to database: %s", logsafe.Category(err))
 	}
@@ -34,7 +48,10 @@ func main() {
 
 	log.Println("database connected")
 
-	if err := database.RunMigrations(ctx, dbPool, migrationFS, "migrations"); err != nil {
+	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), databaseMigrationTimeout)
+	defer cancelMigrate()
+
+	if err := database.RunMigrations(migrateCtx, dbPool, migrationFS, "migrations"); err != nil {
 		log.Fatalf("run database migrations: %s", logsafe.Category(err))
 	}
 

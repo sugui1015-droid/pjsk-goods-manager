@@ -10,11 +10,14 @@ param(
     [string]$PostgresBin = "D:\PostgreSQL\18\bin",
     [string]$HostName = "127.0.0.1",
     [int]$Port = 5432,
-    [string]$Username
+    [string]$Username,
+    [string]$MigrationsDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 $script:failed = $false
+
+. (Join-Path $PSScriptRoot '_MigrationFacts.ps1')
 
 function Fail([string]$Message) {
     Write-Error $Message
@@ -31,6 +34,18 @@ if ($SourceDatabase -and $SourceDatabase -notmatch '^pjsk_backup_source_test_[a-
 $psql = Join-Path $PostgresBin 'psql.exe'
 if (-not (Test-Path -LiteralPath $psql)) {
     Fail "PostgreSQL tool not found: $psql"
+}
+
+# Expected migration state is derived from the repository's migration files, not
+# a literal, so it stays correct when 0020 and later land. A missing/invalid
+# migrations directory is a hard failure — never a fallback to a fixed number.
+if (-not $MigrationsDirectory) {
+    $MigrationsDirectory = Resolve-RepositoryMigrationsDirectory -ScriptDirectory $PSScriptRoot
+}
+try {
+    $migrationFacts = Get-MigrationFacts -MigrationsDirectory $MigrationsDirectory
+} catch {
+    Fail "Could not determine expected migrations from ${MigrationsDirectory}: $($_.Exception.Message)"
 }
 
 $connectionArguments = @('--host', $HostName, '--port', "$Port", '-w')
@@ -102,7 +117,8 @@ foreach ($table in $keyTables) {
     Write-Output ("  rows {0,-40} : {1}" -f $table, $restored.rowCounts[$table])
 }
 
-Assert ($restored.migrationMax -eq '0018_query_code_email_recovery.sql') "maximum migration is 0018_query_code_email_recovery.sql"
+Assert ($restored.migrationMax -eq $migrationFacts.MaxVersion) "maximum migration is $($migrationFacts.MaxVersion) (from $($migrationFacts.Count) repository migration files)"
+Assert ([int]$restored.migrationCount -eq [int]$migrationFacts.Count) "schema_migrations has the expected $($migrationFacts.Count) entries"
 foreach ($table in $keyTables) {
     Assert ($restored.rowCounts[$table] -ne 'MISSING') "table $table exists"
 }
