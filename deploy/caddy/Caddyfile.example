@@ -5,7 +5,8 @@
 # 复制后必须替换所有占位值：
 #   - pjsk.internal.example        你的内网域名
 #   - D:\pjsk\frontend\dist        实际前端构建输出目录
-#   - D:\pjsk\secrets\...          仓库外的证书/日志目录
+#   - D:\pjsk\secrets\...          仓库外的证书/密钥目录
+#   - D:\pjsk\runtime\logs\...     仓库外的运行日志目录
 # 本文件不包含任何真实域名、IP、证书或密钥。
 # 说明见 docs/internal-https-reverse-proxy.md。
 # =====================================================================
@@ -53,7 +54,7 @@ pjsk.internal.example {
 
     # 访问日志写到仓库外目录（不进入 Git）
     log {
-        output file D:\pjsk\secrets\logs\caddy-access.log
+        output file D:\pjsk\runtime\logs\caddy-access.log
     }
 }
 

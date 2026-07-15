@@ -69,8 +69,8 @@ server {
     add_header Referrer-Policy           strict-origin-when-cross-origin always;
 
     # 访问/错误日志写到仓库外目录（不进入 Git）
-    access_log D:/pjsk/secrets/logs/nginx-access.log;
-    error_log  D:/pjsk/secrets/logs/nginx-error.log;
+    access_log D:/pjsk/runtime/logs/nginx-access.log;
+    error_log  D:/pjsk/runtime/logs/nginx-error.log;
 }
 
 # 说明：

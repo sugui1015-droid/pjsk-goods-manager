@@ -109,7 +109,7 @@ pjsk.internal.example {
     }
 
     log {
-        output file D:\pjsk\secrets\logs\caddy-access.log
+        output file D:\pjsk\runtime\logs\caddy-access.log
     }
 }
 ```
