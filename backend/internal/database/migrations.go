@@ -22,18 +22,10 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationFS fs.FS, d
 		return err
 	}
 
-	entries, err := fs.ReadDir(migrationFS, dir)
+	names, err := listMigrationNames(migrationFS, dir)
 	if err != nil {
 		return err
 	}
-
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
 
 	for _, name := range names {
 		applied, err := migrationApplied(ctx, pool, name)
@@ -51,6 +43,26 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationFS fs.FS, d
 	}
 
 	return nil
+}
+
+// listMigrationNames returns every *.sql file directly under dir, sorted by
+// full filename. The full filename (not a parsed numeric prefix) is both the
+// execution-order key and the identity stored in schema_migrations.version.
+func listMigrationNames(migrationFS fs.FS, dir string) ([]string, error) {
+	entries, err := fs.ReadDir(migrationFS, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+
+	return names, nil
 }
 
 func migrationApplied(ctx context.Context, pool *pgxpool.Pool, name string) (bool, error) {
