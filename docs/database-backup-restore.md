@@ -49,6 +49,20 @@ Get-FileHash -Algorithm SHA256 'D:\PJSK-Backups\PostgreSQL\2026\07\pjsk-20260714
 
 metadata JSON 只含：创建时间(UTC)、客户端版本、dump 文件名、大小、SHA-256、数据库逻辑别名、对象数量、格式——无任何凭据或业务数据。
 
+### 两种备份模式
+
+脚本同时支持两种模式，由 `-RequireIsolatedSource` 区分，并记录在 metadata 的 `isolatedTestBackup` 字段：
+
+| | 正式备份 | 隔离恢复演练备份 |
+| --- | --- | --- |
+| 参数 | 不传 `-RequireIsolatedSource`（如上例的 `-DatabaseName pjsk`） | 必须传 `-RequireIsolatedSource` |
+| 允许的库名 | 任意合法标识符（正式使用时显式传 `pjsk`） | 仅 `pjsk_backup_source_test_*`，正式库被拒绝 |
+| `isolatedTestBackup` | `false` | `true` |
+| 演练 fixture 预期行数 | 不写入 | 写入（迁移数量由 `backend/migrations/` 动态得出） |
+| 保留策略 | 参与日/周/月保留分层 | 永久 `Protected`，视为演练证据，不参与分层 |
+
+发布前会校验回读的 metadata 与本次运行一致，其中 `isolatedTestBackup` 必须**与本次模式相符**（而非恒为真）；字段缺失或非布尔类型一律判定失败。两种模式都保留哈希校验、`.partial` 原子写入与拒绝覆盖同名文件的保护。
+
 ## 恢复到临时测试数据库
 
 恢复 **只允许** 恢复到一个全新的、名字以 `pjsk_restore_test_` 开头的数据库；绝不恢复进正在使用的正式库。脚本不使用 `--clean`/`--create`，目标库已存在时直接失败。

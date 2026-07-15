@@ -22,6 +22,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot '_MigrationFacts.ps1')
+. (Join-Path $PSScriptRoot '_BackupMetadata.ps1')
+
 function Fail([string]$Message) {
     Write-Error $Message
     exit 1
@@ -154,16 +157,26 @@ if ($sizeBytes -le 0) {
 
 $clientVersion = (& $pgDump '--version') -join ' '
 $scriptHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
-$fixtureExpectedRowCounts = [ordered]@{
-    admins            = 1
-    users             = 2
-    projects          = 1
-    products          = 2
-    orders            = 2
-    order_items       = 2
-    payments          = 1
-    payment_items     = 1
-    schema_migrations = 18
+
+# The drill fixture's expected row counts only describe the isolated drill
+# database, so they are recorded for drill backups only — stamping them onto a
+# real backup would be misleading metadata. schema_migrations is never a literal:
+# it is derived from the repository's migration files so it cannot go stale when
+# a new migration lands. Get-MigrationFacts throws rather than falling back.
+$fixtureExpectedRowCounts = $null
+if ($RequireIsolatedSource) {
+    $migrationFacts = Get-MigrationFacts -MigrationsDirectory (Resolve-RepositoryMigrationsDirectory -ScriptDirectory $PSScriptRoot)
+    $fixtureExpectedRowCounts = [ordered]@{
+        admins            = 1
+        users             = 2
+        projects          = 1
+        products          = 2
+        orders            = 2
+        order_items       = 2
+        payments          = 1
+        payment_items     = 1
+        schema_migrations = $migrationFacts.Count
+    }
 }
 $metadata = [ordered]@{
     schemaVersion            = 1
@@ -183,12 +196,16 @@ $dumpPublished = $false
 try {
     $metadata | ConvertTo-Json | Out-File -LiteralPath $metadataPartialPath -Encoding utf8
     $metadataCheck = Get-Content -LiteralPath $metadataPartialPath -Raw | ConvertFrom-Json
-    if ($metadataCheck.sourceDatabaseName -ne $DatabaseName -or
-        $metadataCheck.dumpSha256 -ne $hash -or
-        $metadataCheck.dumpSizeBytes -ne $sizeBytes -or
-        $metadataCheck.dumpFormat -ne 'custom' -or
-        -not $metadataCheck.isolatedTestBackup) {
-        throw "metadata partial validation failed"
+    $metadataReason = ''
+    $metadataConsistent = Test-BackupMetadataConsistency `
+        -Metadata $metadataCheck `
+        -ExpectedDatabaseName $DatabaseName `
+        -ExpectedSha256 $hash `
+        -ExpectedSizeBytes $sizeBytes `
+        -ExpectedIsolatedTestBackup ([bool]$RequireIsolatedSource) `
+        -Reason ([ref]$metadataReason)
+    if (-not $metadataConsistent) {
+        throw "metadata partial validation failed: $metadataReason"
     }
     Move-Item -LiteralPath $partialPath -Destination $dumpPath
     $dumpPublished = $true

@@ -134,6 +134,28 @@ $retentionExit = $LASTEXITCODE
 $ErrorActionPreference = $prevPref
 if ($retentionExit -ne 0) { $script:failures++ }
 
+# Also run the migration-facts tests (drill fixture / verification expectations).
+Write-Output "--- migration facts tests ---"
+$migrationTests = Join-Path $scriptDir 'Invoke-MigrationFactsTests.ps1'
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $migrationTests
+$migrationExit = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
+if ($migrationExit -ne 0) { $script:failures++ }
+
+# Also run the backup publish-path tests (real vs isolated-drill backup modes).
+# These use mock pg_dump/pg_restore, never a real database, and cover the
+# publish path that every -DryRun test above exits before reaching.
+Write-Output "--- backup publish path tests ---"
+$publishTests = Join-Path $scriptDir 'Invoke-BackupPublishTests.ps1'
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $publishTests
+$publishExit = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
+if ($publishExit -ne 0) { $script:failures++ }
+
 if ($script:failures -gt 0) {
     Write-Output "RESULT: $script:failures failure(s)"
     exit 1
