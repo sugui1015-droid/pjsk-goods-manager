@@ -213,6 +213,8 @@ Roughly in priority order, per [docs/normal-use-roadmap.md](docs/normal-use-road
 7. Frontend decomposition (`vue-router` + component split) — do this once the API surface above has stabilized, to avoid rewriting routing twice.
 8. CI pipeline (`go test`, `go vet`, `pnpm run build` on push).
 9. Production deployment: domain, HTTPS, backup strategy.
+   - Database backup/restore tooling: done (`scripts/database/`, [docs/database-backup-restore.md](docs/database-backup-restore.md)) — verified via an isolated restore drill.
+   - Internal HTTPS + reverse proxy: deployment guide and example configs done ([docs/internal-https-reverse-proxy.md](docs/internal-https-reverse-proxy.md), `deploy/caddy/Caddyfile.example`, `deploy/nginx/pjsk.conf.example`). Caddy is the recommended proxy; the backend needs no code change to sit behind it (loopback `SERVER_HOST`, `TRUSTED_PROXY_CIDRS`, env-driven `ADMIN_COOKIE_SECURE`). Still pending: actually installing/configuring the proxy on the target host, internal-CA certificate issuance and root-cert distribution.
 
 ## 16. High-Risk Operations — Read Before Touching
 
@@ -220,4 +222,4 @@ Roughly in priority order, per [docs/normal-use-roadmap.md](docs/normal-use-road
 - **Never rename an already-applied migration file** or hand-edit `schema_migrations`. The runner treats the filename as the identity of the migration; changing it re-runs (or skips) migrations unexpectedly.
 - **Don't run destructive SQL against a database with real data** without a fresh backup and explicit sign-off — `backups/` and `pjsk-data-backup/` exist for a reason, treat them as important, not disposable.
 - **`idempotency_key` matters for payment creation** — don't strip or auto-generate it client-side in a way that could collide across different real payments, or duplicate-submission protection breaks.
-- **CORS / cookie settings** (`ADMIN_COOKIE_SECURE`, `FrontendOrigins` in `config.go`) are currently hardcoded to localhost origins in `Load()`. Don't point a production frontend at a backend running this code without revisiting that.
+- **CORS / cookie settings**: `CORS_ALLOWED_ORIGINS` is now configurable (production defaults to no cross-origin access; development/test keep the two local Vite origins) — the old "hardcoded to localhost in `Load()`" note no longer applies. For a reverse-proxy deployment serve frontend and API from the same origin (leave `CORS_ALLOWED_ORIGINS` empty) and set `ADMIN_COOKIE_SECURE=true` under HTTPS. See [docs/internal-https-reverse-proxy.md](docs/internal-https-reverse-proxy.md) and [docs/internal-network-deployment.md](docs/internal-network-deployment.md).

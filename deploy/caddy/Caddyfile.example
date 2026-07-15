@@ -1,0 +1,64 @@
+# =====================================================================
+# 示例文件，禁止直接用于生产环境。
+# EXAMPLE ONLY — DO NOT USE IN PRODUCTION AS-IS.
+#
+# 复制后必须替换所有占位值：
+#   - pjsk.internal.example        你的内网域名
+#   - D:\pjsk\frontend\dist        实际前端构建输出目录
+#   - D:\pjsk\secrets\...          仓库外的证书/日志目录
+# 本文件不包含任何真实域名、IP、证书或密钥。
+# 说明见 docs/internal-https-reverse-proxy.md。
+# =====================================================================
+
+pjsk.internal.example {
+    # --- HTTPS 证书 ---
+    # 方案 A：Caddy 内置本地 CA 自动签发（访问设备需信任 Caddy 根证书）
+    tls internal
+    # 方案 B：改用自建内部 CA 证书时，注释掉上面一行并启用下面一行：
+    # tls D:\pjsk\secrets\pjsk.internal.example.crt D:\pjsk\secrets\pjsk.internal.example.key
+
+    encode zstd gzip
+
+    # --- 1) 后端 API 与健康检查 → 本机 Go 后端（仅监听 127.0.0.1:8080）---
+    @backend path /api/* /health
+    handle @backend {
+        reverse_proxy 127.0.0.1:8080 {
+            # 用真实连接地址覆盖客户端可能伪造的 XFF，不透传。
+            # 后端需配置 TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up Host {host}
+        }
+    }
+
+    # --- 2) 其余路径 → 静态前端 SPA，history 回退 index.html ---
+    handle {
+        root * D:\pjsk\frontend\dist
+        try_files {path} /index.html
+        file_server
+    }
+
+    # --- 上传上限：后端 maxPreviewFileSize=20MiB，留余量 ---
+    request_body {
+        max_size 25MB
+    }
+
+    # --- 安全响应头 ---
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # 访问日志写到仓库外目录（不进入 Git）
+    log {
+        output file D:\pjsk\secrets\logs\caddy-access.log
+    }
+}
+
+# 说明：
+# - 未代理 PostgreSQL 5432，数据库不经反代暴露。
+# - 未代理 Vite 5173，正式访问只走 443。
+# - 当前项目无 WebSocket 需求，无需 Connection: Upgrade 特殊处理。
+# - Caddy 默认监听 80 会自动 301 跳转到 443。

@@ -1,0 +1,79 @@
+# =====================================================================
+# 示例文件，禁止直接用于生产环境。
+# EXAMPLE ONLY — DO NOT USE IN PRODUCTION AS-IS.
+#
+# 复制后必须替换所有占位值：
+#   - pjsk.internal.example                     你的内网域名
+#   - D:/pjsk/secrets/pjsk.internal.example.crt 内部 CA 签发的证书（仓库外）
+#   - D:/pjsk/secrets/pjsk.internal.example.key 对应私钥（仓库外，切勿提交）
+#   - D:/pjsk/frontend/dist                     实际前端构建输出目录
+# 本文件不包含任何真实域名、IP、证书或密钥。
+# 项目优先推荐 Caddy（证书与续期更省事）；仅在已有 Nginx 运维经验时用本配置。
+# 说明见 docs/internal-https-reverse-proxy.md。
+# =====================================================================
+
+# 可选：80 端口仅用于跳转到 443
+server {
+    listen      80;
+    server_name pjsk.internal.example;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen      443 ssl;
+    server_name pjsk.internal.example;
+
+    # --- 内部 CA 签发的证书（占位路径，位于仓库外）---
+    ssl_certificate     D:/pjsk/secrets/pjsk.internal.example.crt;
+    ssl_certificate_key D:/pjsk/secrets/pjsk.internal.example.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    # 上传上限：后端 maxPreviewFileSize=20MiB，留余量
+    client_max_body_size 25m;
+
+    # 静态前端根目录
+    root  D:/pjsk/frontend/dist;
+    index index.html;
+
+    # --- 1) 后端 API → 本机 Go 后端（仅监听 127.0.0.1:8080）---
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        # 用真实连接地址覆盖客户端伪造值（不是 $proxy_add_x_forwarded_for）。
+        # 后端需配置 TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout    60s;
+        proxy_send_timeout    60s;
+    }
+
+    # --- 健康检查 ---
+    location = /health {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # --- 2) SPA history 回退，其余路径交给静态前端 ---
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # --- 安全响应头 ---
+    add_header X-Content-Type-Options    nosniff                        always;
+    add_header X-Frame-Options           DENY                           always;
+    add_header Referrer-Policy           strict-origin-when-cross-origin always;
+
+    # 访问/错误日志写到仓库外目录（不进入 Git）
+    access_log D:/pjsk/secrets/logs/nginx-access.log;
+    error_log  D:/pjsk/secrets/logs/nginx-error.log;
+}
+
+# 说明：
+# - 未代理 PostgreSQL 5432，数据库不经反代暴露。
+# - 未代理 Vite 5173，正式访问只走 443。
+# - 当前项目无 WebSocket 需求，无需 Upgrade/Connection 特殊处理。
