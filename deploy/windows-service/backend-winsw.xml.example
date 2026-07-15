@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  示例文件，禁止直接用于生产环境。
+  EXAMPLE ONLY — DO NOT USE IN PRODUCTION AS-IS.
+
+  用途：以 WinSW 将 Go 后端 pjsk-backend.exe 注册为 Windows 服务。
+  复制后必须替换所有占位路径/值，并按所用 WinSW 版本的官方文档核对字段语义。
+  本文件不含任何真实密码、DSN、密钥或邮箱凭据。
+
+  密钥策略（见 docs/windows-service-deployment.md §3/§7）：
+    - 优先把 workingdirectory 设为存放受 ACL 保护的 secrets\backend.env 的目录，
+      后端会用 godotenv 从工作目录读取该 .env；真实密钥不写进本 XML。
+    - 本 XML 的 <env> 只放非敏感变量；如确需在此放密钥，该文件必须严格 ACL 保护且绝不进 Git。
+-->
+<service>
+  <id>pjsk-backend</id>
+  <name>PJSK Backend</name>
+  <description>PJSK Goods Manager Go backend (listens on 127.0.0.1:8080 only).</description>
+
+  <!-- 编译产物，见 docs 中 go build -trimpath -o .\bin\pjsk-backend.exe . -->
+  <executable>D:\pjsk\backend\bin\pjsk-backend.exe</executable>
+
+  <!-- 工作目录：放置受保护的 backend.env，后端从此目录读取 .env -->
+  <workingdirectory>D:\pjsk\secrets</workingdirectory>
+
+  <!-- 后端无需命令行参数；配置全部来自环境变量 / 工作目录下的 .env -->
+  <arguments></arguments>
+
+  <!-- 日志：交由 WinSW 落盘并按大小滚动（不写入敏感内容） -->
+  <logpath>D:\pjsk\runtime\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <!-- 自动启动 -->
+  <startmode>Automatic</startmode>
+
+  <!-- 停止超时：给进程留出退出时间后由 WinSW 终止 -->
+  <stoptimeout>15 sec</stoptimeout>
+
+  <!-- 失败重启 + 退避，避免数据库长期不可用时快速无限重启 -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <!--
+    服务依赖：PostgreSQL 应先就绪。若本机 PostgreSQL 服务名已知，可用 <depend> 声明，
+    但请按实际服务名替换占位（示例被注释，避免指向不存在的服务名）：
+    <depend>postgresql-x64-18</depend>
+  -->
+
+  <!-- 非敏感环境变量示例；真实密钥请走工作目录下的 backend.env，勿在此写明文 -->
+  <env name="APP_ENV" value="production"/>
+  <!--
+    <env name="SERVER_HOST" value="127.0.0.1"/>
+    <env name="TRUSTED_PROXY_CIDRS" value="127.0.0.1/32,::1/128"/>
+    <env name="ADMIN_COOKIE_SECURE" value="true"/>
+    真实的 DATABASE_*、RECOVERY_EMAIL_* / QUERY_CODE_RECOVERY_HMAC_KEY 等密钥
+    应放入受 ACL 保护的 D:\pjsk\secrets\backend.env，不写入本文件。
+  -->
+</service>

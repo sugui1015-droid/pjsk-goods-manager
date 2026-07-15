@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  示例文件，禁止直接用于生产环境。
+  EXAMPLE ONLY — DO NOT USE IN PRODUCTION AS-IS.
+
+  用途：以 WinSW 将 Caddy 注册为 Windows 服务，提供 HTTPS 443、静态前端与反向代理。
+  Caddyfile 见 deploy/caddy/Caddyfile.example（本示例与其对齐）。
+  复制后必须替换所有占位路径，并按所用 WinSW / Caddy 版本官方文档核对。
+  本文件不含任何真实域名、证书或密钥；Caddy 可执行文件需自行安装（本仓库不下载）。
+-->
+<service>
+  <id>pjsk-caddy</id>
+  <name>PJSK Caddy</name>
+  <description>Caddy reverse proxy for PJSK: HTTPS 443, static frontend, proxy /api and /health to 127.0.0.1:8080.</description>
+
+  <!-- 占位：Caddy 可执行文件路径（自行安装，勿提交二进制） -->
+  <executable>D:\pjsk\deploy\caddy\caddy.exe</executable>
+
+  <!-- 工作目录：Caddyfile 与证书/数据所在目录 -->
+  <workingdirectory>D:\pjsk\deploy\caddy</workingdirectory>
+
+  <!-- 运行 Caddyfile（复制 Caddyfile.example 并替换占位后得到 Caddyfile） -->
+  <arguments>run --config D:\pjsk\deploy\caddy\Caddyfile --adapter caddyfile</arguments>
+
+  <logpath>D:\pjsk\runtime\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <startmode>Automatic</startmode>
+  <stoptimeout>15 sec</stoptimeout>
+
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <!--
+    Caddy 可先于后端启动；后端未就绪时 API 暂时返回代理错误，静态前端不受影响。
+    Caddy 本地 CA（tls internal）数据默认存放在其数据目录；确保服务账户对该目录可写。
+  -->
+</service>
