@@ -7,17 +7,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 
 	"pjsk/backend/internal/recoveryemail"
 	"pjsk/backend/internal/recoveryemailverification"
+	"pjsk/backend/internal/testdb"
 	"pjsk/backend/internal/users"
 )
 
@@ -218,17 +217,9 @@ func TestPostgresQueryCodeRecoveryAuditFailureRollsBack(t *testing.T) {
 
 func newRecoveryFixture(t *testing.T) *recoveryFixture {
 	t.Helper()
-	_ = godotenv.Load("../.env")
-	_ = godotenv.Load("../../.env")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatal("connect recovery test database")
-	}
-	t.Cleanup(pool.Close)
+	// Own throwaway database; no backend/.env, no DATABASE_URL.
+	pool := testdb.New(t, "querycoderecovery")
+	var err error
 	f := &recoveryFixture{t: t, pool: pool, prefix: "TEST_QUERY_CODE_RECOVERY_" + time.Now().Format("20060102150405.000000000"), startedAt: time.Now().Add(-time.Second)}
 	f.cleanup()
 	t.Cleanup(f.cleanup)

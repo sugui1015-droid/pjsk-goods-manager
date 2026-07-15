@@ -6,16 +6,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 
 	queryapi "pjsk/backend/internal/query"
+	"pjsk/backend/internal/testdb"
 )
 
 func TestPostgresAdminQueryAccountLifecycle(t *testing.T) {
@@ -208,27 +207,15 @@ func TestAdminQueryAccountRouteRejectsRegularQuerySession(t *testing.T) {
 	}
 }
 
+// newUsersTestPool returns a pool for this test's own throwaway database, with
+// the schema built by the real migration runner.
+//
+// It no longer loads backend/.env or reads DATABASE_URL (which pointed at the
+// production database), and the `alter table users add column if not exists`
+// it used to run is gone: migrations own the schema.
 func newUsersTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	_ = godotenv.Load("../.env")
-	_ = godotenv.Load("../../.env")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect database: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(), `
-		alter table users
-			add column if not exists query_code_updated_at timestamptz,
-			add column if not exists last_query_login_at timestamptz
-	`); err != nil {
-		t.Fatalf("ensure user query account columns: %v", err)
-	}
-	t.Cleanup(func() { pool.Close() })
-	return pool
+	return testdb.New(t, "users")
 }
 
 func insertQueryAccountUser(t *testing.T, pool *pgxpool.Pool, cn string, queryCode string) string {

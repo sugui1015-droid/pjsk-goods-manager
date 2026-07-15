@@ -7,15 +7,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"pjsk/backend/internal/config"
+	"pjsk/backend/internal/testdb"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -68,59 +67,18 @@ func TestAdminExportExcelRoutesRequireAuthAndReturnXLSX(t *testing.T) {
 	}
 }
 
+// newAPITestPool returns a pool for this test's own throwaway database, with
+// the schema built by the real migration runner.
+//
+// It used to load the real backend/.env and connect to DATABASE_URL — which
+// pointed at the production database — and then create the
+// admin_auth_audit_events table from its own copy of 0019's CREATE TABLE. That
+// copy had no CREATE INDEX statements and wrote no schema_migrations row, which
+// is exactly the unregistered table found in production. The DDL below is gone
+// on purpose: migrations own the schema.
 func newAPITestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	_ = godotenv.Load("../.env")
-	_ = godotenv.Load("../../.env")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect database: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(), `
-	alter table users
-		add column if not exists query_code_updated_at timestamptz,
-		add column if not exists last_query_login_at timestamptz
-`); err != nil {
-		t.Fatalf("ensure user query account columns: %v", err)
-	}
-	if _, err := pool.Exec(context.Background(), `
-	create table if not exists admin_auth_audit_events (
-		id uuid primary key default gen_random_uuid(),
-		event_type text not null check (event_type in (
-			'admin_login_succeeded',
-			'admin_login_failed',
-			'admin_login_rate_limited',
-			'admin_logout_succeeded'
-		)),
-		occurred_at timestamptz not null default now(),
-		admin_id uuid references admins(id) on delete set null,
-		username_normalized text not null check (char_length(username_normalized) <= 128),
-		client_ip text not null check (char_length(client_ip) <= 128),
-		result text not null check (result in ('success', 'failure')),
-		reason_code text not null check (reason_code in (
-			'none',
-			'invalid_credentials',
-			'account_disabled',
-			'rate_limited',
-			'database_error',
-			'audit_write_error'
-		)),
-		user_agent_summary text check (user_agent_summary is null or char_length(user_agent_summary) <= 256),
-		created_at timestamptz not null default now(),
-		constraint admin_auth_audit_reason_result check (
-			(result = 'success' and reason_code = 'none')
-			or (result = 'failure' and reason_code <> 'none')
-		)
-	)
-`); err != nil {
-		t.Fatalf("ensure admin auth audit table: %v", err)
-	}
-	t.Cleanup(func() { pool.Close() })
-	return pool
+	return testdb.New(t, "api")
 }
 
 func loginAPITestAdmin(t *testing.T, pool *pgxpool.Pool, router http.Handler, prefix string) *http.Cookie {

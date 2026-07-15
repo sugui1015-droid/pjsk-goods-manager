@@ -2,12 +2,12 @@ package query
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
+	"pjsk/backend/internal/testdb"
+
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 )
 
 // TestPostgresUserPaymentsCarryMatchingItems verifies against a real
@@ -150,20 +150,12 @@ func createQueryPaymentFixture(t *testing.T, pool *pgxpool.Pool, prefix string) 
 	return userID
 }
 
+// newQueryTestPool returns a pool for this test's own throwaway database.
+// It no longer loads backend/.env or reads DATABASE_URL, which pointed at the
+// production database.
 func newQueryTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	_ = godotenv.Load("../.env")
-	_ = godotenv.Load("../../.env")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect database: %v", err)
-	}
-	t.Cleanup(func() { pool.Close() })
-	return pool
+	return testdb.New(t, "query")
 }
 
 func cleanupQueryFixture(t *testing.T, pool *pgxpool.Pool, prefix string) {

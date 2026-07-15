@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"pjsk/backend/internal/testdb"
+
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 )
 
 type paymentDBFixture struct {
@@ -457,75 +457,26 @@ func TestPostgresVoidPaymentConcurrentOnlyOneSucceeds(t *testing.T) {
 	fixture.assertOrderAndItems(t, data.OrderNo, "submitted", map[string]string{data.ItemAID: "unpaid"})
 }
 
+// newPaymentDBFixture returns a fixture on this test's own throwaway database,
+// with the schema built by the real migration runner.
+//
+// It used to load the real backend/.env and connect to DATABASE_URL — which
+// pointed at the production database — and then run applyVoidMigration: a
+// verbatim copy of migrations 0010 and 0011 that dropped and recreated the
+// production payments constraints and ran an unscoped
+// `update payments set fee_amount = 0, ...`. Both the copied DDL and that
+// helper are gone on purpose: migrations own the schema.
 func newPaymentDBFixture(t *testing.T) paymentDBFixture {
 	t.Helper()
-	_ = godotenv.Load("../../.env", "../.env", ".env")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatalf("connect database: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("database is not available: %v", err)
-	}
+	pool := testdb.New(t, "payments")
 	fixture := paymentDBFixture{
 		pool:   pool,
 		store:  NewPostgresStore(pool),
 		prefix: fmt.Sprintf("PAYMENT_VOID_TEST_%d", time.Now().UnixNano()),
 	}
-	fixture.applyVoidMigration(t)
 	fixture.adminID = fixture.createAdmin(t)
-	t.Cleanup(func() {
-		fixture.cleanup(t)
-		pool.Close()
-	})
+	t.Cleanup(func() { fixture.cleanup(t) })
 	return fixture
-}
-
-func (f paymentDBFixture) applyVoidMigration(t *testing.T) {
-	t.Helper()
-	_, err := f.pool.Exec(context.Background(), `
-		alter table payments
-			add column if not exists voided_at timestamptz,
-			add column if not exists voided_by_admin_id uuid references admins(id) on delete set null,
-			add column if not exists void_reason text;
-		alter table payments drop constraint if exists payments_status_check;
-		alter table payments add constraint payments_status_check
-			check (status in ('submitted', 'approved', 'rejected', 'cancelled', 'voided'));
-	`)
-	if err != nil {
-		t.Fatalf("apply void migration: %v", err)
-	}
-	_, err = f.pool.Exec(context.Background(), `
-		alter table payments
-			add column if not exists fee_amount numeric(12,2),
-			add column if not exists payable_amount numeric(12,2);
-		update payments
-		set
-			fee_amount = 0,
-			payable_amount = submitted_amount
-		where fee_amount is null
-		   or payable_amount is null;
-		alter table payments
-			alter column fee_amount set not null,
-			alter column payable_amount set not null;
-		alter table payments
-			drop constraint if exists payments_fee_amount_check,
-			drop constraint if exists payments_payable_amount_check;
-		alter table payments
-			add constraint payments_fee_amount_check
-				check (fee_amount >= 0),
-			add constraint payments_payable_amount_check
-				check (payable_amount = submitted_amount + fee_amount);
-	`)
-	if err != nil {
-		t.Fatalf("apply fee migration: %v", err)
-	}
 }
 
 func (f paymentDBFixture) createAdmin(t *testing.T) string {

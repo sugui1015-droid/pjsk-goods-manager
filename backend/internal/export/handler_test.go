@@ -8,15 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"pjsk/backend/internal/payments"
+	"pjsk/backend/internal/testdb"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 )
 
 // TestOrderItemsCSVFiltersByIndependentRoleAndCategory confirms 谷子种类
@@ -348,20 +347,12 @@ func readXLSXFiles(t *testing.T, body []byte) map[string]string {
 	return files
 }
 
+// newExportTestPool returns a pool for this test's own throwaway database.
+// It no longer loads backend/.env or reads DATABASE_URL, which pointed at the
+// production database.
 func newExportTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	_ = godotenv.Load("../.env")
-	_ = godotenv.Load("../../.env")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect database: %v", err)
-	}
-	t.Cleanup(func() { pool.Close() })
-	return pool
+	return testdb.New(t, "export")
 }
 
 func cleanupExportFixture(t *testing.T, pool *pgxpool.Pool, prefix string) {

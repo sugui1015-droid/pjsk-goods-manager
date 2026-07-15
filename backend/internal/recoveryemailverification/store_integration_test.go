@@ -5,16 +5,15 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 
 	"pjsk/backend/internal/recoveryemail"
+	"pjsk/backend/internal/testdb"
 	"pjsk/backend/internal/users"
 )
 
@@ -235,17 +234,9 @@ func TestPostgresRecoveryEmailVerificationConcurrencyAndRollback(t *testing.T) {
 
 func newVerificationFixture(t *testing.T) *verificationFixture {
 	t.Helper()
-	_ = godotenv.Load("../.env")
-	_ = godotenv.Load("../../.env")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect database: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	// Own throwaway database; no backend/.env, no DATABASE_URL.
+	pool := testdb.New(t, "recoveryemailverification")
+	var err error
 	prefix := "TEST_RECOVERY_VERIFY_" + time.Now().Format("20060102150405.000000000")
 	fixture := &verificationFixture{t: t, pool: pool, prefix: prefix}
 	fixture.cleanup()
