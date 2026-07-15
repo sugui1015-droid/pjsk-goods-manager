@@ -12,7 +12,17 @@ param(
     [int]$Port = 5432,
     [string]$Username,
     [string]$MigrationsDirectory,
-    [string]$BackupFile
+    [string]$BackupFile,
+    # 'current' (default) verifies the backup against the repository's migrations.
+    # 'pre-migration' verifies a backup deliberately taken BEFORE a pending
+    # migration, from a database that is behind the repository. It is only
+    # selectable by ALSO supplying an explicit expected migration set, so a
+    # backup can never silently pass just because it is out of date.
+    [ValidateSet('current', 'pre-migration')]
+    [string]$ValidationPurpose = 'current',
+    [string]$ExpectedMigrationSetFile,
+    [int]$ExpectedMigrationCount,
+    [string]$ExpectedMigrationMax
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,16 +49,58 @@ if (-not (Test-Path -LiteralPath $psql)) {
     Fail "PostgreSQL tool not found: $psql"
 }
 
-# Expected migration state is derived from the repository's migration files, not
-# a literal, so it stays correct when 0020 and later land. A missing/invalid
+# --- expected migration set -------------------------------------------------
+#
+# Default ('current'): derived from the repository's migration files, never a
+# literal, so it stays correct when 0020 and later land. A missing/invalid
 # migrations directory is a hard failure — never a fallback to a fixed number.
-if (-not $MigrationsDirectory) {
-    $MigrationsDirectory = Resolve-RepositoryMigrationsDirectory -ScriptDirectory $PSScriptRoot
-}
-try {
-    $migrationFacts = Get-MigrationFacts -MigrationsDirectory $MigrationsDirectory
-} catch {
-    Fail "Could not determine expected migrations from ${MigrationsDirectory}: $($_.Exception.Message)"
+#
+# 'pre-migration': the caller must supply the expected set explicitly. It is
+# never inferred from the restored database — inferring it from the very
+# database under test would make the check vacuous.
+$expectedMigrationSetSha256 = ''
+
+if ($ValidationPurpose -eq 'pre-migration') {
+    if (-not $ExpectedMigrationSetFile) {
+        Fail "ValidationPurpose 'pre-migration' requires -ExpectedMigrationSetFile; the expected set is never inferred."
+    }
+    if (-not $PSBoundParameters.ContainsKey('ExpectedMigrationCount')) {
+        Fail "ValidationPurpose 'pre-migration' requires -ExpectedMigrationCount."
+    }
+    if (-not $ExpectedMigrationMax) {
+        Fail "ValidationPurpose 'pre-migration' requires -ExpectedMigrationMax."
+    }
+
+    $setReason = ''
+    $expectedSet = Read-ExpectedMigrationSetFile -Path $ExpectedMigrationSetFile -Reason ([ref]$setReason)
+    if ($null -eq $expectedSet) {
+        Fail "Expected migration set rejected: $setReason"
+    }
+    # The two scalars must agree with the file: a mismatch means the caller's
+    # intent and the supplied set disagree, which must never be resolved silently.
+    if ([int]$ExpectedMigrationCount -ne [int]$expectedSet.Count) {
+        Fail "-ExpectedMigrationCount ($ExpectedMigrationCount) does not match the expected migration set file ($($expectedSet.Count) entries)."
+    }
+    if ($ExpectedMigrationMax -ne $expectedSet.MaxVersion) {
+        Fail "-ExpectedMigrationMax ($ExpectedMigrationMax) does not match the expected migration set file (max $($expectedSet.MaxVersion))."
+    }
+    $migrationFacts = $expectedSet
+    $expectedMigrationSetSha256 = $expectedSet.Sha256
+    Write-Output "== validation purpose: pre-migration (explicit baseline) =="
+    Write-Output ("  expected migrations : {0} entries, max {1}" -f $expectedSet.Count, $expectedSet.MaxVersion)
+    Write-Output ("  expected set file   : {0}" -f ([System.IO.Path]::GetFileName($ExpectedMigrationSetFile)))
+} else {
+    if ($ExpectedMigrationSetFile -or $PSBoundParameters.ContainsKey('ExpectedMigrationCount') -or $ExpectedMigrationMax) {
+        Fail "-ExpectedMigrationSetFile/-ExpectedMigrationCount/-ExpectedMigrationMax are only valid with -ValidationPurpose pre-migration."
+    }
+    if (-not $MigrationsDirectory) {
+        $MigrationsDirectory = Resolve-RepositoryMigrationsDirectory -ScriptDirectory $PSScriptRoot
+    }
+    try {
+        $migrationFacts = Get-MigrationFacts -MigrationsDirectory $MigrationsDirectory
+    } catch {
+        Fail "Could not determine expected migrations from ${MigrationsDirectory}: $($_.Exception.Message)"
+    }
 }
 
 # --- optional backup binding: only when -BackupFile is supplied do we publish a
@@ -114,6 +166,16 @@ function Invoke-Scalar([string]$Database, [string]$Query) {
     return "$result".Trim()
 }
 
+# Multi-row queries must not go through Invoke-Scalar: "$array" joins with
+# spaces, which would collapse a version list into one unusable blob.
+function Invoke-Rows([string]$Database, [string]$Query) {
+    $result = & $psql @connectionArguments '--dbname', $Database, '-X', '-A', '-t', '-c', $Query
+    if ($LASTEXITCODE -ne 0) {
+        Fail "query failed against $Database"
+    }
+    return @($result | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne '' })
+}
+
 $keyTables = @(
     'schema_migrations', 'users', 'orders', 'order_items', 'payments',
     'payment_items', 'admins', 'admin_sessions', 'query_sessions',
@@ -129,6 +191,9 @@ function Get-DatabaseProfile([string]$Database) {
     $profile = [ordered]@{}
     $profile.migrationMax = Invoke-Scalar $Database "select coalesce(max(version), '(none)') from schema_migrations"
     $profile.migrationCount = Invoke-Scalar $Database "select count(*) from schema_migrations"
+    # The FULL version set, not just count and max: a database with the same
+    # count and max but a different set in between must not pass.
+    $profile.migrationVersions = Invoke-Rows $Database "select version from schema_migrations order by version"
     $profile.tableCount = Invoke-Scalar $Database "select count(*) from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'"
     $profile.primaryKeys = Invoke-Scalar $Database "select count(*) from pg_constraint c join pg_class r on r.oid = c.conrelid join pg_namespace n on n.oid = r.relnamespace where n.nspname = 'public' and c.contype = 'p'"
     $profile.foreignKeys = Invoke-Scalar $Database "select count(*) from pg_constraint c join pg_class r on r.oid = c.conrelid join pg_namespace n on n.oid = r.relnamespace where n.nspname = 'public' and c.contype = 'f'"
@@ -172,8 +237,16 @@ foreach ($table in $keyTables) {
     Write-Output ("  rows {0,-40} : {1}" -f $table, $restored.rowCounts[$table])
 }
 
-Assert ($restored.migrationMax -eq $migrationFacts.MaxVersion) "maximum migration is $($migrationFacts.MaxVersion) (from $($migrationFacts.Count) repository migration files)"
+$expectedSource = if ($ValidationPurpose -eq 'pre-migration') { 'explicit pre-migration baseline' } else { 'repository migration files' }
+Assert ($restored.migrationMax -eq $migrationFacts.MaxVersion) "maximum migration is $($migrationFacts.MaxVersion) (from the ${expectedSource}: $($migrationFacts.Count) entries)"
 Assert ([int]$restored.migrationCount -eq [int]$migrationFacts.Count) "schema_migrations has the expected $($migrationFacts.Count) entries"
+
+# Two-way full set comparison. Count and max alone would let a database with the
+# same count and max but a different set in between pass.
+$missingInRestored = @($migrationFacts.Names | Where-Object { $_ -notin $restored.migrationVersions })
+$unknownInRestored = @($restored.migrationVersions | Where-Object { $_ -notin $migrationFacts.Names })
+Assert ($missingInRestored.Count -eq 0) "no expected migration is missing from the restored database$(if ($missingInRestored.Count) { ' (missing: ' + ($missingInRestored -join ', ') + ')' })"
+Assert ($unknownInRestored.Count -eq 0) "the restored database contains no migration outside the expected set$(if ($unknownInRestored.Count) { ' (unknown: ' + ($unknownInRestored -join ', ') + ')' })"
 foreach ($table in $keyTables) {
     Assert ($restored.rowCounts[$table] -ne 'MISSING') "table $table exists"
 }
@@ -230,7 +303,11 @@ if ($publishValidation) {
         -ValidatorVersion $validatorVersion `
         -MigrationCount ([int]$restored.migrationCount) `
         -MigrationMax "$($restored.migrationMax)" `
-        -IsolatedTestBackup $backupIsolated
+        -IsolatedTestBackup $backupIsolated `
+        -ValidationPurpose $ValidationPurpose `
+        -ExpectedMigrationCount ([int]$migrationFacts.Count) `
+        -ExpectedMigrationMax "$($migrationFacts.MaxVersion)" `
+        -ExpectedMigrationSetSha256 $expectedMigrationSetSha256
 
     $publishReason = ''
     $published = Publish-BackupValidation `

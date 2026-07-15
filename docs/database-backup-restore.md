@@ -100,6 +100,38 @@ $target = 'pjsk_restore_test_' + (Get-Date -Format 'yyyyMMdd_HHmmss')
 
 **这一步是保留策略的前提**：`Remove-ExpiredPostgresBackups.ps1` 只对 `verified` 的备份做分层保留，而 `verified` 需要 dump、metadata、validation 三者哈希互相绑定（并且报告需带 `-VerifyHash`）。没有 validation 的备份一律 `unverified` → 永久 Protected，即保留策略不会回收任何空间。
 
+### 升级前基线验证（仓库领先正式库时）
+
+当仓库的迁移比目标库新（例如正式库停在 `0018`、仓库已到 `0019`），默认验证会**正确地失败**——它要求恢复库与仓库迁移完全一致。要为"运行新迁移之前"留一份可验证的回滚基线，必须**显式**声明预期基线，绝不会因为库落后就被静默接受：
+
+```powershell
+# 1. 只读导出目标库当前迁移集合到仓库外的临时文件
+#    （绝不手工誊写迁移名；也绝不从恢复库自身推导）
+$baseline = 'D:\<仓库外临时目录>\production-baseline-migrations.txt'
+
+# 2. 显式声明基线；三者必须互相一致，否则拒绝
+./scripts/database/Test-PostgresBackup.ps1 `
+    -RestoredDatabase $target `
+    -BackupFile 'D:\...\pjsk-<stamp>.dump' `
+    -ValidationPurpose pre-migration `
+    -ExpectedMigrationSetFile $baseline `
+    -ExpectedMigrationCount 18 `
+    -ExpectedMigrationMax '0018_query_code_email_recovery.sql' `
+    -Username postgres
+```
+
+规则：
+
+- **默认 `-ValidationPurpose current` 不变**：恢复库迁移集合必须与仓库当前迁移完全一致。**没有"忽略迁移差异"或"允许任意落后"的开关。**
+- `pre-migration` 必须**同时**提供 `-ExpectedMigrationSetFile`、`-ExpectedMigrationCount`、`-ExpectedMigrationMax`；缺一即拒绝。**期望集合永不从被验证的库推导**——否则验证毫无意义。
+- 两个标量必须与集合文件一致，不一致即拒绝（不静默取其一）。
+- 期望集合必须：非空、无重复、文件名合法、严格升序；违反任一即拒绝。
+- **两种模式都做完整文件名集合双向比对**，不只比数量与最大值——数量与最大值相同但中间集合不同的库必须失败。
+- validation 记录 `validationPurpose`、`expectedMigrationCount`、`expectedMigrationMax` 与期望集合的 SHA-256。
+- 正式库备份的 `isolatedTestBackup` 仍为 `false`：**恢复目标是隔离库不代表来源备份是演练备份**，两者不可混淆。
+
+> **已知问题（保留策略根目录）**：`_RetentionCommon.ps1` 的根目录守卫会拒绝任何路径中含 `\PostgreSQL` 的目录（用于挡住 PostgreSQL 安装/数据目录），因此本文上面推荐的 `D:\PJSK-Backups\PostgreSQL` **会被保留策略拒绝扫描**（备份/恢复/验证本身不受影响）。在该守卫收敛之前，若需要保留策略扫描，请选用不含 `PostgreSQL` 字样的备份根目录。
+
 行为要点：
 
 - 只有**全部检查通过**才发布；先写 `.partial`，回读校验后原子改名。

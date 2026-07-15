@@ -54,8 +54,26 @@ class MockPsql {
             if (args[i] == "-c" && i + 1 < args.Length) { q = args[i + 1]; break; }
         if (q == null) return 1;
         bool broken = Environment.GetEnvironmentVariable("PJSK_MOCK_BREAK") == "1";
-        if (q.Contains("max(version)")) { Console.WriteLine("0019_admin_auth_audit_events.sql"); return 0; }
-        if (q.Contains("count(*) from schema_migrations")) { Console.WriteLine("19"); return 0; }
+        // PJSK_MOCK_MIGRATIONS lets a test present a database that is behind the
+        // repository (e.g. production at 0018) without a real PostgreSQL.
+        string set = Environment.GetEnvironmentVariable("PJSK_MOCK_MIGRATIONS");
+        if (string.IsNullOrEmpty(set)) {
+            set = "0001_core_tables.sql,0002_import_tracking.sql,0003_admin_auth.sql,0004_import_confirm.sql,"
+                + "0005_import_history.sql,0005_product_series.sql,0007_import_revert.sql,0008_query_sessions.sql,"
+                + "0009_admin_payments.sql,0010_payment_voids.sql,0011_payment_fee_fields.sql,"
+                + "0012_normalize_payment_methods.sql,0013_cn_merge.sql,0014_user_query_account_admin.sql,"
+                + "0015_query_code_bind_tokens.sql,0016_user_recovery_email.sql,"
+                + "0017_recovery_email_verification_codes.sql,0018_query_code_email_recovery.sql,"
+                + "0019_admin_auth_audit_events.sql";
+        }
+        string[] versions = set.Split(',');
+        Array.Sort(versions, StringComparer.Ordinal);
+        if (q.Contains("version from schema_migrations")) {
+            foreach (string v in versions) Console.WriteLine(v);
+            return 0;
+        }
+        if (q.Contains("max(version)")) { Console.WriteLine(versions[versions.Length - 1]); return 0; }
+        if (q.Contains("count(*) from schema_migrations")) { Console.WriteLine(versions.Length.ToString()); return 0; }
         if (q.Contains("information_schema.tables")) { Console.WriteLine("21"); return 0; }
         if (q.Contains("contype = 'p'")) { Console.WriteLine("21"); return 0; }
         if (q.Contains("contype = 'f'")) { Console.WriteLine("13"); return 0; }
@@ -255,6 +273,145 @@ class MockPsql {
     Check (@(Get-ChildItem -Path $plainDir -File -ErrorAction SilentlyContinue).Count -eq 0) "without -BackupFile nothing is written"
 
     # =====================================================================
+    # 7b. Pre-migration baseline mode: verifying a backup taken from a database
+    #     that is deliberately BEHIND the repository (production at 0018 while
+    #     the repository is at 0019). This must never be silently available.
+    # =====================================================================
+    $baselineSet18 = @(
+        '0001_core_tables.sql', '0002_import_tracking.sql', '0003_admin_auth.sql', '0004_import_confirm.sql',
+        '0005_import_history.sql', '0005_product_series.sql', '0007_import_revert.sql', '0008_query_sessions.sql',
+        '0009_admin_payments.sql', '0010_payment_voids.sql', '0011_payment_fee_fields.sql',
+        '0012_normalize_payment_methods.sql', '0013_cn_merge.sql', '0014_user_query_account_admin.sql',
+        '0015_query_code_bind_tokens.sql', '0016_user_recovery_email.sql',
+        '0017_recovery_email_verification_codes.sql', '0018_query_code_email_recovery.sql'
+    )
+    $mock18 = ($baselineSet18 -join ',')
+
+    function New-SetFile {
+        param([string]$Name, [string[]]$Lines)
+        $p = Join-Path $testRoot $Name
+        Set-Content -LiteralPath $p -Value $Lines -Encoding ascii
+        return $p
+    }
+
+    # --- default mode must REJECT an 18-migration database ---
+    $behindDir = Join-Path $testRoot 'behind-default'
+    $fxBehind = New-BackupSetFixture -Dir $behindDir -Base 'pjsk-behind' -Isolated $false
+    $env:PJSK_MOCK_MIGRATIONS = $mock18
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm1', '-PostgresBin', $mockBin, '-BackupFile', $fxBehind.Dump)
+    Check ($result.ExitCode -ne 0) "default mode REJECTS a database behind the repository (18 vs 19)"
+    Check (-not (Test-Path -LiteralPath (Join-Path $behindDir 'pjsk-behind.validation.json'))) "default mode publishes no validation for a behind database"
+
+    # --- pre-migration mode with an explicit 18-entry baseline PASSES ---
+    $pmDir = Join-Path $testRoot 'pre-migration'
+    $fxPm = New-BackupSetFixture -Dir $pmDir -Base 'pjsk-pm' -Isolated $false
+    $setFile18 = New-SetFile -Name 'baseline18.txt' -Lines $baselineSet18
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm2', '-PostgresBin', $mockBin, '-BackupFile', $fxPm.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', $setFile18,
+        '-ExpectedMigrationCount', '18', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -eq 0) "pre-migration mode with an explicit 18-entry baseline PASSES"
+    $vpm = $null
+    $pmValidation = Join-Path $pmDir 'pjsk-pm.validation.json'
+    if (Test-Path -LiteralPath $pmValidation) { $vpm = Get-Content -LiteralPath $pmValidation -Raw | ConvertFrom-Json }
+    Check ($null -ne $vpm) "pre-migration mode publishes a final validation"
+    Check ($vpm -and $vpm.validationPurpose -eq 'pre-migration') "validation records validationPurpose = pre-migration"
+    Check ($vpm -and $vpm.expectedMigrationCount -eq 18) "validation records expectedMigrationCount = 18"
+    Check ($vpm -and $vpm.expectedMigrationMax -eq '0018_query_code_email_recovery.sql') "validation records expectedMigrationMax = 0018_query_code_email_recovery.sql"
+    Check ($vpm -and $vpm.migrationCount -eq 18) "validation records the verified migrationCount = 18"
+    Check ($vpm -and $vpm.expectedMigrationSetSha256) "validation records the expected set SHA-256"
+    Check ($vpm -and $vpm.isolatedTestBackup -eq $false) "a pre-migration backup of production is NOT an isolated test backup"
+
+    # --- count alone is not enough: same count/max, different set in between ---
+    $swapped = @($baselineSet18 | Where-Object { $_ -ne '0007_import_revert.sql' }) + '0006_never_existed.sql'
+    $swapped = @($swapped | Sort-Object)
+    $swapDir = Join-Path $testRoot 'swapped-set'
+    $fxSwap = New-BackupSetFixture -Dir $swapDir -Base 'pjsk-swap' -Isolated $false
+    $setFileSwapped = New-SetFile -Name 'swapped18.txt' -Lines $swapped
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm3', '-PostgresBin', $mockBin, '-BackupFile', $fxSwap.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', $setFileSwapped,
+        '-ExpectedMigrationCount', '18', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -ne 0) "same count and max but a different set in between FAILS (full set is compared)"
+    Check (-not (Test-Path -LiteralPath (Join-Path $swapDir 'pjsk-swap.validation.json'))) "a mismatched set publishes no validation"
+
+    # --- malformed expected sets are rejected ---
+    $dupDir = Join-Path $testRoot 'dup-set'
+    $fxDup = New-BackupSetFixture -Dir $dupDir -Base 'pjsk-dup' -Isolated $false
+    $setFileDup = New-SetFile -Name 'dup.txt' -Lines ($baselineSet18 + '0018_query_code_email_recovery.sql')
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm4', '-PostgresBin', $mockBin, '-BackupFile', $fxDup.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', $setFileDup,
+        '-ExpectedMigrationCount', '19', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -ne 0) "an expected set containing a duplicate is rejected"
+
+    $badNameDir = Join-Path $testRoot 'badname-set'
+    $fxBadName = New-BackupSetFixture -Dir $badNameDir -Base 'pjsk-badname' -Isolated $false
+    $setFileBadName = New-SetFile -Name 'badname.txt' -Lines (@('not-a-migration.sql') + $baselineSet18)
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm5', '-PostgresBin', $mockBin, '-BackupFile', $fxBadName.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', $setFileBadName,
+        '-ExpectedMigrationCount', '19', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -ne 0) "an expected set containing an invalid migration file name is rejected"
+
+    $unsortedDir = Join-Path $testRoot 'unsorted-set'
+    $fxUnsorted = New-BackupSetFixture -Dir $unsortedDir -Base 'pjsk-unsorted' -Isolated $false
+    $reversed = @($baselineSet18)
+    [Array]::Reverse($reversed)
+    $setFileUnsorted = New-SetFile -Name 'unsorted.txt' -Lines $reversed
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm6', '-PostgresBin', $mockBin, '-BackupFile', $fxUnsorted.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', $setFileUnsorted,
+        '-ExpectedMigrationCount', '18', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -ne 0) "an out-of-order expected set is rejected"
+
+    $missingFileDir = Join-Path $testRoot 'missing-set'
+    $fxMissingFile = New-BackupSetFixture -Dir $missingFileDir -Base 'pjsk-missingset' -Isolated $false
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm7', '-PostgresBin', $mockBin, '-BackupFile', $fxMissingFile.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', (Join-Path $testRoot 'no-such-set.txt'),
+        '-ExpectedMigrationCount', '18', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -ne 0) "a missing expected set file is rejected"
+
+    # --- the scalars must agree with the set file ---
+    $mismatchDir = Join-Path $testRoot 'scalar-mismatch'
+    $fxMismatch = New-BackupSetFixture -Dir $mismatchDir -Base 'pjsk-mismatch' -Isolated $false
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm8', '-PostgresBin', $mockBin, '-BackupFile', $fxMismatch.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', $setFile18,
+        '-ExpectedMigrationCount', '17', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -ne 0) "-ExpectedMigrationCount disagreeing with the set file is rejected"
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm9', '-PostgresBin', $mockBin, '-BackupFile', $fxMismatch.Dump,
+        '-ValidationPurpose', 'pre-migration', '-ExpectedMigrationSetFile', $setFile18,
+        '-ExpectedMigrationCount', '18', '-ExpectedMigrationMax', '0017_recovery_email_verification_codes.sql')
+    Check ($result.ExitCode -ne 0) "-ExpectedMigrationMax disagreeing with the set file is rejected"
+
+    # --- pre-migration requires ALL the explicit arguments ---
+    $incompleteDir = Join-Path $testRoot 'incomplete-args'
+    $fxIncomplete = New-BackupSetFixture -Dir $incompleteDir -Base 'pjsk-incomplete' -Isolated $false
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm10', '-PostgresBin', $mockBin, '-BackupFile', $fxIncomplete.Dump,
+        '-ValidationPurpose', 'pre-migration')
+    Check ($result.ExitCode -ne 0) "pre-migration without an explicit baseline is refused (never inferred)"
+
+    # --- baseline arguments are refused outside pre-migration mode ---
+    $env:PJSK_MOCK_MIGRATIONS = ''
+    $strayDir = Join-Path $testRoot 'stray-args'
+    $fxStray = New-BackupSetFixture -Dir $strayDir -Base 'pjsk-stray' -Isolated $false
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm11', '-PostgresBin', $mockBin, '-BackupFile', $fxStray.Dump,
+        '-ExpectedMigrationSetFile', $setFile18, '-ExpectedMigrationCount', '18', '-ExpectedMigrationMax', '0018_query_code_email_recovery.sql')
+    Check ($result.ExitCode -ne 0) "baseline arguments outside pre-migration mode are refused"
+
+    # --- an invalid purpose is refused by the parameter set itself ---
+    $badPurposeDir = Join-Path $testRoot 'bad-purpose'
+    $fxBadPurpose = New-BackupSetFixture -Dir $badPurposeDir -Base 'pjsk-badpurpose' -Isolated $false
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm12', '-PostgresBin', $mockBin, '-BackupFile', $fxBadPurpose.Dump,
+        '-ValidationPurpose', 'ignore-migrations')
+    Check ($result.ExitCode -ne 0) "an unknown ValidationPurpose is refused"
+
+    # --- default validation is not mislabelled as pre-migration ---
+    $defDir = Join-Path $testRoot 'default-purpose'
+    $fxDef = New-BackupSetFixture -Dir $defDir -Base 'pjsk-def' -Isolated $false
+    $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm13', '-PostgresBin', $mockBin, '-BackupFile', $fxDef.Dump)
+    Check ($result.ExitCode -eq 0) "default mode still passes against the repository's 19 migrations"
+    $vdef = Get-Content -LiteralPath (Join-Path $defDir 'pjsk-def.validation.json') -Raw | ConvertFrom-Json
+    Check ($vdef.validationPurpose -eq 'current') "default validation records validationPurpose = current, not pre-migration"
+    Check ($vdef.expectedMigrationCount -eq 19 -and $vdef.expectedMigrationMax -eq '0019_admin_auth_audit_events.sql') "default validation records the repository's 19 / 0019 expectation"
+    Remove-Item Env:\PJSK_MOCK_MIGRATIONS -ErrorAction SilentlyContinue
+
+    # =====================================================================
     # 8. Retention strict boolean compatibility for historical metadata.
     # =====================================================================
     # Publishes the resulting set into $script:lastFlagSet rather than returning
@@ -304,6 +461,7 @@ class MockPsql {
     Check ($strSet -and $strSet.Decision -ne 'Candidate') 'string "false" never becomes a deletion candidate'
 } finally {
     Remove-Item Env:\PJSK_MOCK_BREAK -ErrorAction SilentlyContinue
+    Remove-Item Env:\PJSK_MOCK_MIGRATIONS -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force -Confirm:$false
     }

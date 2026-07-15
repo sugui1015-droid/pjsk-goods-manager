@@ -19,6 +19,91 @@ function Get-BackupValidationPassedResult {
     return 'passed'
 }
 
+# The closed set of validation purposes.
+#
+#   current       — the default. The restored backup must match the repository's
+#                   migrations exactly. This is the normal case and must never
+#                   be weakened.
+#   pre-migration — an upgrade-time baseline: the backup was taken from a
+#                   database that is deliberately BEHIND the repository (for
+#                   example production at 0018 while the repository is at 0019),
+#                   captured as a rollback point before the migration runs.
+#                   Only ever selectable by passing an explicit expected
+#                   migration set; never inferred, never a fallback.
+function Get-BackupValidationPurposes {
+    return @('current', 'pre-migration')
+}
+
+# Reads an expected migration set file: one migration file name per line.
+#
+# The set is deliberately supplied from OUTSIDE this script (exported read-only
+# from the database being backed up) so validation cannot be satisfied by
+# deriving expectations from the very database it is checking.
+#
+# Rejects anything that would make the comparison meaningless: a missing file,
+# an empty set, duplicates, a name that is not a well-formed migration file
+# name, or a set that is not in strict ascending ordinal order.
+function Read-ExpectedMigrationSetFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][ref]$Reason
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        $Reason.Value = 'expected migration set file path is empty'
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        $Reason.Value = "expected migration set file not found: $([System.IO.Path]::GetFileName($Path))"
+        return $null
+    }
+
+    $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop |
+        ForEach-Object { "$_".Trim() } |
+        Where-Object { $_ -ne '' })
+
+    if ($lines.Count -eq 0) {
+        $Reason.Value = 'expected migration set file is empty'
+        return $null
+    }
+
+    $pattern = Get-MigrationFileNamePattern
+    foreach ($line in $lines) {
+        if ($line -notmatch $pattern) {
+            $Reason.Value = "expected migration set contains an invalid migration file name: $line"
+            return $null
+        }
+    }
+
+    $seen = @{}
+    foreach ($line in $lines) {
+        if ($seen.ContainsKey($line)) {
+            $Reason.Value = "expected migration set contains a duplicate: $line"
+            return $null
+        }
+        $seen[$line] = $true
+    }
+
+    # Strict ascending ordinal order, matching the migration runner's own sort.
+    $sorted = [string[]]$lines
+    [Array]::Sort($sorted, [System.StringComparer]::Ordinal)
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -cne $sorted[$i]) {
+            $Reason.Value = 'expected migration set is not in strict ascending order'
+            return $null
+        }
+    }
+
+    $Reason.Value = 'ok'
+    return [ordered]@{
+        Names      = $sorted
+        Count      = $sorted.Count
+        MaxVersion = $sorted[$sorted.Count - 1]
+        Sha256     = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    }
+}
+
 # Builds a validation record. By construction this only ever produces a PASSED
 # record — callers must not invoke it unless every check actually passed. A
 # failed drill is recorded separately under a different file name (see
@@ -39,23 +124,40 @@ function New-BackupValidationRecord {
         [Parameter(Mandatory)][int]$MigrationCount,
         [Parameter(Mandatory)][string]$MigrationMax,
         [Parameter(Mandatory)][bool]$IsolatedTestBackup,
+        [string]$ValidationPurpose = 'current',
+        [int]$ExpectedMigrationCount = 0,
+        [string]$ExpectedMigrationMax = '',
+        [string]$ExpectedMigrationSetSha256 = '',
         [datetime]$ValidatedUtc = ([datetime]::UtcNow)
     )
 
-    return [ordered]@{
-        schemaVersion       = 1
-        overallResult       = (Get-BackupValidationPassedResult)
-        backupFileName      = $BackupFileName
-        metadataFileName    = $MetadataFileName
-        dumpSha256          = $DumpSha256
-        dumpSizeBytes       = $DumpSizeBytes
-        validatedUtc        = $ValidatedUtc.ToUniversalTime().ToString('o')
-        restoreDatabaseName = $RestoreDatabaseName
-        validatorVersion    = $ValidatorVersion
-        migrationCount      = $MigrationCount
-        migrationMax        = $MigrationMax
-        isolatedTestBackup  = $IsolatedTestBackup
+    if ($ValidationPurpose -notin (Get-BackupValidationPurposes)) {
+        throw "ValidationPurpose must be one of: $((Get-BackupValidationPurposes) -join ', ')"
     }
+    if ($ExpectedMigrationCount -le 0) { $ExpectedMigrationCount = $MigrationCount }
+    if ([string]::IsNullOrWhiteSpace($ExpectedMigrationMax)) { $ExpectedMigrationMax = $MigrationMax }
+
+    $record = [ordered]@{
+        schemaVersion          = 1
+        overallResult          = (Get-BackupValidationPassedResult)
+        validationPurpose      = $ValidationPurpose
+        backupFileName         = $BackupFileName
+        metadataFileName       = $MetadataFileName
+        dumpSha256             = $DumpSha256
+        dumpSizeBytes          = $DumpSizeBytes
+        validatedUtc           = $ValidatedUtc.ToUniversalTime().ToString('o')
+        restoreDatabaseName    = $RestoreDatabaseName
+        validatorVersion       = $ValidatorVersion
+        migrationCount         = $MigrationCount
+        migrationMax           = $MigrationMax
+        expectedMigrationCount = $ExpectedMigrationCount
+        expectedMigrationMax   = $ExpectedMigrationMax
+        isolatedTestBackup     = $IsolatedTestBackup
+    }
+    if ($ExpectedMigrationSetSha256) {
+        $record.expectedMigrationSetSha256 = $ExpectedMigrationSetSha256
+    }
+    return $record
 }
 
 # Validates a validation record that has been read back from disk against what
@@ -110,6 +212,23 @@ function Test-BackupValidationConsistency {
     }
     if (-not ($Validation.migrationCount -is [int] -or $Validation.migrationCount -is [long])) {
         $Reason.Value = 'migrationCount is not a number'
+        return $false
+    }
+    # validationPurpose is a closed enum, not free text.
+    if ("$($Validation.validationPurpose)" -notin (Get-BackupValidationPurposes)) {
+        $Reason.Value = 'validationPurpose is not one of the accepted values'
+        return $false
+    }
+    if (-not ($Validation.expectedMigrationCount -is [int] -or $Validation.expectedMigrationCount -is [long])) {
+        $Reason.Value = 'expectedMigrationCount is not a number'
+        return $false
+    }
+    if ([long]$Validation.expectedMigrationCount -ne [long]$Validation.migrationCount) {
+        $Reason.Value = 'expectedMigrationCount does not match the migrationCount that was verified'
+        return $false
+    }
+    if ("$($Validation.expectedMigrationMax)" -ne "$($Validation.migrationMax)") {
+        $Reason.Value = 'expectedMigrationMax does not match the migrationMax that was verified'
         return $false
     }
 
