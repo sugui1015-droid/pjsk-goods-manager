@@ -124,6 +124,16 @@ foreach ($file in @($backup, $restore, $verify, $remove)) {
 
 Remove-Item -LiteralPath $outsideDir -Recurse -Force -Confirm:$false
 
+# Also run the backup-retention safety tests (report + cleanup scripts).
+Write-Output "--- retention tooling safety tests ---"
+$retentionTests = Join-Path $scriptDir 'Invoke-RetentionSafetyTests.ps1'
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $retentionTests
+$retentionExit = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
+if ($retentionExit -ne 0) { $script:failures++ }
+
 if ($script:failures -gt 0) {
     Write-Output "RESULT: $script:failures failure(s)"
     exit 1

@@ -55,3 +55,11 @@ backend/*.exe
 *.dump
 *.backup
 *.partial
+
+# Backup metadata / validation / retention run outputs (produced outside the
+# repo; ignored defensively so they can never be committed accidentally).
+*.metadata.json
+*.validation.json
+*.retention-report.json
+*.retention-report.csv
+*.retention-audit.json

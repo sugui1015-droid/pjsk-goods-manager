@@ -83,13 +83,9 @@ $target = 'pjsk_restore_test_' + (Get-Date -Format 'yyyyMMdd_HHmmss')
 
 只接受 `pjsk_restore_test_*` 与 `pjsk_backup_source_test_*` 两个测试前缀；拒绝 `pjsk`/`postgres`/`template0`/`template1` 及任何其他名称；一次只删一个显式命名的库；先终止连接再 `dropdb`，最后确认已不存在。支持 `-DryRun`。
 
-## 保留策略（建议，脚本不自动删除）
+## 保留策略与安全清理
 
-- 最近 7 天：每日备份
-- 最近 4 周：每周备份
-- 最近 12 个月：每月备份
-
-自动清理未实现；删除正式备份需人工判断。
+分层保留策略、只读扫描报告脚本（`Get-PostgresBackupRetentionReport.ps1`）与默认 DryRun 的清理脚本（`Remove-ExpiredPostgresBackups.ps1`）见 [database-backup-retention.md](database-backup-retention.md)。要点：默认只报告不删除；真正删除需 `-Execute` + `-ExpectedRootName` + 确认短语 + 干净报告；只删除通过验证（有 `<basename>.validation.json`、`overallResult=passed`、SHA-256 一致）且落在所有保留分层之外的备份；演练证据、未验证/损坏/未知集合、最新备份一律保护。
 
 ## 正式恢复（生产）——务必谨慎
 
