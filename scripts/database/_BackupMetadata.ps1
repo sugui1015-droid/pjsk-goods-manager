@@ -6,6 +6,43 @@
 # Read-only: nothing here connects to a database, writes, moves, or deletes any
 # file. It only inspects an already-deserialized metadata object.
 
+# Reads isolatedTestBackup out of a deserialized metadata object as a STRICT
+# tri-state: $true, $false, or $null meaning "missing or not a real boolean".
+#
+# Never use [bool] on this field. In PowerShell [bool]$null is $false (so a
+# missing field would silently read as a real backup) and [bool]"false" is $true
+# (a non-empty string is truthy, so a stringly-typed "false" would silently read
+# as drill evidence). Both would misclassify a backup, so anything that is not a
+# genuine JSON boolean is reported as $null for the caller to reject.
+function Get-MetadataIsolatedTestFlag {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()]$Metadata,
+        [Parameter(Mandatory)][ref]$Reason
+    )
+
+    if ($null -eq $Metadata) {
+        $Reason.Value = 'metadata is null'
+        return $null
+    }
+
+    $property = $null
+    if ($Metadata.PSObject -and $Metadata.PSObject.Properties) {
+        $property = $Metadata.PSObject.Properties['isolatedTestBackup']
+    }
+    if (-not $property) {
+        $Reason.Value = 'isolatedTestBackup is missing'
+        return $null
+    }
+    if ($property.Value -isnot [bool]) {
+        $Reason.Value = 'isolatedTestBackup is not a boolean'
+        return $null
+    }
+
+    $Reason.Value = 'ok'
+    return [bool]$property.Value
+}
+
 # Validates that the metadata just written and read back describes exactly the
 # backup this run produced. Every check is "round-tripped value == expected
 # value" — including the backup mode.
@@ -52,23 +89,16 @@ function Test-BackupMetadataConsistency {
         return $false
     }
 
-    # isolatedTestBackup must be present AND a real boolean. A missing property
-    # deserializes to $null and a string "false" casts to $true, so casting with
-    # [bool] would silently accept both — exactly the confusion this guards.
-    $isolatedProperty = $null
-    if ($Metadata.PSObject -and $Metadata.PSObject.Properties) {
-        $isolatedProperty = $Metadata.PSObject.Properties['isolatedTestBackup']
-    }
-    if (-not $isolatedProperty) {
-        $Reason.Value = 'isolatedTestBackup is missing'
+    # isolatedTestBackup must be present AND a real boolean; see
+    # Get-MetadataIsolatedTestFlag for why [bool] would silently accept junk.
+    $flagReason = ''
+    $isolated = Get-MetadataIsolatedTestFlag -Metadata $Metadata -Reason ([ref]$flagReason)
+    if ($null -eq $isolated) {
+        $Reason.Value = $flagReason
         return $false
     }
-    if ($isolatedProperty.Value -isnot [bool]) {
-        $Reason.Value = 'isolatedTestBackup is not a boolean'
-        return $false
-    }
-    if ($isolatedProperty.Value -ne $ExpectedIsolatedTestBackup) {
-        $Reason.Value = "isolatedTestBackup is $($isolatedProperty.Value) but this run expects $ExpectedIsolatedTestBackup"
+    if ($isolated -ne $ExpectedIsolatedTestBackup) {
+        $Reason.Value = "isolatedTestBackup is $isolated but this run expects $ExpectedIsolatedTestBackup"
         return $false
     }
 

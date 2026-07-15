@@ -87,6 +87,28 @@ $target = 'pjsk_restore_test_' + (Get-Date -Format 'yyyyMMdd_HHmmss')
     -Username postgres
 ```
 
+### 生成 validation（闭合保留策略）
+
+加上 `-BackupFile` 指向被验证的 dump，全部检查通过后会在 dump 旁生成 `<name>.validation.json`：
+
+```powershell
+./scripts/database/Test-PostgresBackup.ps1 `
+    -RestoredDatabase $target `
+    -BackupFile 'D:\PJSK-Backups\PostgreSQL\2026\07\pjsk-20260714-120000.dump' `
+    -Username postgres
+```
+
+**这一步是保留策略的前提**：`Remove-ExpiredPostgresBackups.ps1` 只对 `verified` 的备份做分层保留，而 `verified` 需要 dump、metadata、validation 三者哈希互相绑定（并且报告需带 `-VerifyHash`）。没有 validation 的备份一律 `unverified` → 永久 Protected，即保留策略不会回收任何空间。
+
+行为要点：
+
+- 只有**全部检查通过**才发布；先写 `.partial`，回读校验后原子改名。
+- **拒绝覆盖**已存在的 validation；需要重新验证时先人工确认并移走旧文件。
+- 验证失败时**不生成** validation，改为写 `<name>.validation-failed.json`。该文件名不被保留策略读取，备份保持 `unverified` → Protected，既留证据又不会被误判为成功。
+- 发布前会校验 dump 的真实 SHA-256 与 metadata 相符；不符（dump 被改动）则拒绝验证。
+- metadata 缺失、非法 JSON，或 `isolatedTestBackup` 不是真布尔时，一律拒绝验证。
+- validation 只记录文件名、哈希、大小、UTC 时间、结果、一次性测试库名、验证器版本与迁移事实；**不含**主机、端口、用户名、密码、DSN、命令行或业务行数。
+
 只输出对象名、数量与 PASS/FAIL，从不输出业务行。核对 `schema_migrations` 最大版本、关键表存在、主键/外键/索引/序列数量；提供 `-SourceDatabase`（必须是隔离测试库）时逐项对比两库的迁移版本、表数、行数与约束数。
 
 ## 清理临时数据库

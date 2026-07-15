@@ -1,7 +1,12 @@
 # _RetentionCommon.ps1 — shared functions for the backup retention tooling.
-# This file defines ONLY functions (no param block, no top-level actions), so
-# it can be dot-sourced from any script without clobbering caller variables.
+# This file defines ONLY functions (plus one dot-source of another
+# functions-only file), so it can be dot-sourced from any script without
+# clobbering caller variables.
 # Read-only: nothing here deletes, moves, or rewrites any file.
+
+# Get-MetadataIsolatedTestFlag — the single strict reader for isolatedTestBackup,
+# shared with the backup publish path so both sides agree on what the field means.
+. (Join-Path $PSScriptRoot '_BackupMetadata.ps1')
 
 function Test-BackupRootGuard {
     [CmdletBinding()]
@@ -110,9 +115,14 @@ function Get-PostgresBackupRetentionReport {
         } catch {
             $errorText = 'metadata JSON unparseable'
         }
+        $isolatedReason = ''
         if ($metaObj) {
             if ($metaObj.PSObject.Properties.Name -contains 'dumpSha256') { $metaSha = "$($metaObj.dumpSha256)" }
-            if ($metaObj.PSObject.Properties.Name -contains 'isolatedTestBackup') { $isolated = [bool]$metaObj.isolatedTestBackup }
+            # Strict: $null here means missing or not a real boolean. Never [bool]
+            # this field — [bool]$null is $false (a missing flag would read as a
+            # real backup and become deletable) and [bool]"false" is $true (a
+            # stringly-typed flag would read as protected drill evidence).
+            $isolated = Get-MetadataIsolatedTestFlag -Metadata $metaObj -Reason ([ref]$isolatedReason)
             if ($metaObj.PSObject.Properties.Name -contains 'createdAtUtc') {
                 try { $createdUtc = ([datetime]$metaObj.createdAtUtc).ToUniversalTime() } catch { $createdUtc = $null }
             }
@@ -152,6 +162,13 @@ function Get-PostgresBackupRetentionReport {
             $status = 'orphan'; if (-not $errorText) { $errorText = 'metadata without dump' }
         } elseif (-not $metaObj) {
             $status = 'unknown'
+        } elseif ($null -eq $isolated) {
+            # Metadata whose backup mode cannot be trusted is never classified as
+            # either a real backup or drill evidence: 'unknown' keeps it out of
+            # the verified set (so it can never be auto-deleted) and the error
+            # flags it as Decision=Error for a human to look at.
+            $status = 'unknown'
+            if (-not $errorText) { $errorText = "metadata $isolatedReason" }
         } elseif ($validationResult -eq 'failed' -or $validationResult -eq 'passed-hash-mismatch' -or $validationResult -eq 'unparseable') {
             $status = 'validation-failed'
         } elseif ($VerifyHash -and $metaSha -and $actualSha -and ($actualSha -ine $metaSha)) {
