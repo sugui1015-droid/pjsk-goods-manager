@@ -256,6 +256,70 @@ Decision=Protected  Reason=recently modified (still changing?)  ValidationResult
 
 未运行 `0019`；未运行任何迁移；未启动正式后端；未手工修改 `schema_migrations`；未修改正式库（前后计数逐次核对一致）；未读取密码或 pgpass 内容；未设置 `PGPASSWORD`；未输出完整 DSN；未读取业务明细（仅汇总行数）；未删除任何旧备份；未运行 retention 删除；未运行 Go 测试（本阶段未改 Go）；未使用子代理；未提交、未推送。
 
+## 阶段 13：retention 根目录守卫修复
+
+- 开始时间：2026-07-15 20:10（本机时间）
+- Git 基线：`HEAD` = `origin/main` = `401e66af617c0dd676632573b836189fa4733aac`，工作区干净。
+
+### 13.1 只读调查结论（先记录，后改码）
+
+**守卫位置与调用方**：`_RetentionCommon.ps1:11` `Test-BackupRootGuard`；调用方仅两处——`Get-PostgresBackupRetentionReport`（`:78`，只读扫描）与 `Remove-ExpiredPostgresBackups.ps1:82`（删除入口）。
+
+**守卫本意（逐层）**：空路径/相对路径/无法规范化 → 拒；驱动器根、UNC 共享根 → 拒；仓库根 + `WINDIR`/`ProgramFiles`/`ProgramData`/`USERPROFILE`/`C:\Users` 等保护目录（含子路径）→ 拒；**PostgreSQL 安装/数据目录 → 拒**（防止 retention 删除流程接近数据库文件）；不存在目录、reparse point → 拒。
+
+**误判原因**：第 41 行 `$normalized -match '(?i)\\PostgreSQL(\\|$)'` 是**纯名称关键词匹配**——只要路径中任何一级目录名为 `PostgreSQL` 即拒绝。它无法区分：
+
+- `D:\PostgreSQL\18`（真实安装目录，含 `bin\postgres.exe`）——应拒
+- `D:\PJSK-Backups\PostgreSQL`（**文档自己推荐的备份根**，只是目录取名叫 PostgreSQL）——应允许
+
+第 42 行 `(\\|^)data$` + 含 `postgres` 同为名称启发式，存在同类误判面。
+
+**现有测试覆盖**：`Invoke-RetentionSafetyTests.ps1:172-191`（18–27 共 13 项守卫用例）。其中第 22 项用 `C:\Program Files\PostgreSQL\18\data`——该路径位于 `ProgramFiles` 内，**由保护目录检查拒绝**，与 postgres 正则无关，故重构后该用例语义不变。
+
+**修复设计（内容判定替代名称判定）**：真实 PostgreSQL 目录有**确定性内容标记**，与目录叫什么名字无关：
+
+- **数据目录**：恒含 `PG_VERSION` 文件（即使实例停止也存在）
+- **安装目录**：恒含 `bin\postgres.exe`（辅以 `bin\pg_ctl.exe`、`bin\initdb.exe`）
+
+据此：① 删除两条名称正则；② 新增 `Test-IsPostgresInstallOrDataDirectory`（查内容标记）；③ **祖先链检查**——路径自身或任何祖先命中标记即拒（覆盖 `D:\PostgreSQL\18`、`D:\PostgreSQL\18\data` 及其内部任意子路径）；④ **伞目录检查**——路径的直接子目录命中标记即拒（覆盖 `D:\PostgreSQL` 这类版本伞目录；也顺带保护"有人把真实数据目录放进备份根"的情形）。不新增任何 `-Force`/`-IgnoreSafety` 绕过参数；其余保护层一律不动。
+
+### 13.2 实现（2026-07-16）
+
+`scripts/database/_RetentionCommon.ps1`：
+
+1. **删除**两条名称正则（`\\PostgreSQL(\\|$)` 与 `data$`+`postgres` 启发式）。
+2. **新增** `Test-IsPostgresInstallOrDataDirectory`：按内容标记判定——`PG_VERSION` 文件（数据目录）或 `bin\postgres.exe`/`bin\pg_ctl.exe`/`bin\initdb.exe`（安装目录）；探测用 `-ErrorAction SilentlyContinue` + try/catch（ACL 拒绝不外泄、不刷屏）。
+3. **祖先链检查**：路径自身与每一级祖先逐个探测，命中即拒——覆盖 `D:\PostgreSQL\18`、`D:\PostgreSQL\18\data` 及安装树内任意子路径（数据目录即使 ACL 不可读，也经由可读的安装目录祖先被拒）。
+4. **伞目录检查**（存在性检查之后）：直接子目录命中标记即拒——覆盖 `D:\PostgreSQL` 版本伞目录；子目录**无法枚举时按失败关闭**拒绝（retention 绝不在无法检视的目录旁操作）。
+5. **未新增**任何 `-Force`/`-IgnoreSafety` 类绕过参数；驱动器根/UNC 根/仓库根/系统目录/不存在/reparse 等既有保护层全部原样保留。
+
+### 13.3 测试（`Invoke-RetentionSafetyTests.ps1` 新增 12 项，54 → 66）
+
+允许：29a `…\PJSK-Backups\PostgreSQL`、29b `…\Backups\PostgreSQL`、29c `…\Company\PostgreSQL-Backups`（临时目录合成，仅名称含 PostgreSQL）。
+拒绝：29d 合成安装树（`bin\postgres.exe` 标记）、29e 安装树**内部**路径（祖先探测）、29f 含安装树的伞目录、29g 含 `PG_VERSION` 的数据目录（**无论目录叫什么名字**）、29h 数据目录内部、29i 含数据目录的父目录、29j/29k/29l 本机**真实** `D:\PostgreSQL\18`/`D:\PostgreSQL`/`D:\PostgreSQL\18\data`（不存在时 SKIP）。
+既有 13 项守卫用例（18–28）全部保留且通过——第 22 项 `C:\Program Files\PostgreSQL\18\data` 本就由 ProgramFiles 保护层拒绝，语义不受重构影响。
+
+**过程中发现并修正**：初版 29l 的门槛用 `Test-Path …data\PG_VERSION`，在 `$ErrorActionPreference='Stop'` 下对 ACL 保护的真实数据目录抛 `UnauthorizedAccessException` 使套件中途终止；改为以可读的安装标记 `bin\postgres.exe` 作门槛。同一发现促成 13.2 第 2 点的 `-ErrorAction SilentlyContinue`（否则交互式会话会打印无害但吓人的 Access denied）。
+
+**变异验证**：临时恢复旧正则 → **恰好 29a/29b 两项 FAIL**（64/2），证明新测试确实钉住"名称不再是拒绝理由"；还原后 66/0。
+
+### 13.4 验证结果
+
+| 项 | 结果 |
+| --- | --- |
+| 语法检查（2 个脚本） | OK |
+| retention 专项 | **66 PASS / 0 FAIL** |
+| 全量安全测试 | **282 PASS / 0 FAIL**（66+27+40+101+48） |
+| `git diff --check` | 0 |
+| 守卫实测 | `D:\PJSK-Backups\PostgreSQL` → **allowed**；`D:\PostgreSQL\18` → refused（安装树）；`D:\PostgreSQL\18\data` → refused（经祖先 `D:\PostgreSQL\18`）；`D:\PostgreSQL` → refused（伞目录）；`D:\`、`D:\pjsk` → refused（既有层） |
+| **真实根只读扫描** | `Get-PostgresBackupRetentionReport -BackupRoot 'D:\PJSK-Backups\PostgreSQL' -VerifyHash` → `SetId=pjsk-20260715-221906  Status=verified  IsolatedTest=False  Decision=Keep  Reason=retention tier: newest` —— **备份→验证→保留闭环首次在文档推荐路径上端到端打通**；未执行任何删除 |
+| 正式库 | **18 / 208 / has_0019=0 / idx=1**（未变） |
+| 备份 SHA | `F32045…32BA` **未变**；dump/metadata/validation 三件俱在 |
+| 残留 | 无恢复库/临时库/`.partial`；清理了两个此前套件中途崩溃遗留的 `D:\bkretention-tests-*` 合成 fixture 根（27 字节假 dump，非真实备份） |
+
+- 未运行 `0019`；未启动后端；未修改正式库；未删除真实备份；未使用子代理。
+- 文档同步：`docs/database-backup-restore.md` 的"已知问题"段更新为"已收敛"说明。
+
 ## 下一阶段入口
 
-等待人工审阅本轮脚本改造与演练结果，并决定是否允许提交。提交后方可在受控窗口评估运行 `0019`（其回滚基线已就绪）。
+提交并推送本修复后，进入 **受控执行 `0019`** 准备。

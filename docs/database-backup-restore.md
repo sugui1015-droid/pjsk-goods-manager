@@ -130,7 +130,7 @@ $baseline = 'D:\<仓库外临时目录>\production-baseline-migrations.txt'
 - validation 记录 `validationPurpose`、`expectedMigrationCount`、`expectedMigrationMax` 与期望集合的 SHA-256。
 - 正式库备份的 `isolatedTestBackup` 仍为 `false`：**恢复目标是隔离库不代表来源备份是演练备份**，两者不可混淆。
 
-> **已知问题（保留策略根目录）**：`_RetentionCommon.ps1` 的根目录守卫会拒绝任何路径中含 `\PostgreSQL` 的目录（用于挡住 PostgreSQL 安装/数据目录），因此本文上面推荐的 `D:\PJSK-Backups\PostgreSQL` **会被保留策略拒绝扫描**（备份/恢复/验证本身不受影响）。在该守卫收敛之前，若需要保留策略扫描，请选用不含 `PostgreSQL` 字样的备份根目录。
+> **保留策略根目录守卫**（2026-07-16 已收敛）：守卫按**内容标记**识别 PostgreSQL 安装/数据目录——数据目录恒含 `PG_VERSION`，安装目录恒含 `bin\postgres.exe`——并检查路径自身、全部祖先与直接子目录；目录**仅仅取名叫** `PostgreSQL`（如本文推荐的 `D:\PJSK-Backups\PostgreSQL`）不再被误拒。真实安装树、数据目录及其内部任意路径仍被拒绝；无法枚举内容的目录按失败关闭处理。
 
 行为要点：
 

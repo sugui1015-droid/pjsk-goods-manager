@@ -38,10 +38,35 @@ function Test-BackupRootGuard {
         }
     }
 
-    if ($normalized -match '(?i)\\PostgreSQL(\\|$)') { $Reason.Value = 'refusing a PostgreSQL install/data tree'; return $false }
-    if ($normalized -match '(?i)(\\|^)data$' -and $normalized -match '(?i)postgres') { $Reason.Value = 'refusing a PostgreSQL data directory'; return $false }
+    # PostgreSQL install/data trees are recognized by their CONTENTS (PG_VERSION,
+    # bin\postgres.exe), never by a directory merely being NAMED "PostgreSQL" —
+    # the documented backup root D:\PJSK-Backups\PostgreSQL is named exactly that
+    # and must be scannable. The path itself and every ancestor are probed, so
+    # any location inside a real install or data tree stays refused.
+    $probe = $normalized
+    while ($probe -and ($probe -notmatch '^[A-Za-z]:$')) {
+        if (Test-IsPostgresInstallOrDataDirectory -Path $probe) {
+            $Reason.Value = "refusing a PostgreSQL install/data tree ($probe)"; return $false
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($probe)
+        if (-not $parent -or $parent -eq $probe) { break }
+        $probe = $parent.TrimEnd('\')
+    }
 
     if (-not (Test-Path -LiteralPath $normalized -PathType Container)) { $Reason.Value = 'directory does not exist (not auto-created)'; return $false }
+
+    # An umbrella directory whose direct children are PostgreSQL installs or data
+    # directories (e.g. D:\PostgreSQL holding 18\bin\postgres.exe) is refused too:
+    # retention must never operate next to live database files.
+    try {
+        foreach ($child in (Get-ChildItem -LiteralPath $normalized -Directory -Force -ErrorAction Stop)) {
+            if (Test-IsPostgresInstallOrDataDirectory -Path $child.FullName) {
+                $Reason.Value = "refusing a directory that contains a PostgreSQL install/data tree ($($child.Name))"; return $false
+            }
+        }
+    } catch {
+        $Reason.Value = 'directory contents could not be inspected'; return $false
+    }
 
     $item = Get-Item -LiteralPath $normalized -Force
     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -50,6 +75,30 @@ function Test-BackupRootGuard {
 
     $Reason.Value = $normalized
     return $true
+}
+
+# A real PostgreSQL directory is identified by definitive content markers, not
+# by its name: every data directory carries a PG_VERSION file (even when the
+# instance is stopped), and every install tree carries bin\postgres.exe. A probe
+# failure (permissions etc.) reports no marker; the caller's existence and
+# containment checks still apply.
+function Test-IsPostgresInstallOrDataDirectory {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    # -ErrorAction SilentlyContinue: probing inside an ACL-protected data
+    # directory raises Access denied; that must neither escape nor spam the
+    # console. Such a directory is still refused — by the ancestor probe when it
+    # sits inside an install tree, and otherwise by the caller's fail-closed
+    # contents inspection.
+    try {
+        if (Test-Path -LiteralPath (Join-Path $Path 'PG_VERSION') -PathType Leaf -ErrorAction SilentlyContinue) { return $true }
+        $bin = Join-Path $Path 'bin'
+        foreach ($exe in @('postgres.exe', 'pg_ctl.exe', 'initdb.exe')) {
+            if (Test-Path -LiteralPath (Join-Path $bin $exe) -PathType Leaf -ErrorAction SilentlyContinue) { return $true }
+        }
+    } catch { }
+    return $false
 }
 
 function Test-IsReparsePoint([string]$Path) {

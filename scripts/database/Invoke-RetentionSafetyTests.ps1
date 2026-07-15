@@ -182,6 +182,58 @@ Check (-not (Test-BackupRootGuard -Path 'D:\does-not-exist-xyz-123' -Reason $r))
 Check (-not (Test-Path -LiteralPath 'D:\does-not-exist-xyz-123')) '28 guard did not auto-create the root'
 Check (Test-BackupRootGuard -Path $scanRoot -Reason $r) '18b accepts a valid non-protected root'
 
+# --- PostgreSQL detection is by CONTENT, never by a directory's NAME ---------
+# A backup root named "PostgreSQL" is legitimate (the documented root is
+# D:\PJSK-Backups\PostgreSQL); what must stay refused are directories that
+# actually CONTAIN a PostgreSQL install or data tree.
+
+# Allowed: plain directories that merely have PostgreSQL-ish names.
+$namedPg = Join-Path $testRoot 'PJSK-Backups\PostgreSQL'
+New-Item -ItemType Directory -Force -Path $namedPg | Out-Null
+Check (Test-BackupRootGuard -Path $namedPg -Reason $r) '29a a backup root NAMED PostgreSQL is allowed'
+$namedPg2 = Join-Path $testRoot 'Backups\PostgreSQL'
+New-Item -ItemType Directory -Force -Path $namedPg2 | Out-Null
+Check (Test-BackupRootGuard -Path $namedPg2 -Reason $r) '29b Backups\PostgreSQL is allowed'
+$namedPg3 = Join-Path $testRoot 'Company\PostgreSQL-Backups'
+New-Item -ItemType Directory -Force -Path $namedPg3 | Out-Null
+Check (Test-BackupRootGuard -Path $namedPg3 -Reason $r) '29c Company\PostgreSQL-Backups is allowed'
+
+# Refused: a synthetic INSTALL tree (bin\postgres.exe marker).
+$fakeInstall = Join-Path $testRoot 'fakepg\18'
+New-Item -ItemType Directory -Force -Path (Join-Path $fakeInstall 'bin') | Out-Null
+Set-Content -LiteralPath (Join-Path $fakeInstall 'bin\postgres.exe') -Value 'MOCK - NOT A REAL BINARY' -Encoding ascii
+Check (-not (Test-BackupRootGuard -Path $fakeInstall -Reason $r)) '29d an install tree (bin\postgres.exe) is refused'
+$insideInstall = Join-Path $fakeInstall 'backups'
+New-Item -ItemType Directory -Force -Path $insideInstall | Out-Null
+Check (-not (Test-BackupRootGuard -Path $insideInstall -Reason $r)) '29e a path INSIDE an install tree is refused (ancestor probe)'
+Check (-not (Test-BackupRootGuard -Path (Join-Path $testRoot 'fakepg') -Reason $r)) '29f an umbrella directory holding an install is refused'
+
+# Refused: a synthetic DATA directory (PG_VERSION marker).
+$fakeData = Join-Path $testRoot 'somedb\cluster'
+New-Item -ItemType Directory -Force -Path $fakeData | Out-Null
+Set-Content -LiteralPath (Join-Path $fakeData 'PG_VERSION') -Value '18' -Encoding ascii
+Check (-not (Test-BackupRootGuard -Path $fakeData -Reason $r)) '29g a data directory (PG_VERSION) is refused regardless of its name'
+$insideData = Join-Path $fakeData 'base'
+New-Item -ItemType Directory -Force -Path $insideData | Out-Null
+Check (-not (Test-BackupRootGuard -Path $insideData -Reason $r)) '29h a path inside a data directory is refused'
+Check (-not (Test-BackupRootGuard -Path (Join-Path $testRoot 'somedb') -Reason $r)) '29i a directory containing a data directory is refused'
+
+# Refused: the REAL local install/data tree, when present on this machine.
+if (Test-Path -LiteralPath 'D:\PostgreSQL\18\bin\postgres.exe') {
+    Check (-not (Test-BackupRootGuard -Path 'D:\PostgreSQL\18' -Reason $r)) '29j the real PostgreSQL install directory is refused'
+    Check (-not (Test-BackupRootGuard -Path 'D:\PostgreSQL' -Reason $r)) '29k the real PostgreSQL umbrella directory is refused'
+} else {
+    Write-Output 'SKIP  29j/29k real install not present on this machine'
+}
+# The real data directory is ACL-protected: probing PG_VERSION inside it can
+# throw Access denied, so the gate is the (readable) install marker instead. The
+# guard refuses the data directory via the ancestor probe on D:\PostgreSQL\18.
+if (Test-Path -LiteralPath 'D:\PostgreSQL\18\bin\postgres.exe') {
+    Check (-not (Test-BackupRootGuard -Path 'D:\PostgreSQL\18\data' -Reason $r)) '29l the real PostgreSQL data directory is refused (inside the install tree)'
+} else {
+    Write-Output 'SKIP  29l real install not present on this machine'
+}
+
 # Reparse point: attempt a junction; skip gracefully if the OS refuses.
 $reparseParent = Join-Path $testRoot 'reparse'; New-Item -ItemType Directory -Force -Path $reparseParent | Out-Null
 $realTarget = Join-Path $testRoot 'reparse-target'; New-Item -ItemType Directory -Force -Path $realTarget | Out-Null
