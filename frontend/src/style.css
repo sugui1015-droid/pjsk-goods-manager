@@ -880,6 +880,21 @@ th {
     padding-top: 10px;
   }
 
+  .tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow-x: visible;
+  }
+
+  .tabs button {
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 4px;
+    line-height: 1.25;
+    white-space: normal;
+  }
+
   .topbar,
   .panel,
   .metric-tile {
@@ -1717,6 +1732,68 @@ th {
   color: #b42318;
 }
 
+.query-order-mobile-items {
+  display: none;
+}
+
+.query-order-mobile-item {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.query-order-mobile-item h3 {
+  margin: 0 0 12px;
+  color: #182230;
+  font-size: 16px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.query-order-mobile-item dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.query-order-mobile-item dl > div {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e5ebf0;
+}
+
+.query-order-mobile-item dl > div:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.query-order-mobile-item dt {
+  color: #667085;
+  font-size: 13px;
+}
+
+.query-order-mobile-item dd {
+  min-width: 0;
+  margin: 0;
+  color: #25364a;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.query-payment-state {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+  background: #f7fafc;
+}
+
 @media (max-width: 720px) {
   .query-order-summary {
     justify-content: flex-start;
@@ -1737,6 +1814,17 @@ th {
   .payment-cn-form .primary-button,
   .payment-cn-form .secondary-button,
   .payment-cn-form .danger-button {
+    width: 100%;
+  }
+
+  .query-order-desktop-table {
+    display: none;
+  }
+
+  .query-order-mobile-items {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
     width: 100%;
   }
 }

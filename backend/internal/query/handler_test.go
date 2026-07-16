@@ -33,18 +33,17 @@ func (stubStore) ListOrdersForUser(context.Context, string) (OrdersResponse, err
 
 // TestOrdersResponseNeverExposesInternalIDsOrSourceFiles is a wire-format
 // guarantee, not just a frontend hiding concern: regular users must never
-// receive order/order-item database ids, import batch ids, source
-// filenames, or source sheet names in the JSON response, even if a future
-// change accidentally re-adds one of those fields to the struct.
+// receive order/order-item database ids, source-derived order numbers or
+// project filenames, import batch ids, source filenames, or source sheet
+// names in the JSON response, even if a future change accidentally re-adds
+// one of those fields to the struct.
 func TestOrdersResponseNeverExposesInternalIDsOrSourceFiles(t *testing.T) {
 	response := OrdersResponse{
 		User: User{ID: "user-secret-id", CNCode: "CN001"},
 		Orders: []Order{
 			{
-				ID:          "order-secret-id",
-				OrderNo:     "ORDER-001",
-				Status:      "submitted",
-				ProjectName: "26感谢祭单领",
+				TotalQuantity: 1,
+				TotalAmount:   10,
 				Items: []OrderItem{
 					{GoodsName: "扇子", Category: "周边", CharacterName: "hrk", SeriesCode: "26感谢祭单领", DisplayName: "扇子", PaymentStatus: "unpaid"},
 				},
@@ -66,6 +65,14 @@ func TestOrdersResponseNeverExposesInternalIDsOrSourceFiles(t *testing.T) {
 		`"import_filename"`,
 		`"import_filenames"`,
 		`"source_sheet"`,
+		`"source_row_key"`,
+		`"order_no"`,
+		`"project_name"`,
+		`"created_at"`,
+		`"sku"`,
+		`"sha"`,
+		"IMP-order-secret",
+		"source-secret.xlsx",
 		"order-secret-id",
 		"user-secret-id",
 		"payment-secret-id",
@@ -77,17 +84,59 @@ func TestOrdersResponseNeverExposesInternalIDsOrSourceFiles(t *testing.T) {
 	}
 }
 
+func TestRegularUserOrderExposesOnlyAggregateAndBusinessItemFields(t *testing.T) {
+	response := OrdersResponse{Orders: []Order{{
+		TotalQuantity: 1,
+		TotalAmount:   12.34,
+		Items: []OrderItem{{
+			GoodsName: "商品", DisplayName: "商品", Quantity: 1,
+			UnitPrice: 12.34, Amount: 12.34, RemainingAmount: 12.34,
+			PaymentStatus: "unpaid",
+		}},
+	}}}
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	order := payload["orders"].([]any)[0].(map[string]any)
+	allowedOrder := map[string]bool{
+		"total_quantity": true, "total_amount": true, "paid_amount": true,
+		"remaining_amount": true, "items": true,
+	}
+	for key := range order {
+		if !allowedOrder[key] {
+			t.Fatalf("regular-user order exposes unexpected field %q: %#v", key, order)
+		}
+	}
+
+	item := order["items"].([]any)[0].(map[string]any)
+	allowedItem := map[string]bool{
+		"goods_name": true, "category": true, "character_name": true,
+		"series_code": true, "display_name": true, "quantity": true,
+		"unit_price": true, "amount": true, "paid_amount": true,
+		"remaining_amount": true, "payment_status": true,
+	}
+	for key := range item {
+		if !allowedItem[key] {
+			t.Fatalf("regular-user order item exposes unexpected field %q: %#v", key, item)
+		}
+	}
+}
+
 // TestPaymentItemsExposeOnlyUserFacingFields pins down the exact JSON shape
 // of the regular-user payment-associated-items DTO: only the eight business
-// fields (plus display_name) may appear, order numbers / project names /
-// internal ids / import tracking / admin+audit info must not — while the
-// normal order list keeps order_no and project_name for grouping.
+// fields (plus display_name) may appear; order numbers, project names,
+// internal ids, import tracking, and admin/audit info must not. The regular
+// order list is held to the same minimal order-level shape.
 func TestPaymentItemsExposeOnlyUserFacingFields(t *testing.T) {
 	response := OrdersResponse{
-		User: User{ID: "user-secret-id", CNCode: "CN001"},
-		Orders: []Order{
-			{ID: "order-secret-id", OrderNo: "ORDER-001", ProjectName: "26感谢祭单领", Status: "submitted", Items: []OrderItem{}},
-		},
+		User:   User{ID: "user-secret-id", CNCode: "CN001"},
+		Orders: []Order{{Items: []OrderItem{}}},
 		Payments: []PaymentRecord{
 			{
 				ID:              "payment-secret-id",
@@ -145,8 +194,14 @@ func TestPaymentItemsExposeOnlyUserFacingFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("orders[0] shape: %#v", payload["orders"])
 	}
-	if order["order_no"] != "ORDER-001" || order["project_name"] != "26感谢祭单领" {
-		t.Fatalf("normal order list lost its grouping fields: %#v", order)
+	allowedOrder := map[string]bool{
+		"total_quantity": true, "total_amount": true, "paid_amount": true,
+		"remaining_amount": true, "items": true,
+	}
+	for key := range order {
+		if !allowedOrder[key] {
+			t.Fatalf("regular-user order exposes unexpected field %q: %#v", key, order)
+		}
 	}
 }
 

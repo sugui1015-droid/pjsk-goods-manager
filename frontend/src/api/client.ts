@@ -634,14 +634,10 @@ export type QueryOrderItem = {
 }
 
 export type QueryOrder = {
-  order_no: string
-  status: string
-  project_name: string
   total_quantity: number
   total_amount: number
   paid_amount: number
   remaining_amount: number
-  created_at: string
   items: QueryOrderItem[]
 }
 

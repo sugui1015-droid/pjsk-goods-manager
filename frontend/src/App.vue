@@ -224,6 +224,7 @@ const queryCode = ref('')
 const queryUser = ref<QueryUser | null>(null)
 const queryOrders = ref<QueryOrdersResponse | null>(null)
 const queryLoading = ref(false)
+const queryOrdersError = ref('')
 const queryMessage = ref('')
 const queryOldCode = ref('')
 const queryNewCode = ref('')
@@ -1491,6 +1492,7 @@ function resetOrderFilters() {
 
 async function loginQuery() {
   queryLoading.value = true
+  queryOrdersError.value = ''
   queryMessage.value = ''
   try {
     const response = await postJSON<QueryLoginResponse>('/api/query/login', {
@@ -1506,6 +1508,7 @@ async function loginQuery() {
   } catch (error) {
     queryOrders.value = null
     queryUser.value = null
+    queryOrdersError.value = ''
     queryMessage.value = error instanceof Error ? error.message : '查询登录失败'
   } finally {
     queryLoading.value = false
@@ -1514,6 +1517,7 @@ async function loginQuery() {
 
 async function loadQueryOrders(showMessage = true) {
   queryLoading.value = true
+  queryOrdersError.value = ''
   if (showMessage) queryMessage.value = ''
   try {
     const response = await getJSON<QueryOrdersResponse>('/api/query/orders')
@@ -1523,9 +1527,15 @@ async function loadQueryOrders(showMessage = true) {
     await loadQueryRecoveryEmail()
   } catch (error) {
     queryOrders.value = null
-    queryUser.value = null
+    if (error instanceof ApiError && error.status === 401) {
+      queryUser.value = null
+    } else {
+      queryOrdersError.value = '付款历史加载失败，请稍后重试。'
+    }
     if (showMessage || !(error instanceof ApiError && error.status === 401)) {
-      queryMessage.value = error instanceof Error ? error.message : '查询订单失败'
+      queryMessage.value = error instanceof ApiError && error.status === 401
+        ? error.message
+        : '订单与付款信息加载失败，请稍后重试。'
     }
   } finally {
     queryLoading.value = false
@@ -1543,6 +1553,7 @@ async function loadQueryRecoveryEmail() {
     if (error instanceof ApiError && error.status === 401) {
       queryUser.value = null
       queryOrders.value = null
+      queryOrdersError.value = ''
       queryMessage.value = error.message
       return
     }
@@ -1564,6 +1575,7 @@ function clearExpiredQuerySession(error: unknown) {
   resetQueryRecoveryVerification()
   queryUser.value = null
   queryOrders.value = null
+  queryOrdersError.value = ''
   queryRecoveryEmail.value = null
   queryRecoveryEmailMessage.value = ''
   queryMessage.value = error.message
@@ -1635,6 +1647,7 @@ async function logoutQuery() {
     await postJSON<void>('/api/query/logout', {})
     queryUser.value = null
     queryOrders.value = null
+    queryOrdersError.value = ''
     queryCode.value = ''
     queryOldCode.value = ''
     queryNewCode.value = ''
@@ -1833,6 +1846,7 @@ async function submitQueryCodeChange() {
     queryConfirmCode.value = ''
     queryUser.value = null
     queryOrders.value = null
+    queryOrdersError.value = ''
     queryRecoveryEmail.value = null
     queryRecoveryEmailMessage.value = ''
     resetQueryRecoveryVerification()
@@ -3173,11 +3187,10 @@ onUnmounted(() => {
             <article class="metric-tile"><span>未付金额</span><strong class="danger">{{ formatMoney(queryOrders.remaining_amount) }}</strong></article>
           </section>
 
-          <section v-for="order in queryOrders.orders" :key="order.order_no" class="panel query-order-card">
+          <section v-for="(order, orderIndex) in queryOrders.orders" :key="orderIndex" class="panel query-order-card">
             <div class="panel__header">
               <div>
-                <h2>{{ order.project_name }}</h2>
-                <p class="muted">{{ order.order_no }} / {{ formatDate(order.created_at) }}</p>
+                <h2>{{ queryOrders.orders.length > 1 ? `订单明细 ${orderIndex + 1}` : '订单明细' }}</h2>
               </div>
               <div class="query-order-summary">
                 <span><em>总金额</em><strong>{{ formatMoney(order.total_amount) }}</strong></span>
@@ -3186,7 +3199,7 @@ onUnmounted(() => {
                 <span class="is-unpaid"><em>未付</em><strong>{{ formatMoney(order.remaining_amount) }}</strong></span>
               </div>
             </div>
-            <div class="table-scroll detail-table">
+            <div class="table-scroll detail-table query-order-desktop-table">
               <table>
                 <thead>
                   <tr><th>谷子名称</th><th>谷子系列</th><th>分类</th><th>角色</th><th>数量</th><th>单价</th><th>小计</th><th>已付</th><th>剩余未付</th><th>付款状态</th></tr>
@@ -3207,12 +3220,32 @@ onUnmounted(() => {
                 </tbody>
               </table>
             </div>
+            <div class="query-order-mobile-items" aria-label="订单明细卡片">
+              <article v-for="(item, itemIndex) in order.items" :key="`${item.goods_name}-${item.character_name}-${itemIndex}`" class="query-order-mobile-item">
+                <h3>{{ item.display_name || item.goods_name }}</h3>
+                <dl>
+                  <div><dt>系列</dt><dd>{{ item.series_code || '—' }}</dd></div>
+                  <div><dt>分类</dt><dd>{{ item.category || '—' }}</dd></div>
+                  <div><dt>角色</dt><dd>{{ queryCharacterLabel(item) }}</dd></div>
+                  <div><dt>数量</dt><dd>{{ item.quantity }}</dd></div>
+                  <div><dt>单价</dt><dd>{{ formatMoney(item.unit_price) }}</dd></div>
+                  <div><dt>小计</dt><dd>{{ formatMoney(item.amount) }}</dd></div>
+                  <div><dt>已付</dt><dd>{{ formatMoney(item.paid_amount) }}</dd></div>
+                  <div><dt>未付</dt><dd :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</dd></div>
+                  <div><dt>付款状态</dt><dd>{{ queryPaymentStatusLabel(item.payment_status) }}</dd></div>
+                </dl>
+              </article>
+            </div>
           </section>
           <section v-if="queryOrders.orders.length === 0" class="panel"><p class="muted">当前 CN 暂无可查询订单。</p></section>
+        </template>
 
-          <section v-if="queryOrders.payments.length > 0" class="panel query-payments-card">
+          <section v-if="queryUser" class="panel query-payments-card">
             <div class="panel__header"><div><h2>付款历史</h2><p class="muted">已撤销的付款不计入有效已付款金额。展开关联明细可查看每笔付款分摊到了哪些谷子上。</p></div></div>
-            <div class="table-scroll history-table">
+            <p v-if="queryLoading" class="query-payment-state muted">正在加载付款历史。</p>
+            <p v-else-if="queryOrdersError" class="query-payment-state inline-alert">{{ queryOrdersError }}</p>
+            <p v-else-if="!queryOrders || queryOrders.payments.length === 0" class="query-payment-state muted">暂无付款记录</p>
+            <div v-else class="table-scroll history-table">
               <table>
                 <thead>
                   <tr><th>付款时间</th><th class="col-emphasis">实付金额</th><th>交肾状态</th><th>本金</th><th>手续费</th><th>付款方式</th><th>关联明细</th></tr>
@@ -3259,7 +3292,6 @@ onUnmounted(() => {
               </table>
             </div>
           </section>
-        </template>
       </template>
 
       <template v-else>

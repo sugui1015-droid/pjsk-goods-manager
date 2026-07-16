@@ -139,19 +139,21 @@ type PaymentItem struct {
 }
 
 type Order struct {
-	// ID is used internally to fetch this order's items and is deliberately
-	// not serialized — regular users identify their own orders by OrderNo,
-	// a human-facing code, not an internal database id.
-	ID              string      `json:"-"`
-	OrderNo         string      `json:"order_no"`
-	Status          string      `json:"status"`
-	ProjectName     string      `json:"project_name"`
 	TotalQuantity   float64     `json:"total_quantity"`
 	TotalAmount     float64     `json:"total_amount"`
 	PaidAmount      float64     `json:"paid_amount"`
 	RemainingAmount float64     `json:"remaining_amount"`
-	CreatedAt       string      `json:"created_at"`
 	Items           []OrderItem `json:"items"`
+}
+
+// orderRow contains the only order-level database field needed while
+// assembling the public response. It is deliberately separate from Order so
+// source-derived order numbers/project names can never be serialized by the
+// regular-user endpoint.
+type orderRow struct {
+	ID            string
+	TotalQuantity float64
+	TotalAmount   float64
 }
 
 // OrderItem is the regular-user-facing view of an order line. It
@@ -495,18 +497,13 @@ func (s *PostgresStore) ListOrdersForUser(ctx context.Context, userID string) (O
 	rows, err := s.pool.Query(ctx, `
 		select
 			o.id::text,
-			o.order_no,
-			o.status,
-			p.name,
 			coalesce(sum(oi.quantity), 0)::float8,
-			coalesce(sum(oi.amount), 0)::float8,
-			to_char(o.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+			coalesce(sum(oi.amount), 0)::float8
 		from orders o
-		join projects p on p.id = o.project_id
 		left join order_items oi on oi.order_id = o.id and oi.revoked_at is null
 		where o.user_id = $1::uuid
 		  and o.status <> 'cancelled'
-		group by o.id, o.order_no, o.status, p.name, o.created_at
+		group by o.id, o.created_at
 		having count(oi.id) > 0
 		order by o.created_at desc, o.id desc
 	`, userID)
@@ -517,23 +514,23 @@ func (s *PostgresStore) ListOrdersForUser(ctx context.Context, userID string) (O
 
 	response := OrdersResponse{Orders: []Order{}, Payments: []PaymentRecord{}}
 	for rows.Next() {
-		var order Order
+		var row orderRow
 		if err := rows.Scan(
-			&order.ID,
-			&order.OrderNo,
-			&order.Status,
-			&order.ProjectName,
-			&order.TotalQuantity,
-			&order.TotalAmount,
-			&order.CreatedAt,
+			&row.ID,
+			&row.TotalQuantity,
+			&row.TotalAmount,
 		); err != nil {
 			return OrdersResponse{}, err
 		}
-		items, err := s.listOrderItems(ctx, order.ID)
+		items, err := s.listOrderItems(ctx, row.ID)
 		if err != nil {
 			return OrdersResponse{}, err
 		}
-		order.Items = items
+		order := Order{
+			TotalQuantity: row.TotalQuantity,
+			TotalAmount:   round2(row.TotalAmount),
+			Items:         items,
+		}
 		for _, item := range items {
 			order.PaidAmount = round2(order.PaidAmount + item.PaidAmount)
 			order.RemainingAmount = round2(order.RemainingAmount + item.RemainingAmount)
