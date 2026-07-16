@@ -104,7 +104,7 @@ nssm stop pjsk-backend
 nssm remove pjsk-backend confirm
 ```
 
-验收结果（2026-07-16，详见开发日志）：首次启动 Running、`/health` 200、`database=connected`、无迁移重放；受控停止/重新启动通过；强制终止后端子进程后 NSSM 按 5 秒延迟自动拉起新进程（恢复约 15.9 秒）、health 恢复 200。真实开机自启未做重启验证。
+验收结果（2026-07-16，详见开发日志）：首次启动 Running、`/health` 200、`database=connected`、无迁移重放；受控停止/重新启动通过；强制终止后端子进程后 NSSM 按 5 秒延迟自动拉起新进程（恢复约 15.9 秒）、health 恢复 200。真实整机重启自启验收已于 2026-07-16 通过（重启后 PostgreSQL、后端与 Caddy 网关均自动 Running，health 200，未人工启动任何程序）。
 
 ---
 

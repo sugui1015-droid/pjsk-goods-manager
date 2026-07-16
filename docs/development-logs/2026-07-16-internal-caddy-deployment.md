@@ -83,7 +83,7 @@
 
 - 当时已完成：§1–§9；`pjsk-backend` 全程 Running、health 200；Git 工作区仅含本日志与 `deploy/windows-service/`（新模板 + README 行）。
 - 当时待执行（管理员）：脚本 1→2→3→4——后续已全部执行并通过，见 §11–§12。
-- 当时待人工事项中：跨设备访问已在 §16 通过 Windows 移动热点完成验证；内网域名/DNS、HTTPS 与内部 CA、真实整机重启自启验证、Caddy 升级回滚演练、前端业务人工验收至今仍为待办（见 §15）。
+- 当时待人工事项中：跨设备访问已在 §16 通过 Windows 移动热点完成验证；真实整机重启自启验收已在 §17 通过；内网域名/DNS、HTTPS 与内部 CA、Caddy 升级回滚演练、前端业务人工验收至今仍为待办（见 §15）。
 
 ## 11. 安装 / 防火墙 / 验收执行结果（管理员脚本，已通过）
 
@@ -128,7 +128,7 @@
 - 端口 80 仍由 IIS/W3SVC 持有，本轮未停止、未修改。
 - 服务：`pjsk-backend` Running/Automatic（未受本轮影响）；`pjsk-caddy` Running/Automatic，LocalService，依赖 `pjsk-backend`，Application `D:\PJSK-Service\caddy\caddy.exe`，配置 `D:\PJSK-Service\caddy\Caddyfile`，前端 `D:\PJSK-Deploy\frontend`，日志 `D:\PJSK-Runtime\logs\caddy`，监听 8081。
 - 防火墙：`PJSK Caddy HTTP LAN`（Inbound/Allow/TCP 8081/Private/LocalSubnet/限定 caddy.exe）。
-- 尚未完成（不得声称已通过）：内网域名与 DNS、HTTPS、内部 CA/证书信任、真实整机重启自启验收、Caddy 升级与回滚演练、全部业务页面人工验收。（跨设备访问已于 §16 验证通过。）
+- 尚未完成（不得声称已通过）：内网域名与 DNS、HTTPS、内部 CA/证书信任、Caddy 升级与回滚演练、全部业务页面人工验收、PostgreSQL 5432 全地址监听收敛（独立处理，见 §13）、原 CMCC-4cXx 网络设备隔离问题（仅在需要该网络多设备互访时处理）。（跨设备访问已于 §16 验证通过；真实整机重启自启验收已于 §17 通过。）
 - 全程未使用子代理；未修改后端/数据库/PostgreSQL/`.env`；未强制推送。
 
 ## 16. 跨设备人工验收（已完成，2026-07-16 下午）
@@ -145,3 +145,18 @@
   - Windows 电脑开启移动热点，手机关闭 VPN 与移动数据后接入该热点；
   - 手机成功打开 Caddy 局域网入口：首页正常、`/health` 正常，前后端链路正常。
 - 因此网关的跨设备访问能力已实际验证通过；若需在 CMCC-4cXx 下多设备使用，需由用户自行评估调整路由器隔离设置（本轮不涉及）。
+
+## 17. 真实整机重启与自动启动验收（已通过，2026-07-16）
+
+**结论：三个服务全部通过真实整机重启后的自动启动验收；全程未人工启动任何程序。**
+
+- 验收条件：执行 Windows 真实整机重启；登录桌面后仅等待服务自行启动；未手动运行 `pnpm dev`、`run.cmd`、`pjsk-backend.exe`、`caddy.exe`、`nssm.exe`，未手动启动或重启任何服务。
+- 重启后服务状态（`Get-Service` 只读）：`postgresql-x64-18` Running/Automatic、`pjsk-backend` Running/Automatic、`pjsk-caddy` Running/Automatic。
+- 重启后监听（只读观察；**PID 仅为本次验收证据，重启或服务恢复后会变化，不是固定配置**）：
+  - PostgreSQL：`0.0.0.0:5432` 与 `[::]:5432`（本次证据 PID 9628）——仍为全地址监听，属已登记的独立遗留风险（§13），本次验收未处理、未修改；
+  - 后端：`127.0.0.1:8080`（本次证据 PID 10944）——继续仅监听回环；
+  - Caddy：`[::]:8081`（本次证据 PID 16128）——双栈通配监听，属正常形态，实际可达性受防火墙（Private+LocalSubnet+限定 caddy.exe）约束；
+  - 5173：无监听（Vite 开发服务器未运行）。
+- HTTP 检查（重启后均 HTTP 200）：后端直连 `http://127.0.0.1:8080/health`、Caddy 首页 `http://127.0.0.1:8081/`、Caddy 代理 `http://127.0.0.1:8081/health`。
+- 跨设备访问在真实整机重启后再次通过 Windows 移动热点验证（手机重新连接电脑热点后网页正常访问）。原 CMCC-4cXx 网络仍疑似存在客户端/AP 隔离，未通过、未处理（见 §16）。
+- 至此"真实整机重启自启验收"从待办中移除；剩余待办见 §15。
