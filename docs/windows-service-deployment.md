@@ -6,7 +6,7 @@
 
 > 占位约定：域名 `pjsk.internal.example`、待替换值 `CHANGE_ME`、密钥文件 `D:\pjsk\secrets\backend.env`、日志目录 `D:\pjsk\runtime\logs`、服务账户 `LocalSystem`/`NetworkService`/专用账户仅作说明。请在实际部署时替换，切勿把真实值提交 Git。
 >
-> **本文正文中的安装、注册、启动、账户、ACL、防火墙命令均为通用示例。** 实际部署状态（2026-07-16）：后端 `pjsk-backend` 已在本机由 **NSSM** 以 `NT AUTHORITY\LocalService` 服务化运行（本次使用的 WinSW v3 系列二进制在受限服务账户下启动失败，见 §3 注意事项；完整取证与实际参数见 [development-logs/2026-07-16-windows-service-deployment.md](development-logs/2026-07-16-windows-service-deployment.md)）。`pjsk-caddy` 反代服务仍未部署。
+> **本文正文中的安装、注册、启动、账户、ACL、防火墙命令均为通用示例。** 实际部署状态（2026-07-16）：后端 `pjsk-backend` 已在本机由 **NSSM** 以 `NT AUTHORITY\LocalService` 服务化运行（本次使用的 WinSW v3 系列二进制在受限服务账户下启动失败，见 §3 注意事项；完整取证与实际参数见 [development-logs/2026-07-16-windows-service-deployment.md](development-logs/2026-07-16-windows-service-deployment.md)）。同日 **`pjsk-caddy`（显示名 PJSK Goods Manager Web Gateway）也已由 NSSM 部署**：Caddy v2.11.4、LocalService、Automatic、依赖 `pjsk-backend`，监听 **8081**（80 被本机 IIS/W3SVC 占用，未触碰），静态前端在仓库外 `D:\PJSK-Deploy\frontend`，日志 `D:\PJSK-Runtime\logs\caddy`，防火墙仅放行 TCP 8081（Private+LocalSubnet+限定 caddy.exe）；当前为局域网 HTTP 阶段，HTTPS 未启用。执行记录见 [development-logs/2026-07-16-internal-caddy-deployment.md](development-logs/2026-07-16-internal-caddy-deployment.md)。
 
 ---
 
@@ -42,7 +42,7 @@ D:\pjsk\
 | 服务 | 内容 | 由本项目管理 |
 | --- | --- | --- |
 | `pjsk-backend` | Go 后端 `pjsk-backend.exe`，仅监听 `127.0.0.1:8080` | 是（本文示例） |
-| `pjsk-caddy` | Caddy：HTTPS 443 + 静态前端 + 反代 `/api`、`/health` | 是（本文示例） |
+| `pjsk-caddy` | Caddy：静态前端 + 反代 `/api`、`/health`（目标形态 HTTPS 443；本机当前为局域网 HTTP 8081 阶段） | 是（本文示例） |
 | PostgreSQL | 数据库，保留其**现有独立服务** | **否**——不由本项目脚本创建、启动、停止或改配置 |
 
 **服务关系**：
@@ -202,7 +202,7 @@ Test-NetConnection 127.0.0.1 -Port 8080            # 端口监听
 
 ---
 
-## 10. 安装 / 升级 / 回滚 / 卸载流程（人工步骤；后端已于 2026-07-16 按 §4 NSSM 路线完成安装，Caddy 部分仍未执行）
+## 10. 安装 / 升级 / 回滚 / 卸载流程（人工步骤；后端与 Caddy 网关均已于 2026-07-16 按 NSSM 路线完成安装）
 
 ### 安装（通用示例；本机后端实际安装见 §4 与开发日志）
 

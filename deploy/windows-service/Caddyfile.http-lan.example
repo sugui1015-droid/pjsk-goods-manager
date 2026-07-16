@@ -1,0 +1,70 @@
+# 示例文件，禁止直接用于生产环境。
+# EXAMPLE ONLY — DO NOT USE IN PRODUCTION AS-IS.
+#
+# 用途：局域网内 HTTP（无 HTTPS）阶段的 Caddy 网关——静态前端 + SPA 回退 +
+# 反代 /api/* 与 /health 到本机 Go 后端。全部路径与端口均为占位，替换后使用。
+# 正式 Caddyfile 放在仓库外（如 D:\PJSK-Service\caddy\Caddyfile），不得提交 Git。
+#
+# 路由事实（backend/internal/api/router.go）：后端只暴露 /health 与 /api/*；
+# /admin/* 是前端 SPA 路由，不得代理到后端。
+#
+# 端口提示：若本机 80 已被 IIS/http.sys 占用（netsh http show servicestate 可查），
+# 换用其他空闲端口（本仓库实际部署机使用 8081），不要停用未知的 IIS 站点。
+
+{
+	# 局域网 HTTP 阶段：关闭 admin API 与自动 HTTPS；启用 HTTPS 见 docs/internal-https-reverse-proxy.md
+	admin off
+	auto_https off
+}
+
+# 占位端口：按本机实际空闲端口替换（不要用 8080/5173/5432）
+:80 {
+	encode zstd gzip
+
+	# 后端 Excel 预览上限 20 MiB，留余量
+	request_body {
+		max_size 25MB
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# 只代理后端真实路由：/api/* 与 /health
+	@backend path /api/* /health
+	handle @backend {
+		header Cache-Control "no-store"
+		# Caddy 会自行设置 X-Forwarded-For / X-Forwarded-Proto，且默认忽略不受信客户端
+		# 自带的 X-Forwarded-* 值，无需显式 header_up；配合后端
+		# TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128 即可取到真实客户端 IP
+		reverse_proxy 127.0.0.1:8080 {
+			header_up Host {host}
+		}
+	}
+
+	# 其余路径：静态前端 + SPA history 回退（占位路径，替换为仓库外正式前端目录）
+	handle {
+		root * D:\CHANGE_ME\frontend
+
+		# 指纹资源长缓存；入口与其他文件走协商缓存
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+
+		@nonassets not path /assets/*
+		header @nonassets Cache-Control "no-cache"
+
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		# 占位路径；Caddy 默认将 Authorization/Cookie/Set-Cookie 记录为 REDACTED
+		output file D:\CHANGE_ME\logs\caddy\access.log {
+			roll_size 10MiB
+			roll_keep 8
+		}
+	}
+}

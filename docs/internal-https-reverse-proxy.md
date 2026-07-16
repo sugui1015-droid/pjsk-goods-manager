@@ -5,6 +5,8 @@
 相关文档：[internal-network-deployment.md](internal-network-deployment.md)（`SERVER_HOST` / `TRUSTED_PROXY_CIDRS` / `CORS_ALLOWED_ORIGINS` 语义）、[internal-deployment-secrets.md](internal-deployment-secrets.md)（密钥生成与 Windows 保存）、[database-backup-restore.md](database-backup-restore.md)（备份恢复）。
 
 > 占位约定：域名 `pjsk.internal.example`、内网 IP `192.168.1.10`、待替换值 `CHANGE_ME`、密钥/证书目录 `D:\pjsk\secrets\...`。请在实际部署时全部替换，切勿把真实值提交到 Git。
+>
+> **部署状态（2026-07-16）**：本机已完成**局域网 HTTP 阶段**——Caddy v2.11.4 以 NSSM 服务 `pjsk-caddy`（LocalService）监听 `:8081`（80 被本机 IIS/W3SVC 占用，未触碰），提供仓库外正式前端静态站 + SPA 回退，并反代 `/api/*`、`/health` 到 `127.0.0.1:8080`；防火墙仅放行 TCP 8081（Private + LocalSubnet + 限定 caddy.exe）。执行记录见 [development-logs/2026-07-16-internal-caddy-deployment.md](development-logs/2026-07-16-internal-caddy-deployment.md)。本文的 HTTPS、内网域名、内部 CA 部分**仍未执行**。
 
 ---
 
@@ -79,11 +81,11 @@ pjsk.internal.example {
     encode zstd gzip
 
     # 1) 后端 API 与健康检查 → 本机 Go 后端
+    # Caddy 会自行设置 X-Forwarded-For / X-Forwarded-Proto，且默认忽略不受信客户端
+    # 自带的 X-Forwarded-* 值，无需显式 header_up 这两项
     @backend path /api/* /health
     handle @backend {
         reverse_proxy 127.0.0.1:8080 {
-            header_up X-Forwarded-For {remote_host}   # 覆盖客户端伪造值，不透传
-            header_up X-Forwarded-Proto {scheme}
             header_up Host {host}
         }
     }
@@ -114,7 +116,7 @@ pjsk.internal.example {
 }
 ```
 
-- **客户端真实 IP**：`header_up X-Forwarded-For {remote_host}` 用真实连接地址**覆盖**（而非追加）客户端可能伪造的头；配合后端 `TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128`，后端即可取到真实客户端 IP。
+- **客户端真实 IP**：Caddy（v2.5+）默认只信任 `trusted_proxies` 里的来源，未配置时会**忽略客户端自带的 `X-Forwarded-*` 并以真实连接地址重设**，因此无需显式 `header_up X-Forwarded-For/-Proto`（2026-07-16 已从实际部署与示例中移除冗余行）；配合后端 `TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128`，后端即可取到真实客户端 IP。
 - **PostgreSQL 不代理**：配置中没有任何指向 5432 的入口，数据库不经反代暴露。
 - **开发端口不代理**：不代理 Vite 5173；正式访问只走 443。
 - **WebSocket**：**当前项目无 WebSocket 需求**，无需 `@ws`/`Connection Upgrade` 特殊处理。
