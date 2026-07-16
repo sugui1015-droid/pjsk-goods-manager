@@ -14,7 +14,8 @@
 
 - 这些文件**不会**自动安装/注册/启动/停止任何 Windows 服务，**不会**创建账户、改 ACL、改注册表、改防火墙，**不会**下载 WinSW/NSSM/Caddy。
 - 真实密钥/DSN/证书私钥**不放入**本目录任何文件；后端真实环境变量放在仓库外、ACL 受限的 `D:\pjsk\secrets\backend.env`，由后端 `godotenv` 从工作目录读取。
-- 推荐 **WinSW**（配置可审查、失败重启、日志滚动）；**NSSM** 仅作备选，命令模板见主文档 §4，均标注"示例，当前未执行"。
+- 模板层面首选 **WinSW**（配置可审查、失败重启、日志滚动）；但 2026-07-16 本机实测：本次使用的 WinSW v3 系列二进制（文件版本 3.0.0.0）以 `NT AUTHORITY\LocalService` 进入 service mode 即 `Failed to open the service. 拒绝访问`（与 winsw/winsw#872 一致，失败在后端子进程启动前），**本机实际改用 NSSM 完成 `pjsk-backend` 部署并通过启停/异常恢复验收**。实际参数见主文档 §4，取证与验收记录见 [docs/development-logs/2026-07-16-windows-service-deployment.md](../../docs/development-logs/2026-07-16-windows-service-deployment.md)。
+- 本目录只是占位模板，模板本身不会部署任何东西。本机实际使用的包装器、正式配置与运行日志（`D:\PJSK-Service\backend\nssm.exe`、旧 WinSW 取证文件、`D:\PJSK-Runtime\logs\backend\`）全部位于**仓库外**，不属于本目录内容，也不得复制入仓库；本机实际的 `.env` 位于 `backend\.env`（已 gitignore、ACL 收紧，LocalService 只读）。
 - Caddy 服务示例与 [deploy/caddy/Caddyfile.example](../caddy/Caddyfile.example) 对齐。
 - WinSW 字段语义以所用版本官方文档为准；若存疑不要照搬。
 

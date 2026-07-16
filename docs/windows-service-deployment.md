@@ -6,7 +6,7 @@
 
 > 占位约定：域名 `pjsk.internal.example`、待替换值 `CHANGE_ME`、密钥文件 `D:\pjsk\secrets\backend.env`、日志目录 `D:\pjsk\runtime\logs`、服务账户 `LocalSystem`/`NetworkService`/专用账户仅作说明。请在实际部署时替换，切勿把真实值提交 Git。
 >
-> **本文所有安装、注册、启动、账户、ACL、防火墙操作均为示例，本阶段一律未执行。**
+> **本文正文中的安装、注册、启动、账户、ACL、防火墙命令均为通用示例。** 实际部署状态（2026-07-16）：后端 `pjsk-backend` 已在本机由 **NSSM** 以 `NT AUTHORITY\LocalService` 服务化运行（本次使用的 WinSW v3 系列二进制在受限服务账户下启动失败，见 §3 注意事项；完整取证与实际参数见 [development-logs/2026-07-16-windows-service-deployment.md](development-logs/2026-07-16-windows-service-deployment.md)）。`pjsk-caddy` 反代服务仍未部署。
 
 ---
 
@@ -58,6 +58,8 @@ D:\pjsk\
 
 **优先推荐 WinSW**，理由：配置为可审查的 XML（服务 ID/名称/工作目录/环境变量/日志策略/失败重启都在文件里，可随部署模板管理与评审）；支持失败重启与日志滚动；无需把密码放到服务命令行参数。
 
+> **本机实测注意（2026-07-16）**：本次使用的 WinSW v3 系列二进制（文件版本 3.0.0.0）以受限账户 `NT AUTHORITY\LocalService` 运行时，进入 service mode 约 97 毫秒即 `FATAL: Failed to open the service. 拒绝访问`，失败发生在后端子进程启动之前（后端无日志、8080 未监听、数据库未变）。表现与 WinSW v3 打开自身服务对象时请求过高访问权限、受限账户被拒的已知问题一致（<https://github.com/winsw/winsw/issues/872>）。本机因此改用 §4 的 NSSM 方案完成部署。若要在受限账户下使用 WinSW，先在目标版本上验证该问题已修复；**不要**用扩大服务 SDDL、授予服务账户完全访问或改用 `LocalSystem` 绕过。
+
 完整示例见 [deploy/windows-service/backend-winsw.xml.example](../deploy/windows-service/backend-winsw.xml.example) 与 [caddy-winsw.xml.example](../deploy/windows-service/caddy-winsw.xml.example)。要点字段：服务 `id`/`name`/`description`、`executable`、`workingdirectory`、`arguments`、`log`（`logpath` + 滚动模式）、`stoptimeout`、`startmode=Automatic`、`onfailure` 重启 + `resetfailure`、`env` 环境变量、依赖说明。
 
 **WinSW 对环境文件的真实支持**（不虚构功能）：WinSW 通过 XML 的 `<env name="X" value="Y"/>` 设置进程环境变量，**并不原生解析 dotenv `.env` 文件**。因此对密钥有两种可验证做法：
@@ -70,29 +72,39 @@ D:\pjsk\
 
 ---
 
-## 4. NSSM 备选方案（仅备选，示例，当前未执行）
+## 4. NSSM 方案（本机实际采用，2026-07-16 部署并验收通过）
 
-NSSM 作为备选。以下命令**均为示例，当前未执行**，且不得自动下载 NSSM：
+因 WinSW v3 受限账户失败（见 §3 注意事项），本机后端最终采用 **NSSM 2.24-101-g897c7ad**（nssm.cc 官方下载，zip 经 nssm.cc SHA-1 与 Microsoft winget 清单 SHA-256 双源核验；Windows 10 Creators Update 及更新系统官方建议用该预发布而非 2014 年的 2.24 稳定版）。仍然**不得自动下载 NSSM**；真实密钥只放工作目录下受 ACL 保护的 `.env`，不写入 NSSM 注册表参数。以下参数与本机实际配置一致：
 
 ```powershell
-# 示例，当前未执行 —— 安装后端服务
+# 与本机实际部署一致（管理员 PowerShell；nssm.exe 位于仓库外服务目录）
 nssm install pjsk-backend "D:\pjsk\backend\bin\pjsk-backend.exe"
-# 示例，当前未执行 —— 工作目录（含受保护 backend.env）
-nssm set pjsk-backend AppDirectory "D:\pjsk\secrets"
-# 示例，当前未执行 —— 非敏感环境变量（密钥优先走工作目录 .env，勿在此写真实密钥）
-nssm set pjsk-backend AppEnvironmentExtra "APP_ENV=production"
-# 示例，当前未执行 —— stdout/stderr 落盘
-nssm set pjsk-backend AppStdout "D:\pjsk\runtime\logs\backend-out.log"
-nssm set pjsk-backend AppStderr "D:\pjsk\runtime\logs\backend-err.log"
-# 示例，当前未执行 —— 自动重启与退避（避免快速无限重启）
+nssm set pjsk-backend DisplayName "PJSK Goods Manager Backend"
+# 工作目录：含受 ACL 保护的 .env，由后端 godotenv 读取，密钥不进注册表
+nssm set pjsk-backend AppDirectory "D:\pjsk\backend"
+# 知名低权限账户，无需密码；不要用 LocalSystem
+nssm set pjsk-backend ObjectName "NT AUTHORITY\LocalService"
+nssm set pjsk-backend Start SERVICE_AUTO_START
+nssm set pjsk-backend DependOnService postgresql-x64-18
+# stdout/stderr 落盘（后端标准库日志走 stderr，backend-out.log 为空属正常）
+nssm set pjsk-backend AppStdout "D:\PJSK-Runtime\logs\backend\backend-out.log"
+nssm set pjsk-backend AppStderr "D:\PJSK-Runtime\logs\backend\backend-err.log"
+# 日志滚动：每日或 10 MB；注意 NSSM 无保留份数上限，日志目录需定期清理
+nssm set pjsk-backend AppRotateFiles 1
+nssm set pjsk-backend AppRotateOnline 1
+nssm set pjsk-backend AppRotateSeconds 86400
+nssm set pjsk-backend AppRotateBytes 10485760
+# 异常退出自动重启 + 节流（固定延迟，非递增退避）
 nssm set pjsk-backend AppExit Default Restart
 nssm set pjsk-backend AppRestartDelay 5000
 nssm set pjsk-backend AppThrottle 10000
-# 示例，当前未执行 —— 状态 / 停止 / 卸载
+# 状态 / 停止 / 卸载
 nssm status pjsk-backend
 nssm stop pjsk-backend
 nssm remove pjsk-backend confirm
 ```
+
+验收结果（2026-07-16，详见开发日志）：首次启动 Running、`/health` 200、`database=connected`、无迁移重放；受控停止/重新启动通过；强制终止后端子进程后 NSSM 按 5 秒延迟自动拉起新进程（恢复约 15.9 秒）、health 恢复 200。真实开机自启未做重启验证。
 
 ---
 
@@ -147,12 +159,12 @@ pnpm.cmd run build                   # vue-tsc -b && vite build → frontend\dis
 - 不建议长期用管理员个人账户运行服务；用专用低权限本地账户。
 - **不在日志中打印环境变量**（后端当前不打印；包装脚本也不得回显）。
 
-ACL 示例（**示例与检查方法，当前未执行**）：
+ACL 示例（**通用示例与检查方法**；本机实际已执行的 ACL——`backend\.env` 收紧为 SYSTEM/Administrators 完全控制、所有者修改、LocalService 只读，以及服务/日志目录授权——以开发日志为准）：
 
 ```powershell
-# 示例，当前未执行 —— 查看密钥目录 ACL
+# 通用示例 —— 查看密钥目录 ACL
 Get-Acl D:\pjsk\secrets | Format-List
-# 示例，当前未执行 —— 仅授予专用服务账户读取（占位账户名 CHANGE_ME）
+# 通用示例 —— 仅授予专用服务账户读取（占位账户名 CHANGE_ME）
 # icacls D:\pjsk\secrets /inheritance:r /grant:r "CHANGE_ME:(OI)(CI)R"
 ```
 
@@ -190,9 +202,9 @@ Test-NetConnection 127.0.0.1 -Port 8080            # 端口监听
 
 ---
 
-## 10. 安装 / 升级 / 回滚 / 卸载流程（人工步骤，本阶段未执行）
+## 10. 安装 / 升级 / 回滚 / 卸载流程（人工步骤；后端已于 2026-07-16 按 §4 NSSM 路线完成安装，Caddy 部分仍未执行）
 
-### 安装（示例，当前未执行）
+### 安装（通用示例；本机后端实际安装见 §4 与开发日志）
 
 1. 构建后端 exe 与前端 dist（见 §5、§6）。
 2. 准备 `D:\pjsk\secrets\backend.env`（真实值，ACL 受限，不进 Git）。
@@ -201,7 +213,7 @@ Test-NetConnection 127.0.0.1 -Port 8080            # 端口监听
 5. 确认 PostgreSQL 已运行，启动 `pjsk-backend`、`pjsk-caddy`。
 6. 复查 `/health`、HTTPS、登录。
 
-### 升级（示例，当前未执行）
+### 升级（通用示例；本机尚未执行过升级）
 
 1. 备份当前 `pjsk-backend.exe`、`frontend\dist`、`backend.env` 与相关配置。
 2. 构建并本地验证新版本（`go test`/`go build`；`pnpm build`）。
@@ -213,11 +225,11 @@ Test-NetConnection 127.0.0.1 -Port 8080            # 端口监听
 8. 检查上传、导出、邮件找回相关配置（若启用 SMTP）。
 9. 任一步失败：停服 → 用备份还原 exe/dist/配置 → 启动 → 复查。
 
-### 回滚（示例，当前未执行）
+### 回滚（通用示例；本机尚未执行过回滚）
 
 - 停 `pjsk-backend` → 覆盖回备份 exe → 启动 → `/health` 复查；前端同理还原 `dist` 备份。
 
-### 卸载（示例，当前未执行）
+### 卸载（通用示例；本机仅卸载过启动失败的 WinSW 服务，现役 NSSM 服务未卸载）
 
 - 停止并移除 `pjsk-backend`、`pjsk-caddy` 服务（`winsw uninstall` / `nssm remove ... confirm`）。
 - **卸载不得删除数据库、备份、日志或密钥**，除非人工单独确认。PostgreSQL 服务不由本项目卸载。
@@ -226,7 +238,7 @@ Test-NetConnection 127.0.0.1 -Port 8080            # 端口监听
 
 ## 11. 安全边界
 
-- 本文所有安装/注册/启动/停止/账户/ACL/防火墙/注册表操作均为**示例，本阶段未执行**。
+- 本文命令均为通用示例；本机实际执行情况（NSSM 部署 `pjsk-backend`、相关目录/文件 ACL 与验收）以 [development-logs/2026-07-16-windows-service-deployment.md](development-logs/2026-07-16-windows-service-deployment.md) 为准。防火墙、hosts、系统环境变量、PostgreSQL 配置均未改动；注册表仅由 NSSM 自身写入其服务参数（不含任何密钥）。
 - 本仓库不含真实域名、IP、账户、密码、DSN、密钥、证书私钥；`deploy/windows-service/` 下均为占位示例。
 - PostgreSQL 服务保留现状，本项目脚本不创建、不启停、不改配置。
 - 密钥只存放于仓库外、ACL 受限的本地文件，不进入 XML 命令行、不进入 Git、不在日志回显。
