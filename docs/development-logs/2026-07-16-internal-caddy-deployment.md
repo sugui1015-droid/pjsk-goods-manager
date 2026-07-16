@@ -77,17 +77,19 @@
 4. `Test-PjskCaddyReliability.ps1` — 受控停止（含后端不受影响核验）→ 重启 → 精确识别 NSSM 子进程并单杀一次验证自动恢复（识别不唯一则跳过并说明）→ 终态复核（8080 仅回环、5173 无监听、5432 只读记录）。
 5. `Remove-PjskCaddyRollback.ps1` — 仅回滚本轮资源（服务 + 防火墙规则），保留下载物/哈希/日志/前端目录，不触碰后端。
 
-## 10. 状态（截至脚本交付时刻）
+## 10. 状态快照（脚本交付时的历史中间状态；后续结果见 §11–§16，最终状态以 §15–§16 为准）
 
-- 已完成：§1–§9；`pjsk-backend` 全程 Running、health 200；Git 工作区仅含本日志与 `deploy/windows-service/`（新模板 + README 行）。
-- 待执行（管理员）：脚本 1→2→3→4；输出回传审核后补记验收与终态，再更新 `docs/internal-https-reverse-proxy.md`、`docs/windows-service-deployment.md`、`HANDOVER.md` 并提交推送（提交门禁要求 pjsk-caddy Running）。
-- 待人工（本轮之外）：第二台设备跨设备访问、内网域名/DNS、HTTPS 与内部 CA、真实整机重启自启验证、Caddy 升级回滚演练、前端业务人工验收。
+> 以下是脚本交付时的历史中间状态记录，其中的"待执行/待人工"事项此后均已推进，不代表当前待办。
+
+- 当时已完成：§1–§9；`pjsk-backend` 全程 Running、health 200；Git 工作区仅含本日志与 `deploy/windows-service/`（新模板 + README 行）。
+- 当时待执行（管理员）：脚本 1→2→3→4——后续已全部执行并通过，见 §11–§12。
+- 当时待人工事项中：跨设备访问已在 §16 通过 Windows 移动热点完成验证；内网域名/DNS、HTTPS 与内部 CA、真实整机重启自启验证、Caddy 升级回滚演练、前端业务人工验收至今仍为待办（见 §15）。
 
 ## 11. 安装 / 防火墙 / 验收执行结果（管理员脚本，已通过）
 
 - `Install-PjskCaddyService.ps1`：INSTALL-OK——`pjsk-caddy`（PJSK Goods Manager Web Gateway）安装并保持 Stopped，LocalService、SERVICE_AUTO_START、依赖 `pjsk-backend`，NSSM 参数与 §9 一致。
 - `Add-PjskCaddyFirewallRule.ps1`：FIREWALL-OK——`PJSK Caddy HTTP LAN`：Inbound / Allow / TCP 8081 / Profile=Private / RemoteAddress=LocalSubnet / Program=`D:\PJSK-Service\caddy\caddy.exe`，读回逐项核验一致。
-- `Start-PjskCaddyAcceptance.ps1`：ACCEPTANCE-OK——全部检查通过：服务 Running、恰 1 个 caddy 进程且拥有 8081、后端不受影响（Running、8080 仅回环）、`/` 与 `localhost` 200（产物 SPA index，非 Vite/非 Caddy 欢迎页）、经代理 `/health` 200 且 database=connected、抽样 JS 资源 200、SPA 回退（/admin/orders、/query）200、`/api/config` 200 JSON、未认证 `/api/admin/orders` 401 非 HTML、无目录列表、本机经 `http://192.168.1.10:8081/` 与 `/health` 均 200。**跨设备验收仍待人工完成。**
+- `Start-PjskCaddyAcceptance.ps1`：ACCEPTANCE-OK——全部检查通过：服务 Running、恰 1 个 caddy 进程且拥有 8081、后端不受影响（Running、8080 仅回环）、`/` 与 `localhost` 200（产物 SPA index，非 Vite/非 Caddy 欢迎页）、经代理 `/health` 200 且 database=connected、抽样 JS 资源 200、SPA 回退（/admin/orders、/query）200、`/api/config` 200 JSON、未认证 `/api/admin/orders` 401 非 HTML、无目录列表、本机经 `http://192.168.1.10:8081/` 与 `/health` 均 200。**该脚本执行当时跨设备验收尚未完成；后续已通过 Windows 移动热点完成人工验证，见 §16。**
 
 ## 12. 第一次可靠性测试：终态检查假失败与独立复核（重要更正）
 
@@ -108,7 +110,7 @@
 - 管理员只读观察：PostgreSQL 监听 `0.0.0.0:5432` 与 `[::]:5432`（全地址）。这是**本轮之前已存在**的状态，与 Caddy 部署无关；本轮未开放 5432 防火墙、未代理 5432、未修改 PostgreSQL 任何配置。
 - 登记为独立安全风险：建议后续单独评估将 `listen_addresses` 收敛为 `127.0.0.1`（需 PostgreSQL 重启窗口与授权），本轮不动。
 
-## 14. Caddyfile 精简（去冗余 header_up，待执行）
+## 14. Caddyfile 精简（去冗余 header_up，已完成）
 
 - 依据：Caddy 会自行设置 `X-Forwarded-For` / `X-Forwarded-Proto`，且默认忽略不受信客户端自带的 X-Forwarded-* 值；显式 `header_up` 两行冗余。删除后行为不变（后端 `TRUSTED_PROXY_CIDRS` 回环白名单不变）。
 - 脱敏模板 `deploy/windows-service/Caddyfile.http-lan.example` 已同步删除并更新注释。
