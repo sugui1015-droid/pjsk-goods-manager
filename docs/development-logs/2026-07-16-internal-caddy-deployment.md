@@ -122,9 +122,24 @@
 
 ## 15. 最终状态汇总
 
-- 局域网入口 `http://192.168.1.10:8081/`（仅本机通过该地址验证；跨设备待人工）；本机回环 `http://127.0.0.1:8081/`；代理健康 `http://192.168.1.10:8081/health`。
+- 局域网入口 `http://192.168.1.10:8081/`；本机回环 `http://127.0.0.1:8081/`；代理健康 `http://192.168.1.10:8081/health`。跨设备访问已通过 Windows 移动热点完成人工验证（见 §16；原 CMCC-4cXx 网络因疑似客户端隔离无法设备互访）。
 - 端口 80 仍由 IIS/W3SVC 持有，本轮未停止、未修改。
 - 服务：`pjsk-backend` Running/Automatic（未受本轮影响）；`pjsk-caddy` Running/Automatic，LocalService，依赖 `pjsk-backend`，Application `D:\PJSK-Service\caddy\caddy.exe`，配置 `D:\PJSK-Service\caddy\Caddyfile`，前端 `D:\PJSK-Deploy\frontend`，日志 `D:\PJSK-Runtime\logs\caddy`，监听 8081。
 - 防火墙：`PJSK Caddy HTTP LAN`（Inbound/Allow/TCP 8081/Private/LocalSubnet/限定 caddy.exe）。
-- 尚未完成（不得声称已通过）：第二台设备跨设备访问、内网域名与 DNS、HTTPS、内部 CA/证书信任、真实整机重启自启验收、Caddy 升级与回滚演练、全部业务页面人工验收。
+- 尚未完成（不得声称已通过）：内网域名与 DNS、HTTPS、内部 CA/证书信任、真实整机重启自启验收、Caddy 升级与回滚演练、全部业务页面人工验收。（跨设备访问已于 §16 验证通过。）
 - 全程未使用子代理；未修改后端/数据库/PostgreSQL/`.env`；未强制推送。
+
+## 16. 跨设备人工验收（已完成，2026-07-16 下午）
+
+**结论：跨设备访问已通过 Windows 移动热点完成验证；原 CMCC-4cXx 网络因疑似客户端隔离无法设备互访。**
+
+- 原 CMCC-4cXx Wi-Fi 下的实测（失败，网络侧限制）：
+  - 电脑 IP `192.168.1.10`，手机 IP `192.168.1.11`；
+  - 手机访问 `http://192.168.1.10:8081/` 返回 `ERR_ADDRESS_UNREACHABLE`；
+  - 电脑 `ping 192.168.1.11` 返回"无法访问目标主机"；
+  - 判定为该 Wi-Fi 存在客户端/AP 隔离或设备互访限制（双向皆不可达，非 Caddy/防火墙问题）；
+  - 未修改路由器、Wi-Fi、Caddy、防火墙或任何服务。
+- 替代验证（成功）：
+  - Windows 电脑开启移动热点，手机关闭 VPN 与移动数据后接入该热点；
+  - 手机成功打开 Caddy 局域网入口：首页正常、`/health` 正常，前后端链路正常。
+- 因此网关的跨设备访问能力已实际验证通过；若需在 CMCC-4cXx 下多设备使用，需由用户自行评估调整路由器隔离设置（本轮不涉及）。
