@@ -136,3 +136,35 @@
 ## 14. 本轮边界声明
 
 未修改任何系统状态(防火墙、规则、网络类别、服务、注册表、Caddy、PostgreSQL、后端、数据库均未动);未提交、未推送;未使用子代理;唯一文件变更为本日志。
+
+## 15. 防火墙启用后真实整机重启验收 —— 重启前基线(2026-07-16 18:44)
+
+> 本章为防火墙第一阶段基线正式实施(§13)之后的整机重启自动恢复验收。只读采集,未做任何修改。
+
+- 采集时间:2026-07-16 18:44:19 +08:00;**重启前 Windows 启动时间:2026-07-16 14:31:25**(重启后启动时间必须晚于该值)。
+- Git:`main`,HEAD = origin/main = `815e30fe63f51ae81db3755bee72fa411eeb9944`,工作区与暂存区干净(除本日志追加)。
+- 服务:`postgresql-x64-18`、`pjsk-backend`、`pjsk-caddy`、`mpssvc` 均 Running / Auto。
+- 防火墙:Domain/Private/Public 均 Enabled、In=Block、Out=Allow、NotifyOnListen=True、LogBlocked=True。
+- 网络:`CMCC-4cXx` / WLAN idx16 / **Private** / 192.168.1.10(该路由器存在客户端/AP 隔离,同路由器手机访问失败不判为 PJSK 故障)。
+- 监听:5432 仅 `127.0.0.1`+`::1`(PID 720);8080 仅 `127.0.0.1`(PID 7408);8081 为 `[::]`(PID 4160)。
+- HTTP:后端直连 health、Caddy 首页、Caddy 代理 health 均 200。
+- PostgreSQL READ ONLY 验证(pgpass,显式只读事务,退出码 0):`listen_addresses='127.0.0.1, ::1'`、`context=postmaster`、`pending_restart=false`、`pg_file_settings` 目标行 `applied=true`、error 计数 0、迁移 19 条、最高 `0019_admin_auth_audit_events.sql`、`0019` 恰 1 条。
+- 备份存在性:防火墙备份 `D:\PJSK-Archive\firewall\backup-20260716-181833` 存在;`D:\PJSK-Archive\postgres` 下 PostgreSQL 配置备份 5 份存在。
+- 重启由用户人工执行 `Restart-Computer`;本会话不执行任何重启操作。
+
+### 重启后继续指令(中断恢复用,粘贴给 Codex)
+
+"继续执行 PJSK 真实整机重启后的自动恢复验收。不得修改配置,先确认 Windows 启动时间已经晚于重启前记录(2026-07-16 14:31:25),然后完成以下只读验证:服务自动启动(postgresql-x64-18 / pjsk-backend / pjsk-caddy / mpssvc 均 Running/Automatic,不得手动启动)、启动顺序事件、监听(5432 仅回环双栈、8080 仅 127.0.0.1、8081 正常)、防火墙三 profile 与 PJSK Caddy HTTP LAN 规则、三项 HTTP 200 与页面验证、数据库 READ ONLY 完整性(listen/context/pending/applied/19/0019/1)、后端 ::1→::1:5432 连接、网络访问记录;全部通过后追加日志、更新 HANDOVER.md,提交标题 docs: record full reboot validation 并普通推送。"
+
+## 16. 防火墙启用后真实整机重启验收 —— 重启后结果(全部通过,2026-07-16 18:51)
+
+- **真实整机重启确认**:重启后 Windows 启动时间 **2026-07-16 18:47:03**(晚于重启前 14:31:25),System 日志内核启动事件(Kernel-General Id=12,18:47:03)佐证,非注销/睡眠/仅重启服务。Git 工作区无重启导致的未知变化(唯一修改为重启前追加的本日志)。
+- **服务自动启动(未做任何手动启动)**:`postgresql-x64-18`、`pjsk-backend`、`pjsk-caddy`、`mpssvc` 均 Running / Auto。
+- **启动顺序**(Win32_Process 创建时间):postgres 主进程 18:47:18.7 → pjsk-backend 18:47:20.6 → caddy 18:47:30.7,与依赖链一致;各服务单一稳定 PID,自启动以来 SCM 无 7031/7034/7024 崩溃事件,PJSK/PostgreSQL 无任何服务失败事件,无 CrashLoop。
+- **监听**:5432 仅 `127.0.0.1`+`::1`(PID 9108);8080 仅 `127.0.0.1`(PID 7712);8081 `[::]`(PID 14560);PostgreSQL 无 `0.0.0.0`/`::` 监听,后端无非回环监听。
+- **防火墙**:三 profile 均 Enabled、In=Block、Out=Allow、NotifyOnListen=True、LogBlocked=True;`PJSK Caddy HTTP LAN` 唯一、启用、字段逐项正确(COM 数值核验:In/Allow/TCP/8081/LocalSubnet/Private/caddy.exe);无 5432/8080 入站允许规则;全程未关闭防火墙。
+- **HTTP 与页面**:后端直连 health、Caddy 首页、Caddy 代理 health 均 200;浏览器实测首页、`/query`(CN 查询页)、`/admin/orders`(SPA 回退至管理员登录页)均正常渲染,静态资源正常,控制台无红色错误;未登录、未新增用户、未录入付款、未改业务数据。
+- **数据库 READ ONLY 完整性**(pgpass,显式只读事务 `transaction_read_only=on`,退出码 0):`listen_addresses='127.0.0.1, ::1'`、`context=postmaster`、`pending_restart=false`、目标行 `applied=true`、error 计数 0、迁移 19 条、最高 `0019_admin_auth_audit_events.sql`、`0019` 恰 1 条;未读业务表。
+- **后端真实数据库连接**:OS TCP 连接表与 PID 交叉验证,`::1 → ::1:5432`(PID 7712),未读取 `.env` 或连接串。
+- **网络访问**:当前连接 `CMCC-4cXx`(Private),该路由器存在客户端/AP 隔离,同路由器手机访问失败不判为 PJSK 故障;本轮未重做手机热点测试——**本机重启验收通过,跨设备验收沿用此前已通过证据**(§13 与 Caddy 部署日志 §16)。
+- 边界:未手动启动服务;未修改任何配置、服务、防火墙、规则、路由器或数据库;未使用子代理。
