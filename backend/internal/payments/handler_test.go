@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ type fakeStore struct {
 	getCNUnpaidPayment func(context.Context, string) (CNPaymentResponse, error)
 	createPayment      func(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error)
 	listPaymentRecords func(context.Context, PaymentFilters) (PaymentListResponse, error)
+	paymentFacets      func(context.Context, FacetRequest) (FacetResponse, error)
 	getPaymentDetail   func(context.Context, string) (PaymentDetailResponse, error)
 	voidPayment        func(context.Context, VoidPaymentRequest, string) (PaymentDetailResponse, error)
 }
@@ -34,6 +36,13 @@ func (s fakeStore) GetCNUnpaidPayment(ctx context.Context, cn string) (CNPayment
 		return CNPaymentResponse{}, nil
 	}
 	return s.getCNUnpaidPayment(ctx, cn)
+}
+
+func (s fakeStore) PaymentFacets(ctx context.Context, request FacetRequest) (FacetResponse, error) {
+	if s.paymentFacets == nil {
+		return FacetResponse{Column: request.Column, Values: []FacetValue{}}, nil
+	}
+	return s.paymentFacets(ctx, request)
 }
 
 func (s fakeStore) CreatePayment(ctx context.Context, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
@@ -419,11 +428,23 @@ func TestCreateMapsUnknownErrors(t *testing.T) {
 func TestListPassesFilters(t *testing.T) {
 	handler := NewHandler(fakeStore{
 		listPaymentRecords: func(_ context.Context, filters PaymentFilters) (PaymentListResponse, error) {
-			if filters.CN != "CN001" || filters.PaymentMethod != "alipay" || filters.Status != "approved" || filters.PaidFrom != "2026-07-12T10:00:00+08:00" || filters.PaidTo != "2026-07-13T10:00:00+08:00" {
-				t.Fatalf("filters = %#v", filters)
+			// Naive datetime-local bounds stay anchored to Asia/Shanghai: the
+			// admin's wall-clock day must not shift with the database session's
+			// timezone.
+			if len(filters.CN) != 1 || filters.CN[0] != "CN001" {
+				t.Fatalf("CN = %#v", filters.CN)
 			}
-			if filters.Limit != 100 {
-				t.Fatalf("limit = %d, want 100", filters.Limit)
+			if len(filters.PaymentMethod) != 1 || filters.PaymentMethod[0] != "alipay" {
+				t.Fatalf("PaymentMethod = %#v (aliases must normalise)", filters.PaymentMethod)
+			}
+			if len(filters.Status) != 1 || filters.Status[0] != "approved" {
+				t.Fatalf("Status = %#v", filters.Status)
+			}
+			if filters.PaidFrom != "2026-07-12T10:00:00+08:00" || filters.PaidTo != "2026-07-13T10:00:00+08:00" {
+				t.Fatalf("paid range = %q..%q", filters.PaidFrom, filters.PaidTo)
+			}
+			if filters.Page != 1 || filters.PageSize != DefaultPageSize {
+				t.Fatalf("pagination = %d/%d", filters.Page, filters.PageSize)
 			}
 			return PaymentListResponse{Items: []PaymentListItem{{ID: "payment-1", CNCode: "CN001", Amount: 10, PaymentItemCount: 2}}}, nil
 		},
@@ -583,19 +604,40 @@ func TestParsePaymentTimeUsesChinaOffsetNotServerLocal(t *testing.T) {
 	}
 }
 
-func TestNormalizeChinaTimestampParam(t *testing.T) {
+// TestFilterTimestampsAnchorToChinaTime is the same guard that used to cover
+// normalizeChinaTimestampParam, repointed at the filter parser that now owns
+// this behaviour: a naive bound is the admin's wall-clock time in
+// Asia/Shanghai. Without the anchor Postgres would resolve the string using the
+// database session's timezone and the filtered day would silently shift.
+func TestFilterTimestampsAnchorToChinaTime(t *testing.T) {
 	cases := map[string]string{
-		"":                     "",
 		"2026-07-12T10:00":     "2026-07-12T10:00:00+08:00",
 		"2026-07-12T10:00:00":  "2026-07-12T10:00:00+08:00",
 		"2026-07-12":           "2026-07-12T00:00:00+08:00",
 		"2026-07-12T02:00:00Z": "2026-07-12T02:00:00Z",
-		"not-a-time":           "not-a-time",
 	}
 	for input, want := range cases {
-		if got := normalizeChinaTimestampParam(input); got != want {
-			t.Fatalf("normalizeChinaTimestampParam(%q) = %q, want %q", input, got, want)
+		query := url.Values{}
+		query.Set("paid_from", input)
+		filters, err := FiltersFromQuery(query)
+		if err != nil {
+			t.Fatalf("FiltersFromQuery(paid_from=%q): %v", input, err)
 		}
+		if filters.PaidFrom != want {
+			t.Fatalf("paid_from=%q -> %q, want %q", input, filters.PaidFrom, want)
+		}
+	}
+
+	// An absent bound stays empty; a malformed one is rejected rather than
+	// silently passed through to SQL.
+	empty, err := FiltersFromQuery(url.Values{})
+	if err != nil || empty.PaidFrom != "" {
+		t.Fatalf("absent paid_from = %q, err = %v", empty.PaidFrom, err)
+	}
+	bad := url.Values{}
+	bad.Set("paid_from", "not-a-time")
+	if _, err := FiltersFromQuery(bad); err == nil {
+		t.Fatal("malformed paid_from must be rejected")
 	}
 }
 

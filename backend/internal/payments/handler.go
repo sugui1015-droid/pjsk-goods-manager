@@ -45,6 +45,7 @@ type Store interface {
 	GetCNUnpaidPayment(context.Context, string) (CNPaymentResponse, error)
 	CreatePayment(context.Context, CreatePaymentRequest, string) (CreatePaymentResponse, error)
 	ListPaymentRecords(context.Context, PaymentFilters) (PaymentListResponse, error)
+	PaymentFacets(context.Context, FacetRequest) (FacetResponse, error)
 	GetPaymentDetail(context.Context, string) (PaymentDetailResponse, error)
 	VoidPayment(context.Context, VoidPaymentRequest, string) (PaymentDetailResponse, error)
 }
@@ -141,13 +142,39 @@ type VoidPaymentRequest struct {
 	Reason    string `json:"reason"`
 }
 
+// PaymentFilters is the full filter state behind the payment list, the facet
+// popovers and the payment export. Value columns are sets: a WPS header popover
+// lets the user tick several values at once.
+//
+// Voiding is expressed by Status containing "voided" — there is deliberately no
+// separate "is voided" flag, which would be a second control fighting the
+// status column for the same meaning. VoidedBlank/VoidedFrom/VoidedTo filter
+// the 撤销时间 column itself.
 type PaymentFilters struct {
-	CN            string
-	PaymentMethod string
-	Status        string
-	PaidFrom      string
-	PaidTo        string
-	Limit         int
+	CN            []string
+	PaymentMethod []string
+	Status        []string
+	CreatedBy     []string
+
+	PaidFrom string
+	PaidTo   string
+	// Range bounds stay validated decimal strings and are cast to numeric in
+	// SQL. They are never parsed into float64: money comparisons must not
+	// inherit binary floating-point rounding.
+	PrincipalMin string // inclusive bound on submitted_amount (本金)
+	PrincipalMax string
+	FeeMin       string // inclusive bound on fee_amount (手续费)
+	FeeMax       string
+	PayableMin   string // inclusive bound on payable_amount (实付金额)
+	PayableMax   string
+
+	// VoidedBlank selects payments that were never voided.
+	VoidedBlank bool
+	VoidedFrom  string
+	VoidedTo    string
+
+	Page     int
+	PageSize int
 }
 
 type PaymentListItem struct {
@@ -171,8 +198,15 @@ type PaymentListItem struct {
 	VoidReason       string  `json:"void_reason,omitempty"`
 }
 
+// PaymentListResponse is one page of the filtered result set. Total counts
+// every payment matching the filters, not just this page, so the page can
+// report "结果：共 N 条付款记录" honestly while loading only PageSize rows.
 type PaymentListResponse struct {
-	Items []PaymentListItem `json:"items"`
+	Items      []PaymentListItem `json:"items"`
+	Page       int               `json:"page"`
+	PageSize   int               `json:"page_size"`
+	Total      int               `json:"total"`
+	TotalPages int               `json:"total_pages"`
 }
 
 type PaymentDetailResponse struct {
@@ -235,18 +269,41 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filters, err := paymentFiltersFromRequest(r)
+	filters, err := FiltersFromQuery(r.URL.Query())
 	if err != nil {
 		writePaymentError(w, err)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	response, err := h.store.ListPaymentRecords(ctx, filters)
 	if err != nil {
 		log.Printf("list payments: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// Facets serves the candidate values for one column's filter popover.
+func (h *Handler) Facets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	request, err := FacetRequestFromQuery(r.URL.Query())
+	if err != nil {
+		writePaymentError(w, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	response, err := h.store.PaymentFacets(ctx, request)
+	if err != nil {
+		writePaymentError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -388,75 +445,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func paymentFiltersFromRequest(r *http.Request) (PaymentFilters, error) {
-	query := r.URL.Query()
-	limit, _ := strconv.Atoi(strings.TrimSpace(query.Get("limit")))
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-	paidFrom := strings.TrimSpace(query.Get("paid_from"))
-	paidTo := strings.TrimSpace(query.Get("paid_to"))
-	if err := validateOptionalPaymentTime(paidFrom); err != nil {
-		return PaymentFilters{}, err
-	}
-	if err := validateOptionalPaymentTime(paidTo); err != nil {
-		return PaymentFilters{}, err
-	}
-	return PaymentFilters{
-		CN:            strings.TrimSpace(query.Get("cn")),
-		PaymentMethod: normalizePaymentMethodFilter(query.Get("payment_method")),
-		Status:        strings.TrimSpace(query.Get("status")),
-		PaidFrom:      normalizeChinaTimestampParam(paidFrom),
-		PaidTo:        normalizeChinaTimestampParam(paidTo),
-		Limit:         limit,
-	}, nil
-}
-
-// normalizeChinaTimestampParam rewrites a naive "paid_from"/"paid_to" filter
-// value (e.g. from an HTML datetime-local input, with no UTC offset) into an
-// explicit RFC3339 string carrying the Asia/Shanghai (+08:00) offset, before
-// it is cast to ::timestamptz in SQL. Without this, Postgres would resolve
-// the naive string using the database session's timezone setting — which is
-// not guaranteed to be China time — instead of the admin's intended wall-clock
-// time. Values that already carry an offset (e.g. "Z" from a full RFC3339
-// string) are left untouched.
-func normalizeChinaTimestampParam(value string) string {
-	if value == "" {
-		return value
-	}
-	if _, err := time.Parse(time.RFC3339, value); err == nil {
-		return value
-	}
-	layouts := []string{
-		"2006-01-02T15:04:05",
-		"2006-01-02T15:04",
-		"2006-01-02",
-	}
-	for _, layout := range layouts {
-		if parsed, err := time.ParseInLocation(layout, value, chinaLocation); err == nil {
-			return parsed.Format(time.RFC3339)
-		}
-	}
-	return value
-}
-
-func validateOptionalPaymentTime(value string) error {
-	if value == "" {
-		return nil
-	}
-	layouts := []string{
-		time.RFC3339,
-		"2006-01-02T15:04",
-		"2006-01-02T15:04:05",
-		"2006-01-02",
-	}
-	for _, layout := range layouts {
-		if _, err := time.Parse(layout, value); err == nil {
-			return nil
-		}
-	}
-	return ErrPaymentTime
-}
+// The list/facet/export filter timestamps are now parsed by
+// payments.FiltersFromQuery (see filters.go), which anchors naive values to
+// Asia/Shanghai in exactly the way the old normalizeChinaTimestampParam did.
+// The create-payment path still parses its own paid_at via parsePaymentTime.
 
 func isUUIDLike(value string) bool {
 	if len(value) != 36 {
@@ -529,6 +521,38 @@ func (s *PostgresStore) GetCNUnpaidPayment(ctx context.Context, cn string) (CNPa
 }
 
 func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CreatePaymentResponse{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	response, err := CreatePaymentTx(ctx, tx, request, adminID)
+	if err != nil {
+		return CreatePaymentResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CreatePaymentResponse{}, err
+	}
+	return response, nil
+}
+
+// CreatePaymentTx runs the entire record-payment logic — idempotency guard,
+// per-item row locking, over-payment validation, integer-cent fee calculation,
+// payment + payment_items insertion and the paid-status recalculation — inside a
+// transaction the caller owns. It never calls Begin or Commit.
+//
+// This is the single shared financial core. The admin record-payment endpoint
+// wraps it with its own transaction (see CreatePayment above), and the payment
+// proof ("收肾记录") approval flow calls it with the SAME transaction that marks
+// the submission approved, so the approved payment and the linked_payment_id are
+// committed together or not at all. There is no second copy of the allocation or
+// fee algorithm anywhere.
+//
+// The idempotency key is what makes a repeated approval safe: a second call with
+// the same key finds the already-created payment and returns it with
+// Duplicate=true instead of inserting another one.
+func CreatePaymentTx(ctx context.Context, tx pgx.Tx, request CreatePaymentRequest, adminID string) (CreatePaymentResponse, error) {
 	cn := normalizeCN(request.CN)
 	if cn == "" {
 		return CreatePaymentResponse{}, ErrCNRequired
@@ -543,12 +567,6 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePayment
 	if err != nil {
 		return CreatePaymentResponse{}, ErrPaymentTime
 	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return CreatePaymentResponse{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext($1))", request.IdempotencyKey); err != nil {
 		return CreatePaymentResponse{}, err
@@ -567,9 +585,6 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePayment
 		}
 		items, summary, err := listItemsForUserTx(ctx, tx, user.ID)
 		if err != nil {
-			return CreatePaymentResponse{}, err
-		}
-		if err := tx.Commit(ctx); err != nil {
 			return CreatePaymentResponse{}, err
 		}
 		return CreatePaymentResponse{PaymentID: existingPaymentID, Status: "approved", Duplicate: true, Summary: summary, Items: items}, nil
@@ -671,92 +686,86 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, request CreatePayment
 		return CreatePaymentResponse{}, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return CreatePaymentResponse{}, err
-	}
 	return CreatePaymentResponse{PaymentID: paymentID, Status: "approved", Summary: summary, Items: items}, nil
 }
 
+// scanPaymentRows reads the shared list column set (see listColumns).
+//
+// The three money fields are the stored values, rounded for display only.
+// Amount and TotalAmount are legacy aliases kept for existing consumers:
+// Amount mirrors the principal, TotalAmount the payable amount.
+func scanPaymentRows(rows pgx.Rows) ([]PaymentListItem, error) {
+	items := []PaymentListItem{}
+	for rows.Next() {
+		var item PaymentListItem
+		if err := rows.Scan(
+			&item.ID,
+			&item.CNCode,
+			&item.DisplayName,
+			&item.PrincipalAmount,
+			&item.FeeAmount,
+			&item.PayableAmount,
+			&item.PaymentMethod,
+			&item.Status,
+			&item.PaidAt,
+			&item.CreatedBy,
+			&item.Note,
+			&item.PaymentItemCount,
+			&item.CreatedAt,
+			&item.VoidedAt,
+			&item.VoidedBy,
+			&item.VoidReason,
+		); err != nil {
+			return nil, err
+		}
+		item.PrincipalAmount = round2(item.PrincipalAmount)
+		item.FeeAmount = round2(item.FeeAmount)
+		item.PayableAmount = round2(item.PayableAmount)
+		item.Amount = item.PrincipalAmount
+		item.TotalAmount = item.PayableAmount
+		item.PaymentMethod = normalizePaymentMethodFilter(item.PaymentMethod)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *PostgresStore) ListPaymentRecords(ctx context.Context, filters PaymentFilters) (PaymentListResponse, error) {
-	conditions := []string{"1 = 1"}
-	args := []any{}
-	addArg := func(value any) string {
-		args = append(args, value)
-		return "$" + strconv.Itoa(len(args))
+	response := PaymentListResponse{
+		Items:    []PaymentListItem{},
+		Page:     filters.Page,
+		PageSize: filters.PageSize,
 	}
 
-	if filters.CN != "" {
-		placeholder := addArg("%" + filters.CN + "%")
-		conditions = append(conditions, "(u.cn_code ilike "+placeholder+" or coalesce(u.display_name, '') ilike "+placeholder+")")
+	countQuery, countArgs := buildCountQuery(filters)
+	if err := s.pool.QueryRow(ctx, countQuery, countArgs...).Scan(&response.Total); err != nil {
+		return PaymentListResponse{}, err
 	}
-	if filters.PaymentMethod != "" {
-		placeholder := addArg(filters.PaymentMethod)
-		conditions = append(conditions, "lower(coalesce(p.payment_method, '')) = lower("+placeholder+")")
-	}
-	if filters.Status != "" {
-		placeholder := addArg(filters.Status)
-		conditions = append(conditions, "p.status = "+placeholder)
-	}
-	if filters.PaidFrom != "" {
-		placeholder := addArg(filters.PaidFrom)
-		conditions = append(conditions, "coalesce(p.paid_at, p.approved_at, p.submitted_at) >= "+placeholder+"::timestamptz")
-	}
-	if filters.PaidTo != "" {
-		placeholder := addArg(filters.PaidTo)
-		conditions = append(conditions, "coalesce(p.paid_at, p.approved_at, p.submitted_at) < "+placeholder+"::timestamptz")
-	}
-	limitPlaceholder := addArg(filters.Limit)
+	response.TotalPages = (response.Total + filters.PageSize - 1) / filters.PageSize
 
-	rows, err := s.pool.Query(ctx, `
-		select
-			p.id::text,
-			u.cn_code,
-			coalesce(u.display_name, ''),
-			p.submitted_amount::float8,
-			p.fee_amount::float8,
-			p.payable_amount::float8,
-			coalesce(p.payment_method, ''),
-			p.status,
-			to_char(coalesce(p.paid_at, p.approved_at, p.submitted_at) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-			coalesce(a.username, ''),
-			coalesce(p.note, ''),
-			count(pi.id)::int,
-			to_char(p.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-			coalesce(to_char(p.voided_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-			coalesce(voider.username, ''),
-			coalesce(p.void_reason, '')
-		from payments p
-		join users u on u.id = p.user_id
-		left join admins a on a.id = coalesce(p.created_by, p.approved_by)
-		left join admins voider on voider.id = p.voided_by_admin_id
-		left join payment_items pi on pi.payment_id = p.id
-		where `+strings.Join(conditions, " and ")+`
-		group by p.id, u.cn_code, u.display_name, p.submitted_amount, p.fee_amount, p.payable_amount, p.payment_method, p.status, p.paid_at, p.approved_at, p.submitted_at, a.username, p.note, p.created_at, p.voided_at, voider.username, p.void_reason
-		order by coalesce(p.paid_at, p.approved_at, p.submitted_at) desc, p.created_at desc, p.id desc
-		limit `+limitPlaceholder, args...)
+	listQuery, listArgs := buildListQuery(filters)
+	rows, err := s.pool.Query(ctx, listQuery, listArgs...)
 	if err != nil {
 		return PaymentListResponse{}, err
 	}
 	defer rows.Close()
-
-	response := PaymentListResponse{Items: []PaymentListItem{}}
-	for rows.Next() {
-		var item PaymentListItem
-		if err := rows.Scan(&item.ID, &item.CNCode, &item.DisplayName, &item.Amount, &item.FeeAmount, &item.PayableAmount, &item.PaymentMethod, &item.Status, &item.PaidAt, &item.CreatedBy, &item.Note, &item.PaymentItemCount, &item.CreatedAt, &item.VoidedAt, &item.VoidedBy, &item.VoidReason); err != nil {
-			return PaymentListResponse{}, err
-		}
-		item.Amount = round2(item.Amount)
-		item.PrincipalAmount = item.Amount
-		item.FeeAmount = round2(item.FeeAmount)
-		item.PayableAmount = round2(item.PayableAmount)
-		item.TotalAmount = item.PayableAmount
-		item.PaymentMethod = normalizePaymentMethodFilter(item.PaymentMethod)
-		response.Items = append(response.Items, item)
-	}
-	if err := rows.Err(); err != nil {
+	items, err := scanPaymentRows(rows)
+	if err != nil {
 		return PaymentListResponse{}, err
 	}
+	response.Items = items
 	return response, nil
+}
+
+// ExportPayments returns every payment matching the filters, capped at maxRows
+// and ignoring list pagination.
+func (s *PostgresStore) ExportPayments(ctx context.Context, filters PaymentFilters, maxRows int) ([]PaymentListItem, error) {
+	query, args := BuildExportQuery(filters, maxRows)
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPaymentRows(rows)
 }
 
 func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) (PaymentDetailResponse, error) {
@@ -1389,6 +1398,27 @@ func calculateFee(baseCents int64, paymentMethod string) (int64, int64) {
 	}
 }
 
+// FeeForPrincipalCents exposes the canonical fee rule to other features (the
+// payment-proof "收肾记录" flow) so they display an identical 手续费 / 本次应付
+// without a second fee algorithm: Alipay is always 0, WeChat is the existing
+// integer-cent ceiling of 0.1%. It returns (feeCents, payableCents).
+func FeeForPrincipalCents(baseCents int64, method string) (int64, int64) {
+	return calculateFee(baseCents, normalizePaymentMethodFilter(method))
+}
+
+// OutstandingPrincipalCents returns a user's current total unpaid principal in
+// integer cents, computed from the same approved-payment allocation model as
+// everything else (sum of greatest(item.amount - approved_paid, 0)). It is a
+// read-only helper for the payment-proof flow to capture the principal a user
+// was shown; it never moves any money.
+func (s *PostgresStore) OutstandingPrincipalCents(ctx context.Context, userID string) (int64, error) {
+	_, summary, err := listItemsForUserTx(ctx, s.pool, userID)
+	if err != nil {
+		return 0, err
+	}
+	return safeCentsFromFloat64(summary.RemainingAmount), nil
+}
+
 // centsToNumeric formats integer cents as a string for numeric(12,2), e.g. 3680 -> "36.80".
 func centsToNumeric(cents int64) string {
 	sign := ""
@@ -1414,6 +1444,12 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 }
 
 func writePaymentError(w http.ResponseWriter, err error) {
+	// Filter/pagination rejections carry their own Chinese message.
+	var badRequestErr *BadRequestError
+	if errors.As(err, &badRequestErr) {
+		writeError(w, http.StatusBadRequest, badRequestErr.Message)
+		return
+	}
 	switch {
 	case errors.Is(err, ErrCNRequired),
 		errors.Is(err, ErrNoPaymentItems),

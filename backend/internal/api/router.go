@@ -14,7 +14,9 @@ import (
 	"pjsk/backend/internal/export"
 	"pjsk/backend/internal/importpreview"
 	"pjsk/backend/internal/orders"
+	"pjsk/backend/internal/paymentqr"
 	"pjsk/backend/internal/payments"
+	"pjsk/backend/internal/paymentsubmission"
 	"pjsk/backend/internal/query"
 	"pjsk/backend/internal/querycoderecovery"
 	"pjsk/backend/internal/recoveryemail"
@@ -87,6 +89,12 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		"/api/admin/imports/confirm",
 		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.Confirm)),
 	)
+	// Exact pattern, registered before the "/api/admin/imports/" prefix so it
+	// is not read as an import id by the detail handler.
+	mux.Handle(
+		"/api/admin/imports/facets",
+		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.Facets)),
+	)
 	mux.Handle(
 		"/api/admin/imports",
 		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.List)),
@@ -100,6 +108,12 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.Handle(
 		"/api/admin/orders",
 		adminHandler.RequireAuthentication(http.HandlerFunc(ordersHandler.List)),
+	)
+	// Registered before the "/api/admin/orders/" prefix so the facets endpoint
+	// is not read as an order id. ServeMux prefers the longer exact pattern.
+	mux.Handle(
+		"/api/admin/orders/facets",
+		adminHandler.RequireAuthentication(http.HandlerFunc(ordersHandler.Facets)),
 	)
 	mux.Handle(
 		"/api/admin/orders/",
@@ -117,6 +131,13 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		"/api/admin/users",
 		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.List)),
 	)
+	// Registered as an exact pattern so it is not read as a user id by the
+	// "/api/admin/users/" prefix handler. ServeMux prefers the longer exact
+	// pattern.
+	mux.Handle(
+		"/api/admin/users/facets",
+		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.Facets)),
+	)
 	mux.Handle(
 		"/api/admin/users/merge-preview",
 		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.MergePreview)),
@@ -131,6 +152,13 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	)
 
 	paymentsHandler := payments.NewHandler(payments.NewPostgresStore(dbPool))
+	mux.Handle(
+		// Registered as an exact pattern so it is not read as a payment id by
+		// the "/api/admin/payments/" prefix handler. ServeMux prefers the
+		// longer exact pattern.
+		"/api/admin/payments/facets",
+		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Facets)),
+	)
 	mux.Handle(
 		"/api/admin/payments/cn",
 		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.CN)),
@@ -222,6 +250,57 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("/api/query/recovery/reset", queryHandler.ResetRecoveredQueryCode)
 	mux.HandleFunc("/api/query/orders", queryHandler.Orders)
 	mux.HandleFunc("/api/query/logout", queryHandler.Logout)
+
+	// Payment collection QR codes. Admin routes manage the codes (auth: admin
+	// session); user routes read the currently enabled code (auth: query
+	// session). QR images are never exposed to unauthenticated requests.
+	qrHandler := paymentqr.NewHandler(paymentqr.NewPostgresStore(dbPool))
+	mux.Handle(
+		"/api/admin/payment-qr",
+		adminHandler.RequireAuthentication(http.HandlerFunc(qrHandler.AdminCollection)),
+	)
+	mux.Handle(
+		"/api/admin/payment-qr/",
+		adminHandler.RequireAuthentication(http.HandlerFunc(qrHandler.AdminItem)),
+	)
+	mux.Handle(
+		"/api/query/payment-qr",
+		queryHandler.RequireSession(http.HandlerFunc(qrHandler.UserAvailability)),
+	)
+	mux.Handle(
+		"/api/query/payment-qr/",
+		queryHandler.RequireSession(http.HandlerFunc(qrHandler.UserImage)),
+	)
+
+	// Payment proof ("收肾记录"). A submission is evidence only and never moves a
+	// paid total by itself; an admin approval creates a real approved payment via
+	// the shared payments transaction core. User routes carry the injected
+	// session identity (RequireSessionUser); admin routes use the admin session.
+	submissionHandler := paymentsubmission.NewHandler(
+		paymentsubmission.NewPostgresStore(dbPool, payments.NewPostgresStore(dbPool)),
+	)
+	mux.Handle(
+		"/api/query/payment-submissions",
+		queryHandler.RequireSessionUser(http.HandlerFunc(submissionHandler.UserCollection)),
+	)
+	mux.Handle(
+		"/api/query/payment-submissions/",
+		queryHandler.RequireSessionUser(http.HandlerFunc(submissionHandler.UserImage)),
+	)
+	// Exact facets pattern registered before the "/{id}" prefix so ServeMux
+	// prefers it and it is never read as a submission id.
+	mux.Handle(
+		"/api/admin/payment-submissions/facets",
+		adminHandler.RequireAuthentication(http.HandlerFunc(submissionHandler.Facets)),
+	)
+	mux.Handle(
+		"/api/admin/payment-submissions",
+		adminHandler.RequireAuthentication(http.HandlerFunc(submissionHandler.AdminCollection)),
+	)
+	mux.Handle(
+		"/api/admin/payment-submissions/",
+		adminHandler.RequireAuthentication(http.HandlerFunc(submissionHandler.AdminItem)),
+	)
 
 	return withCORS(loggingMiddleware(mux), cfg.FrontendOrigins)
 }

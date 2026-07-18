@@ -19,8 +19,8 @@ function sourceBetween(source, startMarker, endMarker) {
 
 const queryView = sourceBetween(
   appSource,
-  '<template v-if="queryOrders">',
-  '<template v-else>\n      <section class="metrics"',
+  `<template v-else-if="isUserRoute">`,
+  `<template v-else-if="routeName === 'admin'">`,
 )
 
 test('regular-user order template never renders source-derived technical identifiers', () => {
@@ -59,7 +59,7 @@ test('regular-user QueryOrder DTO contains only aggregate and business item fiel
 })
 
 test('payment history always has loading, failure, empty, and populated states', () => {
-  assert.match(queryView, /<section v-if="queryUser" class="panel query-payments-card">/)
+  assert.match(queryView, /<section v-if="routeName === 'query-payments'" class="panel query-payments-card">/)
   assert.doesNotMatch(queryView, /<section v-if="queryOrders\.payments\.length > 0" class="panel query-payments-card">/)
   assert.match(queryView, /正在加载付款历史。/)
   assert.match(queryView, /queryOrdersError/)

@@ -15,6 +15,7 @@ import (
 type stubStore struct {
 	listResponse   ListResponse
 	listFilters    Filters
+	facetRequest   FacetRequest
 	detailResponse DetailResponse
 	detailID       string
 	detailErr      error
@@ -31,6 +32,11 @@ type stubStore struct {
 func (s *stubStore) ListUsers(_ context.Context, filters Filters) (ListResponse, error) {
 	s.listFilters = filters
 	return s.listResponse, nil
+}
+
+func (s *stubStore) UserFacets(_ context.Context, request FacetRequest) (FacetResponse, error) {
+	s.facetRequest = request
+	return FacetResponse{Column: request.Column, Values: []FacetValue{}}, nil
 }
 
 func (s *stubStore) GetUserDetail(_ context.Context, id string) (DetailResponse, error) {
@@ -72,7 +78,7 @@ func (s *stubStore) MergeUsers(_ context.Context, request MergeRequest, adminID 
 	return MergeResponse{SourceUserID: request.SourceUserID, TargetUserID: request.TargetUserID}, s.mergeErr
 }
 
-func TestListPassesFiltersAndDefaultsLimit(t *testing.T) {
+func TestListPassesFiltersAndDefaultsPagination(t *testing.T) {
 	store := &stubStore{listResponse: ListResponse{Items: []ListItem{{CNCode: "succ"}}}}
 	handler := NewHandler(store)
 
@@ -83,8 +89,14 @@ func TestListPassesFiltersAndDefaultsLimit(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	if store.listFilters.CN != "su" || store.listFilters.Status != "active" || store.listFilters.Limit != 200 {
-		t.Fatalf("filters = %+v", store.listFilters)
+	if len(store.listFilters.CN) != 1 || store.listFilters.CN[0] != "su" {
+		t.Fatalf("CN = %#v", store.listFilters.CN)
+	}
+	if len(store.listFilters.Status) != 1 || store.listFilters.Status[0] != "active" {
+		t.Fatalf("Status = %#v", store.listFilters.Status)
+	}
+	if store.listFilters.Page != 1 || store.listFilters.PageSize != DefaultPageSize {
+		t.Fatalf("pagination = %d/%d", store.listFilters.Page, store.listFilters.PageSize)
 	}
 
 	var payload ListResponse
@@ -96,16 +108,19 @@ func TestListPassesFiltersAndDefaultsLimit(t *testing.T) {
 	}
 }
 
-func TestListCapsLimit(t *testing.T) {
+// TestListRejectsOversizedPageSize is the guard against unbounded loading: an
+// over-cap page_size is refused outright rather than silently clamped, so a
+// caller cannot believe it received everything.
+func TestListRejectsOversizedPageSize(t *testing.T) {
 	store := &stubStore{}
 	handler := NewHandler(store)
 
-	request := httptest.NewRequest(http.MethodGet, "/api/admin/users?limit=9999", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/users?page_size=9999", nil)
 	recorder := httptest.NewRecorder()
 	handler.List(recorder, request)
 
-	if store.listFilters.Limit != 200 {
-		t.Fatalf("limit = %d, want capped 200", store.listFilters.Limit)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", recorder.Code)
 	}
 }
 

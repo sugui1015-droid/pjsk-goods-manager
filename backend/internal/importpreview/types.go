@@ -184,8 +184,14 @@ type ImportHistoryItem struct {
 	RevokeResult     *RevokeResult  `json:"revoke_result,omitempty"`
 }
 
+// ImportHistoryResponse is one page of the filtered result set. Total counts
+// every import matching the filters, not just this page.
 type ImportHistoryResponse struct {
-	Items []ImportHistoryItem `json:"items"`
+	Items      []ImportHistoryItem `json:"items"`
+	Page       int                 `json:"page"`
+	PageSize   int                 `json:"page_size"`
+	Total      int                 `json:"total"`
+	TotalPages int                 `json:"total_pages"`
 }
 
 type ImportDetailResponse struct {

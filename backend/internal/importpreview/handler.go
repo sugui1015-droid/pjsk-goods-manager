@@ -33,7 +33,8 @@ type Store interface {
 	FindImportFile(context.Context, string, string) (ImportFileState, error)
 	SavePreview(context.Context, Preview, string) (PreviewState, error)
 	ConfirmImport(context.Context, string, string, bool, ConfirmRules) (ConfirmResult, error)
-	ListImports(context.Context) (ImportHistoryResponse, error)
+	ListImports(context.Context, HistoryFilters) (ImportHistoryResponse, error)
+	ImportFacets(context.Context, HistoryFacetRequest) (HistoryFacetResponse, error)
 	GetImport(context.Context, string) (ImportDetailResponse, error)
 	RevokeImport(context.Context, string, string) (RevokeResult, error)
 }
@@ -192,9 +193,15 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	filters, err := HistoryFiltersFromQuery(r.URL.Query())
+	if err != nil {
+		writeFilterError(w, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	response, err := h.store.ListImports(ctx)
+	response, err := h.store.ListImports(ctx, filters)
 	if err != nil {
 		log.Printf("list imports: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
@@ -202,6 +209,41 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+// Facets serves the candidate values for one import-history column filter.
+func (h *Handler) Facets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	request, err := HistoryFacetRequestFromQuery(r.URL.Query())
+	if err != nil {
+		writeFilterError(w, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	response, err := h.store.ImportFacets(ctx, request)
+	if err != nil {
+		writeFilterError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// writeFilterError reports a rejected parameter. Only BadRequestError messages
+// reach the client; anything else is internal.
+func writeFilterError(w http.ResponseWriter, err error) {
+	var badRequestErr *BadRequestError
+	if errors.As(err, &badRequestErr) {
+		writeError(w, http.StatusBadRequest, badRequestErr.Message)
+		return
+	}
+	log.Printf("import history filters: %s", logsafe.Category(err))
+	writeError(w, http.StatusInternalServerError, "服务器内部错误")
 }
 
 func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
@@ -420,43 +462,26 @@ func (s *PostgresStore) SavePreview(ctx context.Context, preview Preview, adminI
 	return PreviewState{ImportBatchID: importBatchID, DuplicateFile: true, FilenameConflict: state.FilenameConflict}, nil
 }
 
-func (s *PostgresStore) ListImports(ctx context.Context) (ImportHistoryResponse, error) {
-	rows, err := s.pool.Query(ctx, `
-		select
-			b.id::text,
-			b.original_filename,
-			b.file_hash,
-			coalesce(b.file_size, 0),
-			coalesce(b.sheet_count, 0),
-			b.total_rows,
-			b.status,
-			coalesce(importer.username, ''),
-			coalesce(confirmer.username, ''),
-			to_char(b.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-			coalesce(to_char(b.started_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-			coalesce(to_char(b.confirmed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-			coalesce(to_char(b.completed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-			b.error_count,
-			b.warning_count,
-			b.notice_count,
-			b.warnings_accepted,
-			coalesce(b.confirm_result::text, ''),
-			coalesce(revoker.username, ''),
-			coalesce(to_char(b.revoked_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-			coalesce(b.revoke_result::text, '')
-		from import_batches b
-		left join admins importer on importer.id = b.imported_by
-		left join admins confirmer on confirmer.id = b.confirmed_by
-		left join admins revoker on revoker.id = b.revoked_by
-		order by b.created_at desc
-		limit 100
-	`)
+func (s *PostgresStore) ListImports(ctx context.Context, filters HistoryFilters) (ImportHistoryResponse, error) {
+	response := ImportHistoryResponse{
+		Items:    []ImportHistoryItem{},
+		Page:     filters.Page,
+		PageSize: filters.PageSize,
+	}
+
+	countQuery, countArgs := buildCountQuery(filters)
+	if err := s.pool.QueryRow(ctx, countQuery, countArgs...).Scan(&response.Total); err != nil {
+		return ImportHistoryResponse{}, err
+	}
+	response.TotalPages = (response.Total + filters.PageSize - 1) / filters.PageSize
+
+	listQuery, listArgs := buildListQuery(filters)
+	rows, err := s.pool.Query(ctx, listQuery, listArgs...)
 	if err != nil {
 		return ImportHistoryResponse{}, err
 	}
 	defer rows.Close()
 
-	response := ImportHistoryResponse{Items: []ImportHistoryItem{}}
 	for rows.Next() {
 		item, err := scanImportHistoryItem(rows)
 		if err != nil {

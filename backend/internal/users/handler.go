@@ -8,7 +8,6 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +35,7 @@ type Handler struct {
 
 type Store interface {
 	ListUsers(context.Context, Filters) (ListResponse, error)
+	UserFacets(context.Context, FacetRequest) (FacetResponse, error)
 	GetUserDetail(context.Context, string) (DetailResponse, error)
 	SetQueryCode(context.Context, string, string, bool) (ListItem, error)
 	SetQueryAccessStatus(context.Context, string, string) (ListItem, error)
@@ -44,17 +44,21 @@ type Store interface {
 	MergeUsers(context.Context, MergeRequest, string) (MergeResponse, error)
 }
 
-type Filters struct {
-	CN     string
-	Status string
-	Limit  int
-}
-
+// ListItem is one row of the admin user table.
+//
+// The two account-security columns are booleans by construction: the query code
+// is reduced to "is one set" and the recovery email to "is one bound". The hash,
+// the ciphertext and the lookup hash are never selected out of the database (see
+// baseCTE), so this DTO cannot leak them however it changes.
+//
+// ID is for keying rows and navigating to the detail page — never a column to
+// render.
 type ListItem struct {
 	ID                 string  `json:"id"`
 	CNCode             string  `json:"cn_code"`
 	DisplayName        string  `json:"display_name,omitempty"`
 	HasQueryCode       bool    `json:"has_query_code"`
+	HasRecoveryEmail   bool    `json:"has_recovery_email"`
 	Status             string  `json:"status"`
 	OrderCount         int     `json:"order_count"`
 	TotalAmount        float64 `json:"total_amount"`
@@ -80,9 +84,18 @@ type ListSummary struct {
 	RemainingAmount float64 `json:"remaining_amount"`
 }
 
+// ListResponse is one page of the filtered result set.
+//
+// Total counts every user matching the filters, not just this page, and Summary
+// aggregates over that same full set — so the tiles and "结果：共 N 位用户" always
+// describe the same thing.
 type ListResponse struct {
-	Items   []ListItem  `json:"items"`
-	Summary ListSummary `json:"summary"`
+	Items      []ListItem  `json:"items"`
+	Summary    ListSummary `json:"summary"`
+	Page       int         `json:"page"`
+	PageSize   int         `json:"page_size"`
+	Total      int         `json:"total"`
+	TotalPages int         `json:"total_pages"`
 }
 
 type DetailOrder struct {
@@ -158,18 +171,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := r.URL.Query()
-	limit, _ := strconv.Atoi(strings.TrimSpace(query.Get("limit")))
-	if limit <= 0 || limit > 500 {
-		limit = 200
-	}
-	filters := Filters{
-		CN:     strings.TrimSpace(query.Get("cn")),
-		Status: strings.TrimSpace(query.Get("status")),
-		Limit:  limit,
+	filters, err := FiltersFromQuery(r.URL.Query())
+	if err != nil {
+		writeFilterError(w, err)
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	response, err := h.store.ListUsers(ctx, filters)
 	if err != nil {
@@ -178,6 +186,42 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// Facets serves the candidate values for one column's filter popover.
+func (h *Handler) Facets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
+		return
+	}
+
+	request, err := FacetRequestFromQuery(r.URL.Query())
+	if err != nil {
+		writeFilterError(w, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	response, err := h.store.UserFacets(ctx, request)
+	if err != nil {
+		writeFilterError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// writeFilterError reports a rejected parameter. Only BadRequestError messages
+// reach the client; anything else is treated as internal so no database detail
+// leaks through the filter surface.
+func writeFilterError(w http.ResponseWriter, err error) {
+	var badRequestErr *BadRequestError
+	if errors.As(err, &badRequestErr) {
+		writeError(w, http.StatusBadRequest, badRequestErr.Message)
+		return
+	}
+	log.Printf("admin users filters: %s", logsafe.Category(err))
+	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
 func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
@@ -342,50 +386,9 @@ const paidByItemCTE = `
 	)
 `
 
-func (s *PostgresStore) ListUsers(ctx context.Context, filters Filters) (ListResponse, error) {
-	conditions := []string{"1 = 1"}
-	args := []any{}
-	addArg := func(value any) string {
-		args = append(args, value)
-		return "$" + strconv.Itoa(len(args))
-	}
-
-	if filters.CN != "" {
-		placeholder := addArg("%" + filters.CN + "%")
-		conditions = append(conditions, "(u.cn_code ilike "+placeholder+" or coalesce(u.display_name, '') ilike "+placeholder+")")
-	}
-	if filters.Status != "" {
-		placeholder := addArg(filters.Status)
-		conditions = append(conditions, "u.status = "+placeholder)
-	}
-	limitPlaceholder := addArg(filters.Limit)
-
-	rows, err := s.pool.Query(ctx, `
-		with `+paidByItemCTE+`
-		select
-			u.id::text,
-			u.cn_code,
-			coalesce(u.display_name, ''),
-			(coalesce(u.query_code_hash, '') <> ''),
-			u.status,
-			coalesce(t.order_count, 0),
-			coalesce(t.total_amount, 0),
-			coalesce(t.paid_amount, 0),
-			greatest(coalesce(t.total_amount, 0) - coalesce(t.paid_amount, 0), 0),
-			to_char(u.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-			coalesce(to_char(u.query_code_updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-			coalesce(to_char(u.last_query_login_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
-		from users u
-		left join user_totals t on t.user_id = u.id
-		where `+strings.Join(conditions, " and ")+`
-		order by u.created_at desc, u.cn_code
-		limit `+limitPlaceholder, args...)
-	if err != nil {
-		return ListResponse{}, err
-	}
-	defer rows.Close()
-
-	response := ListResponse{Items: []ListItem{}}
+// scanListItems reads the shared list column set (see listColumns).
+func scanListItems(rows pgx.Rows) ([]ListItem, error) {
+	items := []ListItem{}
 	for rows.Next() {
 		var item ListItem
 		if err := rows.Scan(
@@ -393,6 +396,7 @@ func (s *PostgresStore) ListUsers(ctx context.Context, filters Filters) (ListRes
 			&item.CNCode,
 			&item.DisplayName,
 			&item.HasQueryCode,
+			&item.HasRecoveryEmail,
 			&item.Status,
 			&item.OrderCount,
 			&item.TotalAmount,
@@ -402,23 +406,71 @@ func (s *PostgresStore) ListUsers(ctx context.Context, filters Filters) (ListRes
 			&item.QueryCodeUpdatedAt,
 			&item.LastLoginAt,
 		); err != nil {
-			return ListResponse{}, err
+			return nil, err
 		}
 		item.TotalAmount = round2(item.TotalAmount)
 		item.PaidAmount = round2(item.PaidAmount)
 		item.RemainingAmount = round2(item.RemainingAmount)
-		response.Summary.UserCount++
-		if item.OrderCount > 0 {
-			response.Summary.UsersWithOrders++
-		}
-		response.Summary.TotalAmount = round2(response.Summary.TotalAmount + item.TotalAmount)
-		response.Summary.PaidAmount = round2(response.Summary.PaidAmount + item.PaidAmount)
-		response.Summary.RemainingAmount = round2(response.Summary.RemainingAmount + item.RemainingAmount)
-		response.Items = append(response.Items, item)
+		items = append(items, item)
 	}
-	return response, rows.Err()
+	return items, rows.Err()
 }
 
+func (s *PostgresStore) ListUsers(ctx context.Context, filters Filters) (ListResponse, error) {
+	response := ListResponse{
+		Items:    []ListItem{},
+		Page:     filters.Page,
+		PageSize: filters.PageSize,
+	}
+
+	countQuery, countArgs := buildCountQuery(filters)
+	if err := s.pool.QueryRow(ctx, countQuery, countArgs...).Scan(&response.Total); err != nil {
+		return ListResponse{}, err
+	}
+	response.TotalPages = (response.Total + filters.PageSize - 1) / filters.PageSize
+
+	// The summary is aggregated in SQL over the whole filtered set rather than
+	// summed from the scanned page: a page of 50 out of 300 users must not make
+	// the tiles disagree with the reported total.
+	summaryQuery, summaryArgs := buildSummaryQuery(filters)
+	if err := s.pool.QueryRow(ctx, summaryQuery, summaryArgs...).Scan(
+		&response.Summary.UserCount,
+		&response.Summary.UsersWithOrders,
+		&response.Summary.TotalAmount,
+		&response.Summary.PaidAmount,
+		&response.Summary.RemainingAmount,
+	); err != nil {
+		return ListResponse{}, err
+	}
+	response.Summary.TotalAmount = round2(response.Summary.TotalAmount)
+	response.Summary.PaidAmount = round2(response.Summary.PaidAmount)
+	response.Summary.RemainingAmount = round2(response.Summary.RemainingAmount)
+
+	listQuery, listArgs := buildListQuery(filters)
+	rows, err := s.pool.Query(ctx, listQuery, listArgs...)
+	if err != nil {
+		return ListResponse{}, err
+	}
+	defer rows.Close()
+	items, err := scanListItems(rows)
+	if err != nil {
+		return ListResponse{}, err
+	}
+	response.Items = items
+	return response, nil
+}
+
+// ExportUsers returns every user matching the filters, capped at maxRows and
+// ignoring list pagination.
+func (s *PostgresStore) ExportUsers(ctx context.Context, filters Filters, maxRows int) ([]ListItem, error) {
+	query, args := BuildExportQuery(filters, maxRows)
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanListItems(rows)
+}
 func (s *PostgresStore) GetUserDetail(ctx context.Context, userID string) (DetailResponse, error) {
 	var detail DetailResponse
 	err := s.pool.QueryRow(ctx, `

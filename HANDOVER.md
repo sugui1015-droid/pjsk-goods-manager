@@ -236,10 +236,18 @@ Roughly in priority order, per [docs/normal-use-roadmap.md](docs/normal-use-road
 - Audit storage intentionally excludes passwords, password hashes, cookies, session tokens, Authorization headers, query/binding/recovery codes, DSNs, and environment secret values.
 - No admin audit query UI/API exists yet; future work can add read-only paginated access and a retention policy.
 
-## Final Production Acceptance (2026-07-16)
+## Local/LAN Final Acceptance (2026-07-16)
 
 - Code commit `27e0ed6c22a3ae05263371666a558f690b557255` fixed the final blocking regular-user issues: public query responses no longer include order/source internals, the regular-user payment-history area now renders an empty state, and 320 px navigation/order details no longer require horizontal scrolling.
-- The fix was deployed to the formal loopback entry point `http://127.0.0.1:8081/` using the existing Windows service deployment flow. Backups were kept at `D:\pjsk\backend\bin\pjsk-backend.20260716-213519.exe` and `D:\PJSK-Archive\frontend\20260716-213519`.
-- Formal-entry revalidation passed for the `succ` zero-order account and a separate read-only account with real order details. The page/DOM no longer expose `.xlsx`, `IMP-`, order numbers, SKU/SHA, import IDs, or other technical identifiers to regular users; 320 px navigation and mobile detail cards measured without horizontal overflow; logout refresh did not restore either regular-user session.
+- The fix was deployed only to the Windows local/LAN service entry point `http://127.0.0.1:8081/` using the existing Windows service deployment flow. Backups were kept at `D:\pjsk\backend\bin\pjsk-backend.20260716-213519.exe` and `D:\PJSK-Archive\frontend\20260716-213519`.
+- Local/LAN entry revalidation passed for the `succ` zero-order account and a separate read-only account with real order details. The page/DOM no longer expose `.xlsx`, `IMP-`, order numbers, SKU/SHA, import IDs, or other technical identifiers to regular users; 320 px navigation and mobile detail cards measured without horizontal overflow; logout refresh did not restore either regular-user session.
 - Backend/frontend tests and builds passed before deployment: `go fmt ./...`, `go build ./...`, `go vet ./...`, `go test ./...`, the query DTO/API focused tests, frontend tests, `vue-tsc -b`, and `pnpm.cmd run build`.
-- Final business acceptance is recorded in `docs/development-logs/2026-07-16-final-business-acceptance.md`. Current conclusion: no remaining blocker to formal trial use; still prepare controlled test data later for real payment-history expansion, Chinese payment-method display, and partial-payment paid/unpaid edge cases.
+- Final business acceptance is recorded in `docs/development-logs/2026-07-16-final-business-acceptance.md`. Current conclusion: no remaining blocker to **local/LAN formal trial use**; this is not a public Internet production launch. Still prepare controlled test data later for real payment-history expansion, Chinese payment-method display, and partial-payment paid/unpaid edge cases.
+
+## Public Production Deployment Status (planned, not live)
+
+- Public production is not online yet. The current accepted entry point is local/LAN only; users in other regions cannot yet access PJSK through a formal public domain and HTTPS.
+- Public deployment should prefer a Linux cloud server over exposing a personal Windows PC or home broadband port mapping. Recommended shape: public 80/443 only, Caddy automatic HTTPS, Vue static frontend served by Caddy, `/api/*` and `/health` proxied to a Go backend on `127.0.0.1:8080`, PostgreSQL bound only to loopback or a Unix socket, systemd services, log rotation, least-privilege firewall, and daily backups with restore drills.
+- Linux compatibility investigation found the Go backend, Vue frontend, PostgreSQL, Caddy, SMTP sender, and embedded migrations portable. Windows-specific items (`*.cmd`, PowerShell backup scripts, NSSM/WinSW templates, `D:\PJSK-*` paths, Windows services/firewall notes) are deployment/operations artifacts, not application runtime dependencies.
+- Public production still requires user decisions and external provisioning: cloud server, domain/DNS, HTTPS validation, SMTP provider/configuration, secure secret migration, encrypted database backup transfer/restore, and cross-region real-device acceptance.
+- Planning details are in `docs/development-logs/2026-07-16-public-production-deployment-plan.md`. Do not describe the current state as public production already launched.

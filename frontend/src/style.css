@@ -329,6 +329,10 @@ h2 {
   border-radius: 6px;
   padding: 0 10px;
   background: #ffffff;
+  /* A bare <input type=file> has a large intrinsic min-content width; allowing
+     it to shrink keeps narrow (320px) admin pages from scrolling horizontally. */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .file-line {
@@ -1696,40 +1700,129 @@ th {
   font-size: 16px;
 }
 
-.query-order-summary {
+.query-order-overview {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.query-order-overview__tile {
+  min-height: 108px;
+  justify-content: center;
+  gap: 10px;
+  border-color: #d8e2ea;
+  background: #ffffff;
+}
+
+.query-order-overview__tile > span {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-label);
+}
+
+.query-order-overview__tile > strong {
+  color: #172b3f;
+  font-size: calc(var(--fs-amount) + 7px);
+  font-weight: var(--fw-amount);
+  font-variant-numeric: tabular-nums;
+}
+
+.query-order-overview__tile--paid {
+  border-color: #cbded4;
+  background: #f5faf7;
+}
+
+.query-order-overview__tile--paid > strong {
+  color: #275b45;
+}
+
+.query-order-overview__tile--unpaid {
+  border-color: #e5d4cf;
+  background: #fcf8f6;
+}
+
+.query-order-overview__tile--unpaid > strong {
+  color: #8b493e;
+}
+
+.query-orders-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.query-order-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.query-order-filter-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.query-order-filter-grid label > span {
+  color: #526173;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-label);
+}
+
+.query-order-filter-grid select {
+  min-width: 0;
+  width: 100%;
+}
+
+.query-order-filter-actions,
+.query-order-card__heading {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: min(100%, 420px);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.query-order-summary span {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  padding: 7px 10px;
-  border: 1px solid #d9e4ef;
-  border-radius: 8px;
-  background: #f8fbfd;
-  color: #29394d;
+.query-order-filter-actions > .muted {
+  min-width: 0;
+  font-size: var(--fs-label);
+}
+
+.query-order-card__heading {
+  margin-bottom: 12px;
+}
+
+.query-order-card__heading h2 {
+  margin: 0;
+}
+
+.query-order-desktop-table table {
+  min-width: 900px;
+  table-layout: fixed;
+}
+
+.query-order-desktop-table th:first-child,
+.query-order-desktop-table td:first-child {
+  width: 22%;
+}
+
+.query-order-desktop-table th,
+.query-order-desktop-table td {
+  vertical-align: middle;
+  text-align: center;
+}
+
+.query-order-desktop-table th:first-child,
+.query-order-desktop-table td:first-child {
+  text-align: left;
+}
+
+.query-order-name {
+  min-width: 170px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  line-height: 1.45;
+}
+
+.query-order-number {
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.query-order-summary em {
-  color: #667085;
-  font-style: normal;
-  font-size: 12px;
-}
-
-.query-order-summary strong {
-  color: #182230;
-  font-size: 15px;
-  line-height: 1;
-}
-
-.query-order-summary .is-unpaid strong {
-  color: #b42318;
 }
 
 .query-order-mobile-items {
@@ -1744,12 +1837,26 @@ th {
   background: #fbfcfd;
 }
 
+.query-order-mobile-item__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
 .query-order-mobile-item h3 {
-  margin: 0 0 12px;
+  min-width: 0;
+  margin: 0;
   color: #182230;
-  font-size: 16px;
+  font-size: var(--fs-section-title);
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+.query-order-mobile-item__heading .status-chip {
+  flex: 0 0 auto;
+  text-transform: none;
 }
 
 .query-order-mobile-item dl {
@@ -1774,7 +1881,7 @@ th {
 
 .query-order-mobile-item dt {
   color: #667085;
-  font-size: 13px;
+  font-size: var(--fs-label);
 }
 
 .query-order-mobile-item dd {
@@ -1795,11 +1902,20 @@ th {
 }
 
 @media (max-width: 720px) {
-  .query-order-summary {
-    justify-content: flex-start;
-    min-width: 0;
-    width: 100%;
+  .query-order-overview,
+  .query-order-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+.query-order-card .status-chip[data-state="unpaid"] {
+  color: #8b493e;
+  background: #f8eeeb;
+}
+
+.query-order-card .status-chip[data-state="partial"] {
+  color: #72552a;
+  background: #f7f1e5;
 }
 
 @media (max-width: 520px) {
@@ -1826,6 +1942,37 @@ th {
     gap: 12px;
     min-width: 0;
     width: 100%;
+  }
+
+  .query-order-filter-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .query-order-filter-actions button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 400px) {
+  .query-order-overview,
+  .query-order-filter-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .query-orders-heading,
+  .query-order-card__heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .query-order-mobile-item {
+    padding: 12px;
+  }
+
+  .query-order-mobile-item dl > div {
+    grid-template-columns: minmax(68px, 0.42fr) minmax(0, 1fr);
+    gap: 8px;
   }
 }
 .query-security-panel {
@@ -2179,4 +2326,1248 @@ th {
     max-width: none;
     width: 100%;
   }
+}
+
+/* --- Payment collection QR admin page (阶段三) --- */
+.qr-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+  align-items: stretch;
+}
+
+.qr-card {
+  background: #ffffff;
+  border: 1px solid #dce4ea;
+  border-top: 3px solid #dce4ea;
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.qr-card--alipay {
+  border-top-color: #4a90e2;
+  background: #f6faff;
+}
+
+.qr-card--wechat {
+  border-top-color: #3fa96a;
+  background: #f4fbf6;
+}
+
+.qr-card__head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.qr-card__head h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.qr-card--alipay .qr-card__head h3 {
+  color: #1d4ed8;
+}
+
+.qr-card--wechat .qr-card__head h3 {
+  color: #15803d;
+}
+
+.qr-card__preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  padding: 12px;
+  background: #ffffff;
+  border: 1px solid #e4ebf0;
+  border-radius: 8px;
+}
+
+.qr-image {
+  max-width: 100%;
+  max-height: 220px;
+  height: auto;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.qr-image--preview {
+  max-height: 160px;
+  border: 1px dashed #c4d0da;
+}
+
+.qr-empty {
+  margin: 0;
+  text-align: center;
+}
+
+.qr-updated {
+  margin: 0;
+  text-align: center;
+  font-size: 13px;
+}
+
+.qr-card__upload {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.qr-file-picker {
+  width: 100%;
+  min-width: 0;
+}
+
+/* A bare <input type=file> has a large intrinsic min-content width; without
+   these it forces the card (a grid item) wider than a 320px viewport. */
+.qr-file-picker input {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.qr-selected {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  background: #ffffff;
+  border: 1px solid #e4ebf0;
+  border-radius: 8px;
+}
+
+.qr-file-meta {
+  margin: 0;
+  font-size: 12px;
+  color: #667085;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.qr-actions {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.qr-actions button {
+  flex: 1;
+}
+
+.qr-card__danger {
+  display: flex;
+  justify-content: center;
+  padding-top: 4px;
+  border-top: 1px dashed #e4ebf0;
+}
+
+.qr-technical {
+  margin-top: 4px;
+}
+
+.qr-tech-list,
+.qr-meta-list {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 6px;
+}
+
+.qr-tech-list div,
+.qr-meta-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.qr-tech-list dt,
+.qr-meta-list dt {
+  color: #667085;
+  margin: 0;
+}
+
+.qr-tech-list dd,
+.qr-meta-list dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.qr-tech-sha {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.qr-tech-sha dd code {
+  font-size: 11px;
+}
+
+@media (max-width: 560px) {
+  .qr-admin-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* --- Regular-user payment area (阶段四) --- */
+.query-pay-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Payment summary: exactly four equal tiles, overriding the shared
+   summary-grid 5-column rule. */
+.query-pay-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.metric-tile {
+  align-items: center;
+  text-align: center;
+}
+
+.query-pay-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid #e4ebf0;
+}
+
+.query-pay-block h3 {
+  margin: 0;
+}
+
+/* 二维码块：标题、图片与空状态共享同一中轴。 */
+.query-pay-block--qr {
+  align-items: center;
+}
+
+/* 收款二维码占位槽：图片与空状态占同样高度，切换付款方式不跳动。 */
+.query-qr-slot {
+  width: 100%;
+  min-height: 260px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.query-method-options {
+  display: flex;
+  gap: 12px;
+}
+
+.query-method-button {
+  flex: 1;
+  min-height: 46px;
+  border: 1px solid #ccd7e0;
+  border-radius: 8px;
+  background: #ffffff;
+  font-weight: 600;
+  color: #33475b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.query-method-button--alipay.active {
+  border-color: #4a90e2;
+  background: #eaf3ff;
+  color: #1d4ed8;
+}
+
+.query-method-button--wechat.active {
+  border-color: #3fa96a;
+  background: #e9f8ef;
+  color: #15803d;
+}
+
+.query-payable {
+  align-items: center;
+  text-align: center;
+}
+
+.query-payable-amount {
+  font-size: 34px;
+  font-weight: 800;
+  color: #b3261e;
+  line-height: 1.1;
+}
+
+.query-payable-note {
+  margin: 0;
+  font-size: 13px;
+  max-width: 520px;
+}
+
+.query-qr-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.query-qr-image {
+  width: 240px;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+  border: 1px solid #e4ebf0;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: zoom-in;
+}
+
+.query-orders-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 2px;
+}
+
+.query-orders-heading h2 {
+  margin: 0;
+}
+
+.query-cn-inline {
+  color: #1f2937;
+}
+
+/* Click-to-enlarge lightbox */
+.qr-zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 23, 42, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.qr-zoom-inner {
+  position: relative;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 20px;
+  max-width: min(92vw, 460px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.qr-zoom-image {
+  width: 100%;
+  max-width: 400px;
+  max-height: 70vh;
+  height: auto;
+  object-fit: contain;
+}
+
+.qr-zoom-caption {
+  margin: 0;
+  font-weight: 600;
+}
+
+.qr-zoom-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: #eef2f5;
+  font-size: 22px;
+  line-height: 1;
+  color: #33475b;
+}
+
+@media (max-width: 560px) {
+  .query-pay-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* --- Login entry separation: landing + user/admin login pages (阶段五) --- */
+.entry-page {
+  min-height: calc(100vh - 60px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 40px 0;
+}
+
+.entry-brand {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.entry-brand h1 {
+  font-size: 30px;
+  letter-spacing: 1px;
+  color: #274b6d;
+}
+
+.entry-subtitle {
+  color: #667085;
+  font-size: 15px;
+}
+
+.entry-brand--page {
+  margin-bottom: 4px;
+}
+
+.entry-back {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: #4a6b8a;
+  padding: 4px 0;
+  font-size: 14px;
+}
+
+/* Landing entry cards share the page's central axis: an equal 2-column grid in
+   a max-width container centered with auto margins. Equal 1fr tracks (not fixed
+   260px) keep the two cards the same width and the group's centre aligned with
+   the title above it. */
+.entry-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  justify-content: center;
+  gap: 20px;
+  width: min(100%, 560px);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Login-card helpers shared by the admin and user login pages. */
+.entry-card__hint {
+  text-align: center;
+  font-size: 13px;
+}
+
+.entry-aux {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.entry-aux p {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.entry-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 10px;
+  min-height: 180px;
+  padding: 28px 20px;
+  background: #ffffff;
+  border: 1px solid #dce4ea;
+  border-top: 4px solid #cdd8e2;
+  border-radius: 14px;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+
+.entry-choice:hover {
+  box-shadow: 0 6px 20px rgba(39, 75, 109, 0.1);
+  transform: translateY(-2px);
+}
+
+.entry-choice--user {
+  border-top-color: #4a90e2;
+}
+
+.entry-choice--admin {
+  border-top-color: #5a6b7b;
+}
+
+.entry-choice__title {
+  font-size: 19px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.entry-choice__desc {
+  font-size: 13px;
+  color: #667085;
+  line-height: 1.5;
+}
+
+.entry-choice__cta {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #315b7d;
+}
+
+.entry-choice--admin .entry-choice__cta {
+  color: #4b5a68;
+}
+
+.entry-card {
+  width: min(100%, 400px);
+  background: #ffffff;
+  border: 1px solid #dce4ea;
+  border-radius: 14px;
+  padding: 28px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.entry-card__title {
+  text-align: center;
+}
+
+.entry-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.entry-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.entry-form label span {
+  font-size: 13px;
+  color: #4b5a68;
+}
+
+.entry-form input {
+  min-height: 44px;
+  border: 1px solid #ccd7e0;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #ffffff;
+}
+
+.entry-submit {
+  min-height: 46px;
+  margin-top: 4px;
+}
+
+@media (max-width: 560px) {
+  .entry-choices {
+    grid-template-columns: minmax(0, 1fr);
+    width: min(100%, 360px);
+  }
+}
+
+/* --- Per-list independent filters (阶段七) --- */
+.query-orders-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.list-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.list-filter-bar label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 140px;
+}
+
+.list-filter-bar label span {
+  font-size: 12px;
+  color: #4b5a68;
+}
+
+.list-filter-bar select,
+.list-filter-bar input {
+  min-height: 38px;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid #ccd7e0;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #ffffff;
+}
+
+.list-filter-bar button {
+  flex: 0 0 auto;
+}
+
+.list-filter-note {
+  font-size: 12px;
+  margin: 0;
+}
+
+@media (max-width: 560px) {
+  .list-filter-bar label {
+    flex: 1 1 100%;
+  }
+}
+
+.list-filter-context {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: #4b5a68;
+  background: #f4f7f9;
+  border: 1px solid #e4ebf0;
+  border-radius: 6px;
+}
+
+/* ===== Portal / module architecture (2026-07-17) ===== */
+.portal-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  background: #ffffff;
+  border: 1px solid #dce4ea;
+  border-radius: 10px;
+}
+
+.portal-bar__name { font-size: 18px; font-weight: 700; color: #274b6d; }
+.portal-bar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.portal-bar__back { border: 1px solid #d4dde5; background: #f6f9fb; color: #405468; min-height: 34px; padding: 0 12px; border-radius: 8px; }
+.portal-bar__identity { display: inline-flex; align-items: center; min-height: 34px; padding: 0 12px; border-radius: 999px; color: #24425f; background: #edf4fb; border: 1px solid #d4e3f2; white-space: nowrap; }
+.portal-bar__status { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid #d7e4dd; color: #176448; background: #edf8f3; white-space: nowrap; }
+.portal-bar__status[data-online="false"] { color: #8a4b15; background: #fff5e6; border-color: #ead7b7; }
+.portal-bar__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.portal-bar__icon { width: 34px; height: 34px; border: 1px solid #d4dde5; border-radius: 8px; background: #fff; color: #27384a; }
+.portal-bar__logout { min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid #cbd6df; background: #ffffff; color: #27384a; }
+
+.portal-hero { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 8px 0 18px; }
+.portal-hero__title { font-size: 24px; color: #274b6d; }
+.portal-hero__subtitle { color: #667085; }
+.portal-summary { margin-bottom: 18px; }
+
+.module-portal { display: flex; justify-content: center; }
+.module-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; width: 100%; max-width: 920px; }
+
+.module-card { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; min-height: 190px; padding: 24px 20px; background: #ffffff; border: 1px solid #dce4ea; border-top: 4px solid #cdd8e2; border-radius: 14px; transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s; }
+.module-card:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(39, 75, 109, 0.1); transform: translateY(-2px); }
+.module-card--blue { border-top-color: #4a90e2; }
+.module-card--green { border-top-color: #3fa96a; }
+.module-card--neutral { border-top-color: #7a8ba0; }
+.module-card__title { font-size: 18px; font-weight: 700; color: #1f2937; }
+.module-card__desc { font-size: 13px; color: #667085; line-height: 1.6; overflow-wrap: anywhere; }
+.module-card__meta { font-size: 12px; color: #33475b; background: #f2f6f9; border-radius: 999px; padding: 2px 10px; }
+.module-card__cta { margin-top: 4px; font-size: 14px; font-weight: 600; color: #315b7d; }
+.module-card--disabled { opacity: 0.6; }
+
+.module-header { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; text-align: center; }
+.module-header__title { font-size: 20px; color: #274b6d; }
+.module-subnav { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.module-subnav button { min-height: 36px; padding: 0 16px; border-radius: 999px; border: 1px solid #d4dde5; background: #ffffff; color: #405468; }
+.module-subnav button.active { color: #ffffff; background: #315b7d; border-color: #315b7d; }
+.module-redirect { text-align: center; }
+
+.query-amount-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.query-payable-tile strong { font-size: 26px; }
+.entry-card--wide { max-width: 460px; }
+
+@media (max-width: 560px) {
+  .query-amount-grid { grid-template-columns: minmax(0, 1fr); }
+  .module-grid { grid-template-columns: minmax(0, 1fr); max-width: 360px; }
+}
+
+/* ===== 全站文字居中（2026-07-17）=====
+   Text within every visible region is centered, while preserving equal control
+   heights, natural wrapping, and no horizontal overflow. Layout containers keep
+   their flex/grid alignment; only text alignment and box centering are added. */
+h1, h2, h3, h4 { text-align: center; }
+
+/* Panel headers: center the title/description stack and any action row. */
+.panel__header { justify-content: center; text-align: center; flex-wrap: wrap; }
+.panel__header > div { text-align: center; }
+.header-actions { justify-content: center; }
+
+/* Paragraph copy, hints, empty/error/success states. */
+.muted, .inline-alert, .query-payment-state, .list-filter-note,
+.qr-empty, .recovery-email-empty, .file-line, .payment-allocation-hint,
+.payment-immutable-hint, .payment-flow-steps { text-align: center; }
+
+/* Buttons: text + icon centered, consistent height. */
+button { text-align: center; }
+.primary-button, .secondary-button, .danger-button, .link-button {
+  display: inline-flex; align-items: center; justify-content: center;
+}
+
+/* Form controls: labels, inputs, selects, placeholders centered. */
+label > span { text-align: center; }
+input, select, textarea { text-align: center; }
+input::placeholder { text-align: center; }
+
+/* Status chips centered within their cell. */
+.status-chip { margin-left: auto; margin-right: auto; }
+
+/* Tables: center headers and cells (money, quantities, status). Wide tables
+   still scroll inside their own .table-scroll container. */
+table th, table td { text-align: center; vertical-align: middle; }
+
+/* Filter bars: labels and controls centered. */
+.list-filter-bar { justify-content: center; }
+
+/* Metric tiles already center; ensure their emphasis text is centered too. */
+.metric-tile span, .metric-tile strong { text-align: center; width: 100%; }
+
+/* ===== Admin filter toolbar + advanced collapse (2026-07-17) ===== */
+.filter-form { display: flex; flex-direction: column; gap: 12px; }
+.filter-toolbar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+/* Wide data tables scroll inside .table-scroll; never let them widen the
+   document itself, including at the 320px acceptance width. */
+html,
+body,
+#app {
+  max-width: 100%;
+  overflow-x: clip;
+}
+.filter-toolbar label,
+.filter-technical label { display: grid; gap: 4px; min-width: 0; }
+.filter-toolbar label > span,
+.filter-technical label > span { font-size: 12px; color: #4b5a68; text-align: center; }
+.filter-toolbar input,
+.filter-toolbar select,
+.filter-technical input {
+  min-height: 38px; min-width: 0; max-width: 100%;
+  border: 1px solid #ccd7e0; border-radius: 6px; padding: 0 10px; background: #ffffff;
+  text-align: center;
+}
+.filter-range { display: flex; gap: 6px; min-width: 0; }
+.filter-range input { flex: 1; min-width: 0; }
+.filter-advanced { border: 1px dashed #d4dde5; border-radius: 8px; padding: 8px 12px; }
+.filter-advanced > summary { cursor: pointer; font-size: 13px; color: #4a6b8a; text-align: center; list-style-position: inside; }
+.filter-advanced > .filter-toolbar { margin-top: 10px; }
+.filter-technical {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #e4ebf0;
+}
+.filter-actions {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px;
+}
+.filter-result-count { font-size: 13px; }
+
+@media (max-width: 560px) {
+  .filter-toolbar, .filter-technical { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ===== 统一字体层级（2026-07-17 第一阶段） =====
+   页面各处不再零散写字号：统一用下列变量与通用类。
+   层级（由大到小）：页面主标题 > 区块标题 > 数据值 > 字段标签 > 辅助说明。
+   关键规则：数据值必须比字段标签更醒目（更大 + 更重 + 更深）。 */
+:root {
+  --fs-page-title: 24px;
+  --fs-section-title: 17px;
+  --fs-value: 15px;
+  --fs-label: 13px;
+  --fs-hint: 12px;
+  --fs-amount: 16px;
+
+  --fw-page-title: 700;
+  --fw-section-title: 700;
+  --fw-value: 600;
+  --fw-label: 500;
+  --fw-amount: 700;
+
+  --color-title: #274b6d;
+  --color-value: #1f2937;
+  --color-label: #5b6b7c;
+  --color-hint: #667085;
+  --color-amount: #1f2937;
+  --color-amount-danger: #b3261e;
+
+  --lh-tight: 1.3;
+  --lh-normal: 1.6;
+}
+
+/* 页面主标题：最大、居中、与下方稳定间距 */
+.t-page-title {
+  font-size: var(--fs-page-title);
+  font-weight: var(--fw-page-title);
+  color: var(--color-title);
+  line-height: var(--lh-tight);
+  text-align: center;
+  margin-bottom: 6px;
+}
+
+/* 区块/卡片标题：明显大于字段标签 */
+.t-section-title {
+  font-size: var(--fs-section-title);
+  font-weight: var(--fw-section-title);
+  color: var(--color-value);
+  line-height: var(--lh-tight);
+}
+
+/* 字段标签：统一字号/颜色/行高，略小于数据值但不至于难看 */
+.t-label {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-label);
+  color: var(--color-label);
+  line-height: var(--lh-normal);
+}
+
+/* 数据值：比标签更醒目 */
+.t-value {
+  font-size: var(--fs-value);
+  font-weight: var(--fw-value);
+  color: var(--color-value);
+  line-height: var(--lh-normal);
+  overflow-wrap: anywhere;
+}
+
+/* 金额值：清晰数字字重 */
+.t-amount {
+  font-size: var(--fs-amount);
+  font-weight: var(--fw-amount);
+  color: var(--color-amount);
+  line-height: var(--lh-tight);
+  font-variant-numeric: tabular-nums;
+}
+
+.t-amount--danger { color: var(--color-amount-danger); }
+
+/* 辅助说明：弱化但可读；长说明左对齐更易读 */
+.t-hint {
+  font-size: var(--fs-hint);
+  color: var(--color-hint);
+  line-height: var(--lh-normal);
+}
+
+.t-hint--long { text-align: left; }
+
+/* --- 让既有结构继承统一层级（不再逐页写字号） --- */
+.portal-hero__title { font-size: var(--fs-page-title); font-weight: var(--fw-page-title); color: var(--color-title); }
+.module-header__title { font-size: var(--fs-page-title); font-weight: var(--fw-page-title); color: var(--color-title); }
+
+/* 区块标题：所有面板内的 h2/h3 统一为区块标题字号，避免裸 <h2> 拿浏览器默认
+   字号（约 24px）与 .panel__header h2(17px) 打架——这正是"我的订单—订单明细"
+   等标题大小关系不协调的根源。页面主标题(.page-heading h2)在下方另行放大。 */
+.panel h2,
+.query-orders-heading h2,
+.query-order-card__heading h2 { font-size: var(--fs-section-title); font-weight: var(--fw-section-title); color: var(--color-value); line-height: var(--lh-tight); }
+.panel h3,
+.query-pay-block h3 { font-size: var(--fs-section-title); font-weight: var(--fw-section-title); color: var(--color-value); line-height: var(--lh-tight); }
+
+/* 统计方框：标签在上（小、弱），数值在下（大、重）——数值必须更醒目 */
+.metric-tile span { font-size: var(--fs-label); font-weight: var(--fw-label); color: var(--color-label); line-height: var(--lh-normal); }
+.metric-tile strong { font-size: 20px; font-weight: var(--fw-amount); color: var(--color-value); font-variant-numeric: tabular-nums; }
+
+/* 表格：表头与内容各自统一，金额/数字右对齐并等宽数字，其余居中 */
+table th { font-size: var(--fs-label); font-weight: 700; color: var(--color-label); line-height: var(--lh-normal); }
+table td { font-size: var(--fs-value); font-weight: 400; color: var(--color-value); line-height: var(--lh-normal); vertical-align: middle; }
+table td strong { font-weight: var(--fw-value); }
+table td small { display: block; font-size: var(--fs-hint); color: var(--color-hint); }
+
+/* 筛选标签统一 */
+.filter-toolbar label > span,
+.filter-technical label > span,
+.list-filter-bar label span { font-size: var(--fs-label); font-weight: var(--fw-label); color: var(--color-label); }
+.filter-toolbar input, .filter-toolbar select,
+.list-filter-bar input, .list-filter-bar select { font-size: var(--fs-value); }
+
+/* 表单标签/输入统一 */
+.entry-form label span { font-size: var(--fs-label); font-weight: var(--fw-label); color: var(--color-label); }
+.entry-form input { font-size: var(--fs-value); }
+
+/* ===== WPS 式表头列筛选（2026-07-17 订单参考实现） =====
+   通用样式：订单页先落地，用户/收付款/导入历史后续复用同一套类名。 */
+
+/* 页面顶部三行：标题独占一行，导出操作单独一行，结果与清空筛选一行。 */
+.page-heading { text-align: center; margin-bottom: 10px; }
+/* 页面主标题：WPS 管理页（订单/用户/付款）顶部的主标题必须最大、最醒目，
+   明显大于区块标题与内容。此规则位于 .panel h2 之后，故对同处 .panel 内的
+   .page-heading h2 生效。 */
+.page-heading h2 { font-size: var(--fs-page-title); font-weight: var(--fw-page-title); color: var(--color-title); line-height: var(--lh-tight); }
+.page-heading p { margin: 4px 0 0; }
+
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.page-resultbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e6ecf1;
+}
+.page-resultbar .filter-result-count { font-size: var(--fs-value); font-weight: var(--fw-value); color: var(--color-value); }
+.page-size-control { display: inline-flex; align-items: center; gap: 6px; color: var(--color-label); }
+.page-size-control select { min-height: 34px; border: 1px solid #cbd6df; border-radius: 6px; background: #fff; padding: 0 8px; }
+
+/* 表头：标题文字与漏斗图标垂直居中，字号字重继承统一的 table th 规则。 */
+.column-header {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  line-height: var(--lh-normal);
+}
+.column-header__label {
+  font-size: var(--fs-label);
+  font-weight: 700;
+  color: var(--color-label);
+}
+
+.column-filter-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.column-filter-button svg { width: 12px; height: 12px; fill: currentColor; }
+.column-filter-button:hover { background: #eef2f6; color: #475569; }
+.column-filter-button:focus-visible { outline: 2px solid #315b7d; outline-offset: 1px; }
+/* 已启用筛选：漏斗变为实心强调色，让"这列正在筛选"一眼可见。 */
+.column-filter-button.is-active {
+  color: #ffffff;
+  background: #315b7d;
+  border-color: #315b7d;
+}
+
+/* 浮层：默认贴着表头下方，位置由组件按视口夹紧计算。 */
+.column-filter-popover {
+  position: fixed;
+  z-index: 60;
+  width: 260px;
+  max-height: min(360px, 70vh);
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px solid #cbd6df;
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
+  text-align: left;
+}
+
+.column-filter-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px;
+  gap: 8px;
+}
+
+.column-filter-search input,
+.column-filter-fields input {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 8px;
+  border: 1px solid #cbd6df;
+  border-radius: 6px;
+  font-size: var(--fs-value);
+}
+
+.column-filter-fields { display: grid; gap: 8px; }
+.column-filter-fields label { display: grid; gap: 4px; text-align: left; }
+.column-filter-fields label span { font-size: var(--fs-label); font-weight: var(--fw-label); color: var(--color-label); }
+.column-filter-hint { font-size: var(--fs-hint); margin: 0; text-align: left; }
+
+/* 候选值列表：可滚动，行高一致，数量右对齐。 */
+.column-filter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  border-top: 1px solid #eef2f6;
+}
+
+.column-filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px;
+  cursor: pointer;
+  text-align: left;
+}
+.column-filter-option:hover { background: #f5f8fa; }
+.column-filter-option input { flex: 0 0 auto; margin: 0; }
+.column-filter-option__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-value);
+  color: var(--color-value);
+}
+/* "(空白)" 候选用颜色弱化区分，不用斜体（全站禁止斜体/歪斜）。 */
+.column-filter-option__label.is-blank { color: var(--color-hint); }
+.column-filter-option__count {
+  flex: 0 0 auto;
+  font-size: var(--fs-label);
+  color: var(--color-label);
+  font-variant-numeric: tabular-nums;
+}
+.column-filter-option--all { border-bottom: 1px solid #eef2f6; padding-bottom: 7px; font-weight: 600; }
+
+.column-filter-state {
+  margin: 0;
+  padding: 10px 2px;
+  font-size: var(--fs-label);
+  color: var(--color-hint);
+  text-align: left;
+}
+.column-filter-state--error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #9a3412;
+}
+.column-filter-more { width: 100%; margin-top: 6px; }
+
+/* 取消/确定：始终贴在浮层底部并保持可见。 */
+.column-filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #eef2f6;
+  flex: 0 0 auto;
+}
+.column-filter-actions button { min-height: 32px; padding: 0 12px; font-size: var(--fs-label); }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 数字/金额列：等宽数字，避免逐行跳动。 */
+.numeric-column { font-variant-numeric: tabular-nums; }
+
+/* 订单表格较宽：只在 .table-scroll 容器内部横向滚动，页面本身不横向滚动。 */
+/* 13 列（删掉用户名称/项目名称/谷子种类后）在常见桌面宽度即可完整显示；
+   1460px 是 16 列时代的遗留值，会平白制造横向滚动。 */
+.order-table table { min-width: 1100px; }
+
+/* 谷子名称/系列/角色：正常换行，不用省略号把业务内容藏起来。 */
+.cell-wrap {
+  display: inline-block;
+  max-width: 200px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+/* 同一订单的连续明细行用极浅底色分组；仅视觉分组，不合并单元格。 */
+.order-row--alt td { background: #fafbfc; }
+
+/* 用户与账号：12 列，比订单表窄；同样只在表格容器内部横向滚动。 */
+.user-table table { min-width: 1080px; }
+
+/* 付款记录：10 列；同样只在表格容器内部横向滚动。 */
+.payment-records-table table { min-width: 1000px; }
+
+/* 导入历史：10 列；同样只在表格容器内部横向滚动。 */
+.import-history-table table { min-width: 1040px; }
+
+/* 收肾记录：10 列；同样只在表格容器内部横向滚动，页面本身不横滚。 */
+.submission-records-table table { min-width: 1040px; }
+
+/* --- 收肾记录（付款凭证）--- */
+/* 普通用户提交区：两列（选图/预览 + 金额/提交），窄屏折叠为单列。 */
+.query-submission-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.query-submission-upload,
+.query-submission-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.file-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+.file-field span { font-size: var(--fs-label); color: var(--color-label); }
+.file-field input[type='file'] { width: 100%; max-width: 100%; }
+/* 本地预览与空状态占同一固定高度居中槽位，切换不跳动；图片完整显示、不拉伸。 */
+.submission-preview-slot,
+.submission-image-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  padding: 10px;
+  border: 1px dashed #d7dde5;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+.submission-preview-image,
+.submission-image {
+  max-width: 100%;
+  max-height: 340px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.query-submission-amounts { margin: 0; }
+.query-submission-button { align-self: center; min-width: 180px; }
+.query-submission-history { margin-top: 18px; }
+.query-submission-history h3 { text-align: center; }
+.submission-history-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.submission-history-item {
+  border: 1px solid #eef2f6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.submission-history-head,
+.submission-history-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 14px;
+}
+.submission-reject-reason {
+  margin: 0;
+  text-align: center;
+  color: var(--color-amount-danger, #c0392b);
+  font-size: var(--fs-hint);
+}
+/* 管理员详情图片居中。 */
+.submission-image-slot { min-height: 260px; }
+/* 驳回原因输入：整行、可换行。 */
+.reject-reason-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+.reject-reason-field span { font-size: var(--fs-label); color: var(--color-label); }
+.reject-reason-field textarea {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+}
+
+@media (max-width: 640px) {
+  .query-submission-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 日期浮层里的「从未登录」等空白选项，与值筛选的候选项同一套行样式。 */
+.column-filter-option--blank {
+  border-top: 1px solid #eef2f6;
+  padding-top: 7px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.technical-note { font-size: var(--fs-hint); margin: 6px 0 10px; }
+
+/* 移动端：浮层改为底部弹层，撑满宽度但不超出屏幕；操作按钮始终可见。 */
+@media (max-width: 560px) {
+  .column-filter-popover.is-mobile {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: 0;
+    width: auto;
+    max-width: calc(100vw - 16px);
+    max-height: 76vh;
+    border-radius: 10px 10px 0 0;
+  }
+  .column-filter-popover.is-mobile .column-filter-actions {
+    position: sticky;
+    bottom: 0;
+    background: #ffffff;
+    padding-bottom: 4px;
+  }
+  .column-filter-popover.is-mobile .column-filter-actions button { flex: 1 1 0; }
 }

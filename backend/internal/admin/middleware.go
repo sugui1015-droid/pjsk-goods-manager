@@ -38,3 +38,11 @@ func CurrentAdmin(ctx context.Context) (Admin, bool) {
 	account, ok := ctx.Value(contextKey{}).(Admin)
 	return account, ok
 }
+
+// ContextWithAdmin returns a context carrying the authenticated admin, mirroring
+// what RequireAuthentication injects. Production auth still flows only through
+// RequireAuthentication; this exists so handlers in other packages can be unit
+// tested against a known admin without a database or a real session.
+func ContextWithAdmin(ctx context.Context, account Admin) context.Context {
+	return context.WithValue(ctx, contextKey{}, account)
+}

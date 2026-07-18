@@ -8,15 +8,55 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"pjsk/backend/internal/orders"
 	"pjsk/backend/internal/payments"
 	"pjsk/backend/internal/testdb"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestOrderItemExportReusesCompleteListFiltersAndIgnoresPagination(t *testing.T) {
+	query, err := url.ParseQuery("cn=CN001&cn=CN002&series=A&series_blank=1&amount_min=10&created_to=2026-07-17&page=bad&page_size=999999")
+	if err != nil {
+		t.Fatalf("parse query: %v", err)
+	}
+	filters, unpaidOnly, err := parseOrderItemExportFilters(query)
+	if err != nil {
+		t.Fatalf("parse export filters: %v", err)
+	}
+	if unpaidOnly {
+		t.Fatal("unpaid_only unexpectedly enabled")
+	}
+	if filters.Page != 1 || filters.PageSize != orders.DefaultPageSize {
+		t.Fatalf("pagination leaked into export: %d/%d", filters.Page, filters.PageSize)
+	}
+	if strings.Join(filters.CN, "|") != "CN001|CN002" || strings.Join(filters.Series, "|") != "A|" {
+		t.Fatalf("multi-value/blank filters = CN %#v, series %#v", filters.CN, filters.Series)
+	}
+
+	sql, args := buildOrderItemExportQuery(filters, false)
+	// Restricted by order *item* ids: restricting by order id would re-inflate
+	// the file to every sibling item of a matching order.
+	for _, fragment := range []string{"b.cn_code = any(", "b.series_code = any(", "b.total_amount >= ", "b.created_at < ", "oi.id in ("} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("export SQL missing %q\n%s", fragment, sql)
+		}
+	}
+	if strings.Contains(sql, "o.id in (") {
+		t.Fatalf("export must not select whole orders:\n%s", sql)
+	}
+	if strings.Contains(strings.ToLower(sql), " limit ") || strings.Contains(strings.ToLower(sql), " offset ") {
+		t.Fatalf("complete export must not paginate or silently cap rows:\n%s", sql)
+	}
+	if len(args) != 4 {
+		t.Fatalf("args = %#v, want CN/series/amount/date bindings", args)
+	}
+}
 
 // TestOrderItemsCSVFiltersByIndependentRoleAndCategory confirms 谷子种类
 // (category) and 谷子角色 (role) act as independent AND-combined filters —
@@ -165,10 +205,14 @@ func TestOrderItemsExcelUnpaidOnlyHasFormattedWorkbook(t *testing.T) {
 
 type stubPaymentsStore struct {
 	response payments.PaymentListResponse
+	filters  payments.PaymentFilters
+	maxRows  int
 }
 
-func (s stubPaymentsStore) ListPaymentRecords(context.Context, payments.PaymentFilters) (payments.PaymentListResponse, error) {
-	return s.response, nil
+func (s *stubPaymentsStore) ExportPayments(_ context.Context, filters payments.PaymentFilters, maxRows int) ([]payments.PaymentListItem, error) {
+	s.filters = filters
+	s.maxRows = maxRows
+	return s.response.Items, nil
 }
 
 // TestPaymentsCSVFieldOrder locks in the exact first-8-column order required
@@ -176,7 +220,7 @@ func (s stubPaymentsStore) ListPaymentRecords(context.Context, payments.PaymentF
 // Anything else (note, admin, void info) must come after these 8, never
 // spliced in between.
 func TestPaymentsCSVFieldOrder(t *testing.T) {
-	store := stubPaymentsStore{response: payments.PaymentListResponse{
+	store := &stubPaymentsStore{response: payments.PaymentListResponse{
 		Items: []payments.PaymentListItem{
 			{
 				CNCode:           "CN001",

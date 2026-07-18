@@ -304,8 +304,26 @@ export type ImportHistoryItem = {
   revoke_result?: ImportRevokeResponse
 }
 
+// Counts are import records. total is every import matching the filters.
 export type ImportHistoryResponse = {
   items: ImportHistoryItem[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+// The import facets endpoint names its pager facet_page/facet_page_size; the
+// loader adapts it into the ColumnFacetResponse the popover consumes.
+export type ImportFacetResponse = {
+  column: string
+  values: ColumnFacetValue[]
+  total: number
+  blank_count: number
+  facet_page: number
+  facet_page_size: number
+  total_pages: number
+  has_more: boolean
 }
 
 export type ImportDetailResponse = {
@@ -356,8 +374,66 @@ export type OrderDetail = OrderSummary & {
   items: OrderItem[]
 }
 
+// OrderListItem is one row of the admin order table: a single goods line of a
+// single CN's order — never a whole order.
+//
+// Every product field is single-valued. The list has no name/series/category/
+// role arrays on purpose: an aggregated row cannot say which of its values
+// matched a filter. An item with quantity 3 is one row whose quantity is 3.
+//
+// order_id is for navigating to the order's detail page and for keying rows —
+// not a column to display. It carries no technical identifiers (import batch
+// id, SKU, file hash); those stay in the detail page's technical section.
+export type OrderListItem = {
+  item_id: string
+  order_id: string
+  order_no: string
+  status: string
+  payment_status: string
+  cn_code: string
+  display_name?: string
+  project_name: string
+  item_name: string
+  series_code: string
+  category: string
+  character_name: string
+  quantity: number
+  unit_price: number
+  total_amount: number
+  paid_amount: number
+  unpaid_amount: number
+  created_at: string
+}
+
+// Counts are in detail rows: total is every goods line matching the filters,
+// page_size is goods lines per page.
 export type OrderListResponse = {
-  items: OrderSummary[]
+  items: OrderListItem[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+// Shared by every WPS column filter (orders, users, …). Not order-specific.
+export type ColumnFacetValue = {
+  value: string
+  label: string
+  count: number
+  blank: boolean
+}
+
+// The shape ColumnValueFilter consumes. Endpoints whose wire format names the
+// pager differently (the user facets use facet_page/facet_page_size) adapt into
+// this shape in their loader.
+export type ColumnFacetResponse = {
+  column: string
+  values: ColumnFacetValue[]
+  total: number
+  blank_count: number
+  page: number
+  page_size: number
+  has_more: boolean
 }
 
 export type OrderDetailResponse = {
@@ -452,8 +528,27 @@ export type PaymentListItem = {
   void_reason?: string
 }
 
+// Counts are payment records. total is every payment matching the filters,
+// never just this page.
 export type PaymentListResponse = {
   items: PaymentListItem[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+// The payment facets endpoint names its pager facet_page/facet_page_size; the
+// loader adapts it into the ColumnFacetResponse the popover consumes.
+export type PaymentFacetResponse = {
+  column: string
+  values: ColumnFacetValue[]
+  total: number
+  blank_count: number
+  facet_page: number
+  facet_page_size: number
+  total_pages: number
+  has_more: boolean
 }
 
 export type PaymentDetailItem = {
@@ -678,11 +773,18 @@ export type QueryOrdersResponse = {
   remaining_amount: number
 }
 
+// One row of the admin user table.
+//
+// The two account-security columns are booleans by construction: the backend
+// reduces the query code to "is one set" and the recovery email to "is one
+// bound", and never selects the hash, the ciphertext or the lookup hash. id is
+// for keying rows and navigating to the detail page — never a column to render.
 export type AdminUserListItem = {
   id: string
   cn_code: string
   display_name?: string
   has_query_code: boolean
+  has_recovery_email: boolean
   status: string
   order_count: number
   total_amount: number
@@ -701,9 +803,28 @@ export type AdminUserListSummary = {
   remaining_amount: number
 }
 
+// Counts are users. total is every user matching the filters, and summary
+// aggregates over that same full set — never just this page.
 export type AdminUserListResponse = {
   items: AdminUserListItem[]
   summary: AdminUserListSummary
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+// The user facets endpoint names its pager facet_page/facet_page_size; the
+// loader adapts it into the ColumnFacetResponse the popover consumes.
+export type AdminUserFacetResponse = {
+  column: string
+  values: ColumnFacetValue[]
+  total: number
+  blank_count: number
+  facet_page: number
+  facet_page_size: number
+  total_pages: number
+  has_more: boolean
 }
 
 export type AdminUserDetailOrderItem = {
@@ -787,4 +908,161 @@ export type AdminUserMergeResponse = {
   moved_order_count: number
   moved_payment_count: number
   merged_at: string
+}
+
+// --- Payment collection QR codes ---
+// Static QR codes (Alipay / WeChat) that admins configure and logged-in users
+// scan. Image bytes are never carried in JSON: admins/users load the image via
+// the dedicated image endpoints (see apiUrl) so bytes stay out of app state.
+export type PaymentQRMethod = 'alipay' | 'wechat'
+
+// Admin-only technical status for one method.
+export type PaymentQRAdminStatus = {
+  payment_method: PaymentQRMethod
+  configured: boolean
+  mime_type?: string
+  byte_size?: number
+  sha256?: string
+  updated_at?: string
+  updated_by?: string
+}
+
+export type PaymentQRAdminStatusResponse = {
+  items: PaymentQRAdminStatus[]
+}
+
+// Regular-user view: only whether a method is usable. No technical fields.
+export type PaymentQRAvailability = {
+  payment_method: PaymentQRMethod
+  available: boolean
+}
+
+export type PaymentQRAvailabilityResponse = {
+  items: PaymentQRAvailability[]
+}
+
+export function getPaymentQRAdminStatuses(): Promise<PaymentQRAdminStatusResponse> {
+  return getJSON<PaymentQRAdminStatusResponse>('/api/admin/payment-qr')
+}
+
+export function uploadPaymentQR(method: PaymentQRMethod, form: FormData): Promise<PaymentQRAdminStatusResponse> {
+  return postForm<PaymentQRAdminStatusResponse>(`/api/admin/payment-qr/${method}`, form)
+}
+
+export function disablePaymentQR(method: PaymentQRMethod): Promise<PaymentQRAdminStatusResponse> {
+  return postJSON<PaymentQRAdminStatusResponse>(`/api/admin/payment-qr/${method}/disable`, {})
+}
+
+export function getPaymentQRAvailability(): Promise<PaymentQRAvailabilityResponse> {
+  return getJSON<PaymentQRAvailabilityResponse>('/api/query/payment-qr')
+}
+
+// --- Payment proof submissions ("收肾记录") ---
+// A logged-in user uploads a screenshot of a completed payment. A submission is
+// EVIDENCE ONLY: it never changes any paid amount by itself. Image bytes are
+// never carried in JSON; the image is loaded via the dedicated image endpoints
+// (see apiUrl) which set nosniff. The regular-user shape carries no sha, no
+// internal ids, no admin identity, no paths — only the user's own history.
+export type PaymentSubmissionMethod = 'alipay' | 'wechat'
+export type PaymentSubmissionStatus = 'submitted' | 'approved' | 'rejected'
+
+export type UserPaymentSubmission = {
+  id: string
+  payment_method: string
+  principal_amount: number
+  fee_amount: number
+  payable_amount: number
+  status: PaymentSubmissionStatus
+  submitted_at: string
+  reviewed_at?: string
+  reject_reason?: string
+}
+
+export type UserPaymentSubmissionListResponse = { items: UserPaymentSubmission[] }
+export type UserPaymentSubmissionCreateResponse = { submission: UserPaymentSubmission }
+
+export function listUserPaymentSubmissions(): Promise<UserPaymentSubmissionListResponse> {
+  return getJSON<UserPaymentSubmissionListResponse>('/api/query/payment-submissions')
+}
+
+export function submitPaymentSubmission(form: FormData): Promise<UserPaymentSubmissionCreateResponse> {
+  return postForm<UserPaymentSubmissionCreateResponse>('/api/query/payment-submissions', form)
+}
+
+// One row of the admin proof table. Business fields only — the sha, byte size,
+// mime type, internal user id and linked payment id belong to the detail view's
+// collapsed 技术标识 section (see AdminPaymentSubmissionDetail), never the table.
+export type AdminPaymentSubmissionListItem = {
+  id: string
+  cn_code: string
+  display_name?: string
+  payment_method: string
+  principal_amount: number
+  fee_amount: number
+  payable_amount: number
+  status: PaymentSubmissionStatus
+  submitted_at: string
+  reviewed_at?: string
+  reviewed_by?: string
+  reject_reason?: string
+}
+
+// Counts are submissions. total is every proof matching the filters, not the page.
+export type AdminPaymentSubmissionListResponse = {
+  items: AdminPaymentSubmissionListItem[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+export type AdminPaymentSubmissionDetail = AdminPaymentSubmissionListItem & {
+  mime_type: string
+  byte_size: number
+  sha256: string
+  original_filename_safe?: string
+  user_id: string
+  linked_payment_id?: string
+}
+
+export type AdminPaymentSubmissionDetailResponse = { submission: AdminPaymentSubmissionDetail }
+
+// The proof facets endpoint names its pager facet_page/facet_page_size; the
+// loader adapts it into the ColumnFacetResponse the popover consumes.
+export type PaymentSubmissionFacetResponse = {
+  column: string
+  values: ColumnFacetValue[]
+  total: number
+  blank_count: number
+  facet_page: number
+  facet_page_size: number
+  total_pages: number
+  has_more: boolean
+}
+
+export function listAdminPaymentSubmissions(query: string): Promise<AdminPaymentSubmissionListResponse> {
+  const suffix = query ? `?${query}` : ''
+  return getJSON<AdminPaymentSubmissionListResponse>(`/api/admin/payment-submissions${suffix}`)
+}
+
+export function getAdminPaymentSubmissionFacets(query: string): Promise<PaymentSubmissionFacetResponse> {
+  return getJSON<PaymentSubmissionFacetResponse>(`/api/admin/payment-submissions/facets?${query}`)
+}
+
+export function getAdminPaymentSubmissionDetail(id: string): Promise<AdminPaymentSubmissionDetailResponse> {
+  return getJSON<AdminPaymentSubmissionDetailResponse>(`/api/admin/payment-submissions/${encodeURIComponent(id)}`)
+}
+
+export function rejectPaymentSubmission(id: string, reason: string): Promise<AdminPaymentSubmissionDetailResponse> {
+  return postJSON<AdminPaymentSubmissionDetailResponse>(`/api/admin/payment-submissions/${encodeURIComponent(id)}/reject`, { reason })
+}
+
+export type ApprovePaymentSubmissionRequest = {
+  items: Array<{ order_item_id: string; amount: number }>
+  paid_at?: string
+  note?: string
+}
+
+export function approvePaymentSubmission(id: string, request: ApprovePaymentSubmissionRequest): Promise<AdminPaymentSubmissionDetailResponse> {
+  return postJSON<AdminPaymentSubmissionDetailResponse>(`/api/admin/payment-submissions/${encodeURIComponent(id)}/approve`, request)
 }

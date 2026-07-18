@@ -19,9 +19,28 @@ import {
   postForm,
   postJSON,
   patchJSON,
+  getPaymentQRAdminStatuses,
+  uploadPaymentQR,
+  disablePaymentQR,
+  getPaymentQRAvailability,
+  listUserPaymentSubmissions,
+  submitPaymentSubmission,
+  listAdminPaymentSubmissions,
+  getAdminPaymentSubmissionFacets,
+  getAdminPaymentSubmissionDetail,
+  rejectPaymentSubmission,
+  approvePaymentSubmission,
+  type PaymentQRMethod,
+  type PaymentQRAdminStatus,
+  type PaymentQRAvailability,
+  type UserPaymentSubmission,
+  type AdminPaymentSubmissionListItem,
+  type AdminPaymentSubmissionDetailResponse,
+  type PaymentSubmissionFacetResponse,
   type Admin,
   type AdminUserDetailResponse,
   type AdminUserListItem,
+  type AdminUserFacetResponse,
   type AdminUserListResponse,
   type AdminUserListSummary,
   type AdminUserMergePreviewResponse,
@@ -35,16 +54,20 @@ import {
   type ImportConfirmResponse,
   type ImportDetailResponse,
   type ImportHistoryItem,
+  type ImportFacetResponse,
   type ImportHistoryResponse,
   type ImportRevokeResponse,
   type ImportIssue,
   type ImportPreviewResponse,
   type OrderDetailResponse,
+  type ColumnFacetResponse,
+  type OrderListItem,
   type OrderListResponse,
   type OrderSummary,
   type PaymentDetailResponse,
   type PaymentItemRow,
   type PaymentListItem,
+  type PaymentFacetResponse,
   type PaymentListResponse,
   type QueryLoginResponse,
   type QueryOrdersResponse,
@@ -69,10 +92,28 @@ import {
   type CNExclusionMap,
   type PreviewDetailRow,
 } from './importPreviewTools'
+import ModuleCard from './components/ModuleCard.vue'
+import PortalStatusBar from './components/PortalStatusBar.vue'
+import ColumnValueFilter from './components/ColumnValueFilter.vue'
+import ColumnRangeFilter from './components/ColumnRangeFilter.vue'
+import ColumnDateFilter from './components/ColumnDateFilter.vue'
+import {
+  activeFilterCount,
+  buildFilterParams,
+  clearAllFilters as clearColumnFilters,
+  createFilterState,
+} from './filters/columnFilters'
 const maxExcelSize = 20 * 1024 * 1024
 const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
-type RouteName = 'home' | 'query' | 'admin-imports' | 'admin-import-history' | 'admin-import-detail' | 'admin-orders' | 'admin-order-detail' | 'admin-payments' | 'admin-payment-detail' | 'admin-users' | 'admin-user-detail'
+type RouteName =
+  | 'home'
+  | 'query' | 'query-orders' | 'query-payment' | 'query-payments' | 'query-security'
+  | 'admin' | 'admin-data' | 'admin-import' | 'admin-import-history' | 'admin-import-detail'
+  | 'admin-orders' | 'admin-order-detail'
+  | 'admin-users' | 'admin-user-detail'
+  | 'admin-finance' | 'admin-payments' | 'admin-payment-detail' | 'admin-qr'
+  | 'admin-submissions' | 'admin-submission-detail'
 type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
 type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
 type QuickFilterGroup = { key: TextFilterKey; label: string; options: string[] }
@@ -96,18 +137,42 @@ const config = ref<ConfigResponse>(fallbackConfig)
 const errorMessage = ref('')
 const loading = ref(true)
 const checkedAt = ref('')
-const activeView = ref<'overview' | 'ops' | 'legacy'>('overview')
 const routeName = ref<RouteName>(routeFromPath(window.location.pathname))
 const routeImportID = ref(importIDFromPath(window.location.pathname))
 const routeOrderID = ref(orderIDFromPath(window.location.pathname))
 const routePaymentID = ref(paymentIDFromPath(window.location.pathname))
 const routeUserID = ref(userIDFromPath(window.location.pathname))
+const routeSubmissionID = ref(submissionIDFromPath(window.location.pathname))
 
 const adminUsers = ref<AdminUserListItem[]>([])
 const adminUsersSummary = ref<AdminUserListSummary | null>(null)
 const adminUsersLoading = ref(false)
 const adminUsersMessage = ref('')
-const adminUserFilters = ref({ cn: '', status: '' })
+
+// User table filters live entirely in the column headers — there is no
+// top-of-page filter form. The value-column keys double as the API's parameter
+// names.
+const adminUserFilterState = ref(
+  createFilterState({
+    valueColumns: ['cn', 'name', 'status', 'has_query_code', 'has_recovery_email'],
+    rangeColumns: ['order_count', 'total', 'paid', 'unpaid'],
+    dateColumns: ['last_login', 'created'],
+  }),
+)
+const ADMIN_USER_RANGE_PARAMS: Record<string, [string, string]> = {
+  order_count: ['order_count_min', 'order_count_max'],
+  total: ['total_min', 'total_max'],
+  paid: ['paid_min', 'paid_max'],
+  unpaid: ['unpaid_min', 'unpaid_max'],
+}
+const ADMIN_USER_DATE_PARAMS: Record<string, [string, string]> = {
+  last_login: ['last_login_from', 'last_login_to'],
+  created: ['created_from', 'created_to'],
+}
+const adminUserPage = ref(1)
+const adminUserPageSize = ref(50)
+const adminUserTotal = ref(0)
+const adminUserTotalPages = ref(0)
 const adminUserDetail = ref<AdminUserDetailResponse | null>(null)
 const adminUserDetailLoading = ref(false)
 const adminUserDetailMessage = ref('')
@@ -138,6 +203,11 @@ const authMessage = ref('')
 const loginUsername = ref('admin')
 const loginPassword = ref('')
 const loginLoading = ref(false)
+// When an unauthenticated request hits a protected deep link, we remember it
+// here and return to it after a successful login (per role).
+const pendingAdminTarget = ref('')
+const pendingQueryTarget = ref('')
+const defaultAdminTarget = '/admin'
 
 const selectedFile = ref<File | null>(null)
 const uploadLoading = ref(false)
@@ -166,6 +236,31 @@ const filterSearches = ref<Record<string, string>>({})
 const historyLoading = ref(false)
 const historyMessage = ref('')
 const importHistory = ref<ImportHistoryItem[]>([])
+
+// Import-history WPS filters live entirely in the column headers. The value
+// column keys double as the API's parameter names.
+const importFilterState = ref(
+  createFilterState({
+    valueColumns: ['filename', 'status', 'uploaded_by'],
+    rangeColumns: ['sheet', 'issue', 'written', 'amount'],
+    dateColumns: ['created', 'confirmed'],
+  }),
+)
+const IMPORT_RANGE_PARAMS: Record<string, [string, string]> = {
+  sheet: ['sheet_min', 'sheet_max'],
+  issue: ['issue_min', 'issue_max'],
+  written: ['written_min', 'written_max'],
+  amount: ['amount_min', 'amount_max'],
+}
+const IMPORT_DATE_PARAMS: Record<string, [string, string]> = {
+  created: ['created_from', 'created_to'],
+  confirmed: ['confirmed_from', 'confirmed_to'],
+}
+const importPage = ref(1)
+const importPageSize = ref(50)
+const importTotal = ref(0)
+const importTotalPages = ref(0)
+const importActiveFilterCount = computed(() => activeFilterCount(importFilterState.value))
 const detailLoading = ref(false)
 const detailMessage = ref('')
 const importDetail = ref<ImportDetailResponse | null>(null)
@@ -174,26 +269,73 @@ const revokeMessage = ref('')
 
 const ordersLoading = ref(false)
 const ordersMessage = ref('')
-const orderItems = ref<OrderSummary[]>([])
+const orderItems = ref<OrderListItem[]>([])
 const orderDetailLoading = ref(false)
 const orderDetailMessage = ref('')
 const orderDetail = ref<OrderDetailResponse | null>(null)
-const orderFilters = ref({
-  cn: '',
-  project: '',
-  item: '',
-  series: '',
-  category: '',
-  role: '',
-  importBatchID: '',
-  status: '',
-  createdFrom: '',
-  createdTo: '',
-})
+
+// Order table filters live entirely in the column headers now — there is no
+// top-of-page filter form and no "高级筛选" drawer. The keys double as the API's
+// parameter names for value columns.
+//
+// 'project' and 'category' are deliberately absent: those columns were removed
+// from the table, and a filter the table cannot show has nowhere to display its
+// active state. The backend still accepts both (the export and other callers
+// rely on them); this page simply never sends or faceting them.
+const orderFilterState = ref(
+  createFilterState({
+    valueColumns: ['cn', 'item', 'series', 'role', 'status', 'payment_status'],
+    rangeColumns: ['quantity', 'amount', 'paid', 'unpaid'],
+    dateColumns: ['created'],
+  }),
+)
+const ORDER_RANGE_PARAMS: Record<string, [string, string]> = {
+  quantity: ['quantity_min', 'quantity_max'],
+  amount: ['amount_min', 'amount_max'],
+  paid: ['paid_min', 'paid_max'],
+  unpaid: ['unpaid_min', 'unpaid_max'],
+}
+const ORDER_DATE_PARAMS: Record<string, [string, string]> = {
+  created: ['created_from', 'created_to'],
+}
+const orderPage = ref(1)
+const orderPageSize = ref(50)
+const orderTotal = ref(0)
+const orderTotalPages = ref(0)
 const paymentEntryCN = ref('')
 const cnPayment = ref<CNPaymentResponse | null>(null)
 const cnPaymentLoading = ref(false)
 const cnPaymentMessage = ref('')
+// Display-only filters for the loaded CN's unpaid items. They narrow which rows
+// are shown; selection (selectedPaymentItemIds) and amounts (paymentAmounts)
+// always operate on the full cnPayment.items, so a selected row stays selected
+// and counted even while filtered out of view.
+const cnPaymentItemFilters = ref({ category: '', role: '', series: '' })
+const cnPaymentFilterOptions = computed(() => {
+  const items = cnPayment.value?.items ?? []
+  return {
+    categories: [...new Set(items.map((i) => (i.category ?? '').trim()).filter((v) => v !== ''))].sort(),
+    roles: [...new Set(items.map((i) => (i.character_name ?? '').trim()).filter((v) => v !== ''))].sort(),
+    series: [...new Set(items.map((i) => (i.series_code ?? '').trim()).filter((v) => v !== ''))].sort(),
+  }
+})
+const cnPaymentFiltersActive = computed(() => {
+  const f = cnPaymentItemFilters.value
+  return f.category !== '' || f.role !== '' || f.series !== ''
+})
+const filteredCnPaymentItems = computed(() => {
+  const items = cnPayment.value?.items ?? []
+  const f = cnPaymentItemFilters.value
+  if (!cnPaymentFiltersActive.value) return items
+  return items.filter((item) =>
+    (f.category === '' || (item.category ?? '') === f.category) &&
+    (f.role === '' || (item.character_name ?? '') === f.role) &&
+    (f.series === '' || (item.series_code ?? '') === f.series),
+  )
+})
+function clearCnPaymentItemFilters() {
+  cnPaymentItemFilters.value = { category: '', role: '', series: '' }
+}
 const selectedPaymentItemIds = ref<Set<string>>(new Set())
 const paymentAmounts = ref<Record<string, string>>({})
 type PaymentMethod = 'alipay' | 'wechat' | 'bank' | 'cash' | 'other' | ''
@@ -211,12 +353,113 @@ const paymentDetailLoading = ref(false)
 const paymentDetailMessage = ref('')
 const paymentDetail = ref<PaymentDetailResponse | null>(null)
 const paymentVoiding = ref(false)
-const paymentFilters = ref({
-  cn: '',
-  paymentMethod: '',
-  status: '',
-  paidFrom: '',
-  paidTo: '',
+// Payment table filters live entirely in the column headers now — there is no
+// top-of-page filter form and no "高级筛选" drawer. The value-column keys double
+// as the API's parameter names.
+//
+// There is deliberately no separate "是否撤销" column: voiding is already carried
+// by status=voided, and the old page had both controls writing to the same
+// status field, where they overwrote each other. 撤销时间 filters the void
+// timestamp itself, with a blank option meaning "not voided".
+const paymentFilterState = ref(
+  createFilterState({
+    valueColumns: ['cn', 'payment_method', 'status', 'created_by'],
+    rangeColumns: ['principal', 'fee', 'payable'],
+    dateColumns: ['paid', 'voided'],
+  }),
+)
+const PAYMENT_RANGE_PARAMS: Record<string, [string, string]> = {
+  principal: ['principal_min', 'principal_max'],
+  fee: ['fee_min', 'fee_max'],
+  payable: ['payable_min', 'payable_max'],
+}
+const PAYMENT_DATE_PARAMS: Record<string, [string, string]> = {
+  paid: ['paid_from', 'paid_to'],
+  voided: ['voided_from', 'voided_to'],
+}
+const paymentPage = ref(1)
+const paymentPageSize = ref(50)
+const paymentTotal = ref(0)
+const paymentTotalPages = ref(0)
+const paymentActiveFilterCount = computed(() => activeFilterCount(paymentFilterState.value))
+
+// --- Payment proof submissions ("收肾记录") ---
+// Regular-user side: the user's own submission history on the payment center,
+// plus a single pending upload (transient object URL preview, revoked on clear).
+const userSubmissions = ref<UserPaymentSubmission[]>([])
+const userSubmissionsLoading = ref(false)
+const userSubmissionsMessage = ref('')
+const submissionAcceptedTypes = ['image/png', 'image/jpeg', 'image/webp']
+const submissionMaxBytes = 10 * 1024 * 1024
+const submissionFile = ref<File | null>(null)
+const submissionPreviewURL = ref('')
+const submissionUploading = ref(false)
+const submissionUploadMessage = ref('')
+const canSubmitProof = computed(() => submissionFile.value !== null && !submissionUploading.value)
+
+// Admin side: the WPS proof table. Value/range/date column keys double as the
+// API parameter names, exactly like the other admin tables.
+const paymentSubmissions = ref<AdminPaymentSubmissionListItem[]>([])
+const paymentSubmissionsLoading = ref(false)
+const paymentSubmissionsMessage = ref('')
+const submissionFilterState = ref(
+  createFilterState({
+    valueColumns: ['cn', 'payment_method', 'status', 'reviewed_by'],
+    rangeColumns: ['principal', 'fee', 'payable'],
+    dateColumns: ['submitted', 'reviewed'],
+  }),
+)
+const SUBMISSION_RANGE_PARAMS: Record<string, [string, string]> = {
+  principal: ['principal_min', 'principal_max'],
+  fee: ['fee_min', 'fee_max'],
+  payable: ['payable_min', 'payable_max'],
+}
+const SUBMISSION_DATE_PARAMS: Record<string, [string, string]> = {
+  submitted: ['submitted_from', 'submitted_to'],
+  reviewed: ['reviewed_from', 'reviewed_to'],
+}
+const submissionPage = ref(1)
+const submissionPageSize = ref(50)
+const submissionTotal = ref(0)
+const submissionTotalPages = ref(0)
+const submissionActiveFilterCount = computed(() => activeFilterCount(submissionFilterState.value))
+
+// Admin submission detail + review (approve reuses the record-payment allocation).
+const submissionDetail = ref<AdminPaymentSubmissionDetailResponse | null>(null)
+const submissionDetailLoading = ref(false)
+const submissionDetailMessage = ref('')
+const submissionActionMessage = ref('')
+const submissionRejectReason = ref('')
+const submissionRejecting = ref(false)
+const submissionApproving = ref(false)
+const submissionApproveNote = ref('')
+const submissionImageReloadKey = ref(0)
+
+// Payment collection QR management (admin). Image bytes never live in app
+// state: the current image is loaded from the backend image endpoint, and the
+// local pre-upload preview uses a transient object URL that is revoked on clear.
+const qrMethods: PaymentQRMethod[] = ['alipay', 'wechat']
+const qrAcceptedTypes = ['image/png', 'image/jpeg', 'image/webp']
+const qrMaxBytes = 5 * 1024 * 1024
+const paymentQRStatuses = ref<PaymentQRAdminStatus[]>([])
+const paymentQRLoading = ref(false)
+const paymentQRMessage = ref('')
+// Bumped after every successful upload/disable so <img> src changes and the
+// browser refetches instead of showing a stale cached image.
+const paymentQRReloadKey = ref(0)
+const qrSelectedFile = ref<Record<PaymentQRMethod, File | null>>({ alipay: null, wechat: null })
+const qrPreviewURL = ref<Record<PaymentQRMethod, string>>({ alipay: '', wechat: '' })
+const qrUploading = ref<Record<PaymentQRMethod, boolean>>({ alipay: false, wechat: false })
+const qrDisabling = ref<Record<PaymentQRMethod, boolean>>({ alipay: false, wechat: false })
+const paymentQRStatusByMethod = computed<Record<PaymentQRMethod, PaymentQRAdminStatus>>(() => {
+  const map: Record<PaymentQRMethod, PaymentQRAdminStatus> = {
+    alipay: { payment_method: 'alipay', configured: false },
+    wechat: { payment_method: 'wechat', configured: false },
+  }
+  for (const status of paymentQRStatuses.value) {
+    map[status.payment_method] = status
+  }
+  return map
 })
 
 const queryCN = ref('')
@@ -226,6 +469,101 @@ const queryOrders = ref<QueryOrdersResponse | null>(null)
 const queryLoading = ref(false)
 const queryOrdersError = ref('')
 const queryMessage = ref('')
+// Regular-user payment QR: which methods are usable, the selected method, and a
+// click-to-enlarge lightbox. The user never sees any technical field; the image
+// is loaded from the query image endpoint and never held as bytes in state.
+const queryQRAvailability = ref<PaymentQRAvailability[]>([])
+const queryQRLoading = ref(false)
+const queryQRError = ref('')
+const queryQRMethod = ref<PaymentQRMethod | ''>('')
+const queryQRZoom = ref(false)
+const queryQRReloadKey = ref(0)
+// Both methods are always offered in the payment center.
+const queryPayMethods: PaymentQRMethod[] = ['alipay', 'wechat']
+// Fee is computed in integer cents, mirroring the backend rule exactly:
+// alipay → 0; wechat → ceil(base/1000) cents (0.1%, any remainder rounds up).
+// No floating-point rounding is used for the fee.
+const queryBaseCents = computed(() => Math.round((queryOrders.value?.remaining_amount ?? 0) * 100))
+const queryFeeCents = computed(() => (queryQRMethod.value === 'wechat' ? Math.floor((queryBaseCents.value + 999) / 1000) : 0))
+const queryBaseAmount = computed(() => queryBaseCents.value / 100)
+const queryFeeAmount = computed(() => queryFeeCents.value / 100)
+const queryPayableAmount = computed(() => (queryBaseCents.value + queryFeeCents.value) / 100)
+// Regular-user client-side filters. Data volume is bounded (a single CN), so
+// filtering happens in the browser over the already-loaded response. Order
+// filters and payment-history filters are independent: each controls only its
+// own list, and neither changes the "付款汇总" totals (those stay whole-data).
+const queryOrderFilters = ref({ category: '', role: '', series: '', paymentStatus: '' })
+const queryPaymentFilters = ref({ method: '', status: '', dateFrom: '', dateTo: '' })
+
+function uniqueSorted(values: (string | undefined)[]): string[] {
+  return [...new Set(values.map((v) => (v ?? '').trim()).filter((v) => v !== ''))].sort()
+}
+
+const queryOrderFilterOptions = computed(() => {
+  const items = (queryOrders.value?.orders ?? []).flatMap((order) => order.items)
+  return {
+    categories: uniqueSorted(items.map((i) => i.category)),
+    roles: uniqueSorted(items.map((i) => i.character_name)),
+    series: uniqueSorted(items.map((i) => i.series_code)),
+  }
+})
+
+const queryOrderFiltersActive = computed(() => {
+  const f = queryOrderFilters.value
+  return f.category !== '' || f.role !== '' || f.series !== '' || f.paymentStatus !== ''
+})
+
+// Orders with their items filtered; orders with no matching item are dropped.
+// The original queryOrders is never mutated.
+const filteredQueryOrders = computed(() => {
+  const orders = queryOrders.value?.orders ?? []
+  const f = queryOrderFilters.value
+  if (!queryOrderFiltersActive.value) return orders
+  return orders
+    .map((order) => ({
+      ...order,
+      items: order.items.filter((item) =>
+        (f.category === '' || (item.category ?? '') === f.category) &&
+        (f.role === '' || (item.character_name ?? '') === f.role) &&
+        (f.series === '' || (item.series_code ?? '') === f.series) &&
+        (f.paymentStatus === '' || item.payment_status === f.paymentStatus),
+      ),
+    }))
+    .filter((order) => order.items.length > 0)
+})
+
+const filteredQueryOrderItemCount = computed(() =>
+  filteredQueryOrders.value.reduce((total, order) => total + order.items.length, 0),
+)
+
+function clearQueryOrderFilters() {
+  queryOrderFilters.value = { category: '', role: '', series: '', paymentStatus: '' }
+}
+
+const queryPaymentFiltersActive = computed(() => {
+  const f = queryPaymentFilters.value
+  return f.method !== '' || f.status !== '' || f.dateFrom !== '' || f.dateTo !== ''
+})
+
+const filteredQueryPayments = computed(() => {
+  const payments = queryOrders.value?.payments ?? []
+  const f = queryPaymentFilters.value
+  if (!queryPaymentFiltersActive.value) return payments
+  const fromTime = f.dateFrom ? new Date(f.dateFrom).getTime() : null
+  const toTime = f.dateTo ? new Date(f.dateTo).getTime() : null
+  return payments.filter((p) => {
+    if (f.method !== '' && (p.payment_method ?? '') !== f.method) return false
+    if (f.status !== '' && p.status !== f.status) return false
+    const paidTime = p.paid_at ? new Date(p.paid_at).getTime() : NaN
+    if (fromTime !== null && !(paidTime >= fromTime)) return false
+    if (toTime !== null && !(paidTime <= toTime)) return false
+    return true
+  })
+})
+
+function clearQueryPaymentFilters() {
+  queryPaymentFilters.value = { method: '', status: '', dateFrom: '', dateTo: '' }
+}
 const queryOldCode = ref('')
 const queryNewCode = ref('')
 const queryConfirmCode = ref('')
@@ -264,9 +602,35 @@ const anonymousRecoveryMessage = ref('')
 const isBackendOnline = computed(() => health.value?.status === 'ok')
 const queryRecoveryCooldownSeconds = computed(() => Math.max(0, Math.ceil((queryRecoveryCooldownUntil.value - queryRecoveryClock.value) / 1000)))
 const queryRecoveryCanSend = computed(() => config.value.emailDeliveryEnabled && queryRecoveryEmail.value?.status === 'pending' && queryRecoveryCooldownSeconds.value === 0 && !queryRecoverySending.value)
-const readyCount = computed(() => config.value.modules.filter((item) => item.status === 'ready').length)
-const queuedCount = computed(() => config.value.modules.filter((item) => item.status === 'queued').length)
-const isAdminRoute = computed(() => routeName.value !== 'home' && routeName.value !== 'query')
+// Admin *business* routes (data/orders/users/finance pages) require an admin
+// session. The admin portal/login page (`/admin`, routeName 'admin') and the
+// role entry / user pages are excluded — they render their own chrome.
+const isAdminRoute = computed(() => routeName.value.startsWith('admin-'))
+// User *business* module pages require a query session; the user portal/login
+// page (`/query`, routeName 'query') renders login-or-portal itself.
+const isUserRoute = computed(() => routeName.value.startsWith('query-'))
+// Whether the current route belongs to the admin surface at all (portal + pages).
+const isAdminSurface = computed(() => routeName.value === 'admin' || isAdminRoute.value)
+// The admin module the current business route belongs to, and its display name.
+const adminModule = computed(() => {
+  const r = routeName.value
+  if (r === 'admin-data' || r === 'admin-import' || r === 'admin-import-history' || r === 'admin-import-detail') return 'data'
+  if (r === 'admin-orders' || r === 'admin-order-detail') return 'orders'
+  if (r === 'admin-users' || r === 'admin-user-detail') return 'users'
+  if (r === 'admin-finance' || r === 'admin-payments' || r === 'admin-payment-detail' || r === 'admin-qr' || r === 'admin-submissions' || r === 'admin-submission-detail') return 'finance'
+  return ''
+})
+const adminModuleTitle = computed(() => (({ data: '数据导入中心', orders: '订单管理', users: '用户与账号', finance: '收付款管理' }) as Record<string, string>)[adminModule.value] ?? '')
+// The user module the current route belongs to, and its display name.
+const userModule = computed(() => {
+  const r = routeName.value
+  if (r === 'query-orders') return 'orders'
+  if (r === 'query-payment') return 'payment'
+  if (r === 'query-payments') return 'payments'
+  if (r === 'query-security') return 'security'
+  return ''
+})
+const userModuleTitle = computed(() => (({ orders: '我的订单', payment: '付款中心', payments: '付款记录', security: '账户安全' }) as Record<string, string>)[userModule.value] ?? '')
 const canUpload = computed(() => selectedFile.value !== null && !uploadLoading.value)
 const fatalIssueCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level === 'fatal_error').length)
 const rowErrorCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level !== 'fatal_error').length)
@@ -338,68 +702,150 @@ const allIssues = computed(() => [
 ])
 const filteredIssues = computed(() => issueFilter.value === 'all' ? allIssues.value : allIssues.value.filter((item) => item.level === issueFilter.value))
 
+// Old bookmarked admin URLs are transparently redirected to the new module
+// structure. Backend API paths are unchanged — only front-end URLs move.
+function canonicalPath(path: string): string {
+  const map: Record<string, string> = {
+    '/admin/imports': '/admin/data/import',
+    '/admin/imports/history': '/admin/data/history',
+    '/admin/payments': '/admin/finance/payments',
+    '/admin/payment-qr': '/admin/finance/qr-codes',
+  }
+  if (map[path]) return map[path]
+  if (path.startsWith('/admin/imports/') && path !== '/admin/imports/preview') {
+    return '/admin/data/history/' + path.slice('/admin/imports/'.length)
+  }
+  if (path.startsWith('/admin/payments/')) {
+    return '/admin/finance/payments/' + path.slice('/admin/payments/'.length)
+  }
+  return path
+}
+
 function routeFromPath(path: string): RouteName {
   if (path === '/query') return 'query'
-  if (path === '/admin/users') return 'admin-users'
-  if (path.startsWith('/admin/users/')) return 'admin-user-detail'
+  if (path === '/query/orders') return 'query-orders'
+  if (path === '/query/payment') return 'query-payment'
+  if (path === '/query/payments') return 'query-payments'
+  if (path === '/query/security') return 'query-security'
+  if (path === '/admin') return 'admin'
+  if (path === '/admin/data') return 'admin-data'
+  if (path === '/admin/data/import') return 'admin-import'
+  if (path === '/admin/data/history') return 'admin-import-history'
+  if (path.startsWith('/admin/data/history/')) return 'admin-import-detail'
   if (path === '/admin/orders') return 'admin-orders'
   if (path.startsWith('/admin/orders/')) return 'admin-order-detail'
-  if (path === '/admin/payments') return 'admin-payments'
-  if (path.startsWith('/admin/payments/')) return 'admin-payment-detail'
-  if (path === '/admin/imports/history') return 'admin-import-history'
-  if (path.startsWith('/admin/imports/') && path !== '/admin/imports/preview') return 'admin-import-detail'
-  if (path === '/admin/imports') return 'admin-imports'
+  if (path === '/admin/users') return 'admin-users'
+  if (path.startsWith('/admin/users/')) return 'admin-user-detail'
+  if (path === '/admin/finance') return 'admin-finance'
+  if (path === '/admin/finance/payments') return 'admin-payments'
+  if (path.startsWith('/admin/finance/payments/')) return 'admin-payment-detail'
+  if (path === '/admin/finance/qr-codes') return 'admin-qr'
+  if (path === '/admin/finance/submissions') return 'admin-submissions'
+  if (path.startsWith('/admin/finance/submissions/')) return 'admin-submission-detail'
   return 'home'
 }
 
 function importIDFromPath(path: string) {
-  if (!path.startsWith('/admin/imports/')) return ''
-  const id = decodeURIComponent(path.replace('/admin/imports/', '').replace(/\/$/, ''))
-  return id === 'history' ? '' : id
+  if (!path.startsWith('/admin/data/history/')) return ''
+  return decodeURIComponent(path.slice('/admin/data/history/'.length).replace(/\/$/, ''))
 }
 
 function orderIDFromPath(path: string) {
   if (!path.startsWith('/admin/orders/')) return ''
-  return decodeURIComponent(path.replace('/admin/orders/', '').replace(/\/$/, ''))
+  return decodeURIComponent(path.slice('/admin/orders/'.length).replace(/\/$/, ''))
 }
 
 function paymentIDFromPath(path: string) {
-  if (!path.startsWith('/admin/payments/')) return ''
-  return decodeURIComponent(path.replace('/admin/payments/', '').replace(/\/$/, ''))
+  if (!path.startsWith('/admin/finance/payments/')) return ''
+  return decodeURIComponent(path.slice('/admin/finance/payments/'.length).replace(/\/$/, ''))
 }
 
 function userIDFromPath(path: string) {
   if (!path.startsWith('/admin/users/')) return ''
-  return decodeURIComponent(path.replace('/admin/users/', '').replace(/\/$/, ''))
+  return decodeURIComponent(path.slice('/admin/users/'.length).replace(/\/$/, ''))
+}
+
+function submissionIDFromPath(path: string) {
+  if (!path.startsWith('/admin/finance/submissions/')) return ''
+  return decodeURIComponent(path.slice('/admin/finance/submissions/'.length).replace(/\/$/, ''))
+}
+
+function applyRoute(path: string) {
+  const canonical = canonicalPath(path)
+  if (canonical !== path) window.history.replaceState(null, '', canonical)
+  routeName.value = routeFromPath(canonical)
+  routeImportID.value = importIDFromPath(canonical)
+  routeOrderID.value = orderIDFromPath(canonical)
+  routePaymentID.value = paymentIDFromPath(canonical)
+  routeUserID.value = userIDFromPath(canonical)
+  routeSubmissionID.value = submissionIDFromPath(canonical)
 }
 
 function navigate(path: string) {
-  window.history.pushState(null, '', path)
-  routeName.value = routeFromPath(path)
-  routeImportID.value = importIDFromPath(path)
-  routeOrderID.value = orderIDFromPath(path)
-  routePaymentID.value = paymentIDFromPath(path)
-  routeUserID.value = userIDFromPath(path)
-  if (isAdminRoute.value) void handleRouteEntered()
-  else void handlePublicRouteEntered()
+  const canonical = canonicalPath(path)
+  window.history.pushState(null, '', canonical)
+  applyRoute(canonical)
+  void handleRouteChange()
 }
 
-async function handleRouteEntered() {
-  if (!isAdminRoute.value) return
+async function handleRouteChange() {
+  if (isAdminRoute.value) return handleAdminRouteEntered()
+  if (isUserRoute.value) return handleUserRouteEntered()
+  if (routeName.value === 'admin') return handleAdminPortalEntered()
+  if (routeName.value === 'query') return handleQueryPortalEntered()
+}
+
+async function handleAdminRouteEntered() {
   await ensureAdmin()
-  if (!admin.value) return
+  if (!admin.value) {
+    pendingAdminTarget.value = window.location.pathname + window.location.search
+    navigate('/admin')
+    return
+  }
   if (routeName.value === 'admin-import-history') await loadHistory()
   if (routeName.value === 'admin-import-detail' && routeImportID.value) await loadDetail(routeImportID.value)
   if (routeName.value === 'admin-orders') await loadOrders()
   if (routeName.value === 'admin-order-detail' && routeOrderID.value) await loadOrderDetail(routeOrderID.value)
   if (routeName.value === 'admin-payments') await loadPaymentRecords()
   if (routeName.value === 'admin-payment-detail' && routePaymentID.value) await loadPaymentDetail(routePaymentID.value)
+  if (routeName.value === 'admin-qr') await loadPaymentQRStatuses()
   if (routeName.value === 'admin-users') await loadAdminUsers()
   if (routeName.value === 'admin-user-detail' && routeUserID.value) await loadAdminUserDetail(routeUserID.value)
+  if (routeName.value === 'admin-submissions') await loadPaymentSubmissions()
+  if (routeName.value === 'admin-submission-detail' && routeSubmissionID.value) await loadSubmissionDetail(routeSubmissionID.value)
 }
 
-async function handlePublicRouteEntered() {
-  if (routeName.value === 'query') await loadQueryOrders(false)
+async function handleAdminPortalEntered() {
+  await ensureAdmin()
+  if (admin.value && pendingAdminTarget.value) {
+    const target = pendingAdminTarget.value
+    pendingAdminTarget.value = ''
+    navigate(target)
+    return
+  }
+  if (!admin.value) authMessage.value = ''
+}
+
+async function handleUserRouteEntered() {
+  if (!queryUser.value) await loadQueryOrders(false)
+  if (!queryUser.value) {
+    pendingQueryTarget.value = window.location.pathname + window.location.search
+    navigate('/query')
+    return
+  }
+  if (routeName.value === 'query-orders' || routeName.value === 'query-payment' || routeName.value === 'query-payments') {
+    if (!queryOrders.value) await loadQueryOrders(false)
+  }
+  if (routeName.value === 'query-payment') await loadUserSubmissions()
+}
+
+async function handleQueryPortalEntered() {
+  if (queryUser.value && !queryOrders.value) await loadQueryOrders(false)
+  if (queryUser.value && pendingQueryTarget.value) {
+    const target = pendingQueryTarget.value
+    pendingQueryTarget.value = ''
+    navigate(target)
+  }
 }
 
 async function load() {
@@ -449,7 +895,10 @@ async function login() {
     })
     admin.value = response.admin
     loginPassword.value = ''
-    await handleRouteEntered()
+    // Return to the originally requested admin page, or the admin default.
+    const target = pendingAdminTarget.value || defaultAdminTarget
+    pendingAdminTarget.value = ''
+    navigate(target)
   } catch (error) {
     authMessage.value = error instanceof Error ? error.message : '登录失败'
   } finally {
@@ -475,6 +924,9 @@ async function logout() {
   orderDetail.value = null
   paymentRecords.value = []
   paymentDetail.value = null
+  pendingAdminTarget.value = ''
+  // Leave the admin surface entirely: back to the admin login page.
+  navigate('/admin')
 }
 
 function onFileChange(event: Event) {
@@ -555,19 +1007,71 @@ async function confirmImport() {
   }
 }
 
+// The one place the import filter state becomes API parameters — shared by the
+// list and the facet popovers so they never disagree about what is filtered.
+function importFilterParams() {
+  return buildFilterParams(importFilterState.value, IMPORT_RANGE_PARAMS, IMPORT_DATE_PARAMS)
+}
+
+async function loadImportFacets(request: { column: string; search: string; page: number }): Promise<ColumnFacetResponse> {
+  const params = importFilterParams()
+  params.set('column', request.column)
+  if (request.search) params.set('search', request.search)
+  params.set('facet_page', String(request.page))
+  const response = await getJSON<ImportFacetResponse>(`/api/admin/imports/facets?${params.toString()}`)
+  return {
+    column: response.column,
+    values: response.values ?? [],
+    total: response.total,
+    blank_count: response.blank_count,
+    page: response.facet_page,
+    page_size: response.facet_page_size,
+    has_more: response.has_more,
+  }
+}
+
+function applyImportFilters() {
+  importPage.value = 1
+  void loadHistory()
+}
+
+function goToImportPage(page: number) {
+  if (page < 1 || (importTotalPages.value > 0 && page > importTotalPages.value)) return
+  importPage.value = page
+  void loadHistory()
+}
+
+function changeImportPageSize() {
+  importPage.value = 1
+  void loadHistory()
+}
+
+function resetImportFilters() {
+  clearColumnFilters(importFilterState.value)
+  applyImportFilters()
+}
+
 async function loadHistory() {
   historyLoading.value = true
   historyMessage.value = ''
   try {
-    const response = await getJSON<ImportHistoryResponse>('/api/admin/imports')
+    const params = importFilterParams()
+    params.set('page', String(importPage.value))
+    params.set('page_size', String(importPageSize.value))
+    const response = await getJSON<ImportHistoryResponse>(`/api/admin/imports?${params.toString()}`)
     importHistory.value = response.items ?? []
+    importPage.value = response.page
+    importPageSize.value = response.page_size
+    importTotal.value = response.total
+    importTotalPages.value = response.total_pages
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
       authMessage.value = '登录已过期，请重新登录。'
       return
     }
-    historyMessage.value = error instanceof Error ? error.message : '导入历史加载失败'
+    const detail = error instanceof Error ? error.message : '未知错误'
+    historyMessage.value = `导入历史加载失败：${detail}`
   } finally {
     historyLoading.value = false
   }
@@ -618,66 +1122,137 @@ async function revokeImport() {
     revokeLoading.value = false
   }
 }
-function orderQueryString() {
-  const query = new URLSearchParams()
-  const filters = orderFilters.value
-  if (filters.cn.trim()) query.set('cn', filters.cn.trim())
-  if (filters.project.trim()) query.set('project', filters.project.trim())
-  if (filters.item.trim()) query.set('item', filters.item.trim())
-  if (filters.series.trim()) query.set('series', filters.series.trim())
-  if (filters.category.trim()) query.set('category', filters.category.trim())
-  if (filters.role.trim()) query.set('role', filters.role.trim())
-  if (filters.importBatchID.trim()) query.set('import_batch_id', filters.importBatchID.trim())
-  if (filters.status.trim()) query.set('status', filters.status.trim())
-  if (filters.createdFrom) query.set('created_from', filters.createdFrom)
-  if (filters.createdTo) query.set('created_to', filters.createdTo)
-  const encoded = query.toString()
-  return encoded ? `?${encoded}` : ''
+// The one place the order filter state becomes API parameters. The list, the
+// facet popovers and the export all go through it, which is what keeps the
+// three from ever disagreeing about what is filtered.
+function orderFilterParams() {
+  return buildFilterParams(orderFilterState.value, ORDER_RANGE_PARAMS, ORDER_DATE_PARAMS)
+}
+
+// Count of filtered columns (for the "清空全部筛选" control).
+const orderActiveFilterCount = computed(() => activeFilterCount(orderFilterState.value))
+
+// Facet loader handed to every value popover: it sends the current filter state
+// alongside the requested column, and the backend drops that column's own
+// selection when computing candidates.
+async function loadOrderFacets(request: { column: string; search: string; page: number }): Promise<ColumnFacetResponse> {
+  const params = orderFilterParams()
+  params.set('column', request.column)
+  if (request.search) params.set('search', request.search)
+  params.set('facet_page', String(request.page))
+  return await getJSON<ColumnFacetResponse>(`/api/admin/orders/facets?${params.toString()}`)
+}
+
+// Applying a filter returns to page 1: staying on page 7 of a result set that
+// just shrank to two pages would show an empty table.
+function applyOrderFilters() {
+  orderPage.value = 1
+  void loadOrders()
+}
+
+function goToOrderPage(page: number) {
+  if (page < 1 || (orderTotalPages.value > 0 && page > orderTotalPages.value)) return
+  orderPage.value = page
+  void loadOrders()
+}
+
+function changeOrderPageSize() {
+  orderPage.value = 1
+  void loadOrders()
 }
 
 async function loadOrders() {
   ordersLoading.value = true
   ordersMessage.value = ''
   try {
-    const response = await getJSON<OrderListResponse>(`/api/admin/orders${orderQueryString()}`)
+    const params = orderFilterParams()
+    params.set('page', String(orderPage.value))
+    params.set('page_size', String(orderPageSize.value))
+    const response = await getJSON<OrderListResponse>(`/api/admin/orders?${params.toString()}`)
     orderItems.value = response.items ?? []
+    orderPage.value = response.page
+    orderPageSize.value = response.page_size
+    orderTotal.value = response.total
+    orderTotalPages.value = response.total_pages
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
       authMessage.value = '登录已过期，请重新登录。'
       return
     }
-    ordersMessage.value = error instanceof Error ? error.message : '订单列表加载失败'
+    const detail = error instanceof Error ? error.message : '未知错误'
+    ordersMessage.value = `订单列表加载失败：${detail}`
   } finally {
     ordersLoading.value = false
   }
 }
 
-function paymentQueryString() {
-  const query = new URLSearchParams()
-  const filters = paymentFilters.value
-  if (filters.cn.trim()) query.set('cn', filters.cn.trim())
-  if (filters.paymentMethod.trim()) query.set('payment_method', filters.paymentMethod.trim())
-  if (filters.status.trim()) query.set('status', filters.status.trim())
-  if (filters.paidFrom) query.set('paid_from', filters.paidFrom)
-  if (filters.paidTo) query.set('paid_to', filters.paidTo)
-  const encoded = query.toString()
-  return encoded ? '?' + encoded : ''
+// The one place the payment filter state becomes API parameters. The list, the
+// facet popovers and the export all go through it, which is what keeps the
+// three from ever disagreeing about what is filtered.
+function paymentFilterParams() {
+  return buildFilterParams(paymentFilterState.value, PAYMENT_RANGE_PARAMS, PAYMENT_DATE_PARAMS)
+}
+
+// Facet loader handed to every value popover. The backend drops the requested
+// column's own selection when computing candidates, and names its pager
+// facet_page/facet_page_size — adapted here into the shape the popover reads.
+async function loadPaymentFacets(request: { column: string; search: string; page: number }): Promise<ColumnFacetResponse> {
+  const params = paymentFilterParams()
+  params.set('column', request.column)
+  if (request.search) params.set('search', request.search)
+  params.set('facet_page', String(request.page))
+  const response = await getJSON<PaymentFacetResponse>(`/api/admin/payments/facets?${params.toString()}`)
+  return {
+    column: response.column,
+    values: response.values ?? [],
+    total: response.total,
+    blank_count: response.blank_count,
+    page: response.facet_page,
+    page_size: response.facet_page_size,
+    has_more: response.has_more,
+  }
+}
+
+// Applying a filter returns to page 1: staying on page 7 of a result set that
+// just shrank to two pages would show an empty table.
+function applyPaymentFilters() {
+  paymentPage.value = 1
+  void loadPaymentRecords()
+}
+
+function goToPaymentPage(page: number) {
+  if (page < 1 || (paymentTotalPages.value > 0 && page > paymentTotalPages.value)) return
+  paymentPage.value = page
+  void loadPaymentRecords()
+}
+
+function changePaymentPageSize() {
+  paymentPage.value = 1
+  void loadPaymentRecords()
 }
 
 async function loadPaymentRecords() {
   paymentRecordsLoading.value = true
   paymentRecordsMessage.value = ''
   try {
-    const response = await getJSON<PaymentListResponse>('/api/admin/payments' + paymentQueryString())
+    const params = paymentFilterParams()
+    params.set('page', String(paymentPage.value))
+    params.set('page_size', String(paymentPageSize.value))
+    const response = await getJSON<PaymentListResponse>(`/api/admin/payments?${params.toString()}`)
     paymentRecords.value = response.items ?? []
+    paymentPage.value = response.page
+    paymentPageSize.value = response.page_size
+    paymentTotal.value = response.total
+    paymentTotalPages.value = response.total_pages
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
-      authMessage.value = 'Login expired. Please log in again.'
+      authMessage.value = '登录已过期，请重新登录。'
       return
     }
-    paymentRecordsMessage.value = error instanceof Error ? error.message : 'Payment records failed to load'
+    const detail = error instanceof Error ? error.message : '未知错误'
+    paymentRecordsMessage.value = `付款记录加载失败：${detail}`
   } finally {
     paymentRecordsLoading.value = false
   }
@@ -740,28 +1315,466 @@ async function voidPayment() {
 }
 
 function resetPaymentFilters() {
-  paymentFilters.value = {
-    cn: '',
-    paymentMethod: '',
-    status: '',
-    paidFrom: '',
-    paidTo: '',
+  // clearColumnFilters: the shared helper is aliased because this file already
+  // has its own clearAllFilters for the user-facing query pages.
+  clearColumnFilters(paymentFilterState.value)
+  applyPaymentFilters()
+}
+
+// --- Payment proof submissions: regular-user side ---
+
+async function loadUserSubmissions() {
+  userSubmissionsLoading.value = true
+  userSubmissionsMessage.value = ''
+  try {
+    const response = await listUserPaymentSubmissions()
+    userSubmissions.value = response.items ?? []
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return
+    userSubmissionsMessage.value = error instanceof Error ? `收肾记录加载失败：${error.message}` : '收肾记录加载失败'
+  } finally {
+    userSubmissionsLoading.value = false
   }
-  void loadPaymentRecords()
+}
+
+function clearSubmissionSelection() {
+  if (submissionPreviewURL.value) URL.revokeObjectURL(submissionPreviewURL.value)
+  submissionFile.value = null
+  submissionPreviewURL.value = ''
+}
+
+function onSubmissionFileChange(event: Event) {
+  submissionUploadMessage.value = ''
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  if (!file) {
+    clearSubmissionSelection()
+    return
+  }
+  if (!submissionAcceptedTypes.includes(file.type)) {
+    submissionUploadMessage.value = '仅支持 PNG、JPEG 或 WebP 图片。'
+    input.value = ''
+    clearSubmissionSelection()
+    return
+  }
+  if (file.size > submissionMaxBytes) {
+    submissionUploadMessage.value = '图片超过 10 MiB 大小限制。'
+    input.value = ''
+    clearSubmissionSelection()
+    return
+  }
+  if (submissionPreviewURL.value) URL.revokeObjectURL(submissionPreviewURL.value)
+  submissionFile.value = file
+  submissionPreviewURL.value = URL.createObjectURL(file)
+}
+
+async function submitUserProof() {
+  const file = submissionFile.value
+  if (!file || submissionUploading.value) return
+  submissionUploading.value = true
+  submissionUploadMessage.value = ''
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    // The method comes from the user's current payment-center selection; the CN,
+    // user id and amounts are all resolved server-side from the session.
+    form.append('payment_method', queryQRMethod.value)
+    const response = await submitPaymentSubmission(form)
+    clearSubmissionSelection()
+    const input = document.getElementById('submission-file-input') as HTMLInputElement | null
+    if (input) input.value = ''
+    submissionUploadMessage.value = `已交肾（待管理员核对）。本次应付 ${formatMoney(response.submission.payable_amount)}。`
+    await loadUserSubmissions()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      submissionUploadMessage.value = '登录已过期，请重新登录后再提交。'
+      return
+    }
+    submissionUploadMessage.value = error instanceof Error ? error.message : '提交失败，请重试。'
+  } finally {
+    submissionUploading.value = false
+  }
+}
+
+function submissionStatusLabel(status: string) {
+  if (status === 'submitted') return '已交肾（待管理员核对）'
+  if (status === 'approved') return '已核对通过'
+  if (status === 'rejected') return '已驳回'
+  return status
+}
+
+function submissionAdminStatusLabel(status: string) {
+  if (status === 'submitted') return '待核对'
+  if (status === 'approved') return '已通过'
+  if (status === 'rejected') return '已驳回'
+  return status
+}
+
+// --- Payment proof submissions: admin side ---
+
+function submissionFilterParams() {
+  return buildFilterParams(submissionFilterState.value, SUBMISSION_RANGE_PARAMS, SUBMISSION_DATE_PARAMS)
+}
+
+async function loadSubmissionFacets(request: { column: string; search: string; page: number }): Promise<ColumnFacetResponse> {
+  const params = submissionFilterParams()
+  params.set('column', request.column)
+  if (request.search) params.set('search', request.search)
+  params.set('facet_page', String(request.page))
+  const response: PaymentSubmissionFacetResponse = await getAdminPaymentSubmissionFacets(params.toString())
+  return {
+    column: response.column,
+    values: response.values ?? [],
+    total: response.total,
+    blank_count: response.blank_count,
+    page: response.facet_page,
+    page_size: response.facet_page_size,
+    has_more: response.has_more,
+  }
+}
+
+function applySubmissionFilters() {
+  submissionPage.value = 1
+  void loadPaymentSubmissions()
+}
+
+function goToSubmissionPage(page: number) {
+  if (page < 1 || (submissionTotalPages.value > 0 && page > submissionTotalPages.value)) return
+  submissionPage.value = page
+  void loadPaymentSubmissions()
+}
+
+function changeSubmissionPageSize() {
+  submissionPage.value = 1
+  void loadPaymentSubmissions()
+}
+
+function resetSubmissionFilters() {
+  clearColumnFilters(submissionFilterState.value)
+  applySubmissionFilters()
+}
+
+async function loadPaymentSubmissions() {
+  paymentSubmissionsLoading.value = true
+  paymentSubmissionsMessage.value = ''
+  try {
+    const params = submissionFilterParams()
+    params.set('page', String(submissionPage.value))
+    params.set('page_size', String(submissionPageSize.value))
+    const response = await listAdminPaymentSubmissions(params.toString())
+    paymentSubmissions.value = response.items ?? []
+    submissionPage.value = response.page
+    submissionPageSize.value = response.page_size
+    submissionTotal.value = response.total
+    submissionTotalPages.value = response.total_pages
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    paymentSubmissionsMessage.value = error instanceof Error ? `收肾记录加载失败：${error.message}` : '收肾记录加载失败'
+  } finally {
+    paymentSubmissionsLoading.value = false
+  }
+}
+
+async function loadSubmissionDetail(id: string) {
+  submissionDetailLoading.value = true
+  submissionDetailMessage.value = ''
+  submissionActionMessage.value = ''
+  submissionRejectReason.value = ''
+  submissionApproveNote.value = ''
+  submissionDetail.value = null
+  cnPayment.value = null
+  try {
+    submissionDetail.value = await getAdminPaymentSubmissionDetail(id)
+    submissionImageReloadKey.value += 1
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    submissionDetailMessage.value = error instanceof Error ? error.message : '收肾记录详情加载失败'
+  } finally {
+    submissionDetailLoading.value = false
+  }
+}
+
+// adminSubmissionImageURL builds the admin image URL with a cache-busting query
+// (the sha, when present, otherwise the reload counter) so a fresh open reloads.
+function adminSubmissionImageURL(id: string) {
+  const version = submissionDetail.value?.submission.sha256 || String(submissionImageReloadKey.value)
+  return apiUrl(`/api/admin/payment-submissions/${encodeURIComponent(id)}/image`) + `?v=${encodeURIComponent(version)}`
+}
+
+async function rejectSubmission() {
+  if (!submissionDetail.value || submissionRejecting.value) return
+  const id = submissionDetail.value.submission.id
+  const reason = submissionRejectReason.value.trim()
+  if (!reason) {
+    submissionActionMessage.value = '请填写驳回原因。'
+    return
+  }
+  submissionRejecting.value = true
+  submissionActionMessage.value = ''
+  try {
+    submissionDetail.value = await rejectPaymentSubmission(id, reason)
+    submissionActionMessage.value = '已驳回该收肾记录。'
+    await loadPaymentSubmissions()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    submissionActionMessage.value = error instanceof Error ? error.message : '驳回失败，请重试。'
+  } finally {
+    submissionRejecting.value = false
+  }
+}
+
+// Select-all over the loaded unpaid items. Deliberately NOT a new allocation
+// path: both directions walk the rows and call the same per-row
+// setPaymentItemSelected the checkboxes use, so a "select all" is exactly N
+// manual ticks — same default amounts, same over-payment validation, nothing
+// bypassed. Rows with no remaining balance are skipped, as their checkbox is
+// disabled in manual use too.
+const selectableCnPaymentItems = computed(() => (cnPayment.value?.items ?? []).filter((item) => item.remaining_amount > 0))
+const allCnPaymentItemsSelected = computed(
+  () => selectableCnPaymentItems.value.length > 0 && selectableCnPaymentItems.value.every((item) => selectedPaymentItemIds.value.has(item.id)),
+)
+
+function selectAllCnPaymentItems() {
+  for (const item of selectableCnPaymentItems.value) {
+    if (!selectedPaymentItemIds.value.has(item.id)) setPaymentItemSelected(item, true)
+  }
+}
+
+function clearAllCnPaymentItemSelection() {
+  for (const item of selectableCnPaymentItems.value) {
+    if (selectedPaymentItemIds.value.has(item.id)) setPaymentItemSelected(item, false)
+  }
+}
+
+// loadSubmissionAllocation opens the record-payment allocation for this proof's
+// CN. It reuses the exact same unpaid-item table, selection and amount inputs as
+// 录入付款 — the admin picks明细 and applied_amount there, then confirms below.
+async function loadSubmissionAllocation() {
+  if (!submissionDetail.value) return
+  paymentEntryCN.value = submissionDetail.value.submission.cn_code
+  submissionActionMessage.value = ''
+  await loadCNPayment(true)
+}
+
+async function approveSubmission() {
+  if (!submissionDetail.value || submissionApproving.value) return
+  if (!cnPayment.value) {
+    submissionActionMessage.value = '请先加载该 CN 的未付明细。'
+    return
+  }
+  const sub = submissionDetail.value.submission
+  if (selectedPaymentItems.value.length === 0) {
+    submissionActionMessage.value = '请先勾选本次付款对应的未付明细。'
+    return
+  }
+  const invalidItem = selectedPaymentItems.value.find(paymentAmountInvalid)
+  if (invalidItem) {
+    submissionActionMessage.value = '本次分摊金额必须大于 0，且不能超过剩余应付金额。'
+    return
+  }
+  const confirmLines = [
+    '确认核对通过？通过后会按下方分配创建一条正式付款，并计入有效已付金额。',
+    `CN：${sub.cn_code}`,
+    `付款方式：${paymentMethodLabel(sub.payment_method)}`,
+    `关联明细数量：${selectedPaymentItems.value.length}`,
+    '',
+    ...selectedPaymentItems.value.map((item) => `${item.order_no} / ${item.display_name || item.product_name}：${formatMoney(paymentAmountValue(item.id))}`),
+  ]
+  if (!window.confirm(confirmLines.join('\n'))) return
+  submissionApproving.value = true
+  submissionActionMessage.value = ''
+  try {
+    submissionDetail.value = await approvePaymentSubmission(sub.id, {
+      items: selectedPaymentItems.value.map((item) => ({ order_item_id: item.id, amount: paymentAmountValue(item.id) })),
+      note: submissionApproveNote.value.trim(),
+    })
+    cnPayment.value = null
+    submissionActionMessage.value = '已核对通过并创建正式付款。'
+    await loadPaymentSubmissions()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    submissionActionMessage.value = error instanceof Error ? error.message : '核对通过失败，请重试。'
+  } finally {
+    submissionApproving.value = false
+  }
+}
+
+async function loadPaymentQRStatuses() {
+  paymentQRLoading.value = true
+  paymentQRMessage.value = ''
+  try {
+    const response = await getPaymentQRAdminStatuses()
+    paymentQRStatuses.value = response.items
+  } catch (error) {
+    paymentQRMessage.value = error instanceof Error ? error.message : '收款二维码状态加载失败'
+  } finally {
+    paymentQRLoading.value = false
+  }
+}
+
+// adminQRImageURL builds the admin preview URL for a method's current image,
+// with a cache-busting query so a replaced image reloads. It uses the content
+// hash when available, otherwise the reload counter.
+function adminQRImageURL(method: PaymentQRMethod) {
+  const status = paymentQRStatusByMethod.value[method]
+  const version = status.sha256 || String(paymentQRReloadKey.value)
+  return apiUrl(`/api/admin/payment-qr/${method}/image`) + `?v=${encodeURIComponent(version)}`
+}
+
+function clearQRSelection(method: PaymentQRMethod) {
+  const existing = qrPreviewURL.value[method]
+  if (existing) URL.revokeObjectURL(existing)
+  qrSelectedFile.value = { ...qrSelectedFile.value, [method]: null }
+  qrPreviewURL.value = { ...qrPreviewURL.value, [method]: '' }
+}
+
+function onQRFileChange(method: PaymentQRMethod, event: Event) {
+  paymentQRMessage.value = ''
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  if (!file) {
+    clearQRSelection(method)
+    return
+  }
+  if (!qrAcceptedTypes.includes(file.type)) {
+    paymentQRMessage.value = '仅支持 PNG、JPEG 或 WebP 图片。'
+    input.value = ''
+    clearQRSelection(method)
+    return
+  }
+  if (file.size > qrMaxBytes) {
+    paymentQRMessage.value = '图片超过 5 MiB 大小限制。'
+    input.value = ''
+    clearQRSelection(method)
+    return
+  }
+  const previous = qrPreviewURL.value[method]
+  if (previous) URL.revokeObjectURL(previous)
+  qrSelectedFile.value = { ...qrSelectedFile.value, [method]: file }
+  qrPreviewURL.value = { ...qrPreviewURL.value, [method]: URL.createObjectURL(file) }
+}
+
+async function uploadPaymentQRImage(method: PaymentQRMethod) {
+  const file = qrSelectedFile.value[method]
+  if (!file || qrUploading.value[method]) return
+  const label = paymentMethodLabel(method)
+  if (paymentQRStatusByMethod.value[method].configured) {
+    if (!window.confirm(`确认用新图片替换当前生效的${label}收款二维码？旧二维码会被停用并保留为历史。`)) return
+  }
+  qrUploading.value = { ...qrUploading.value, [method]: true }
+  paymentQRMessage.value = ''
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const response = await uploadPaymentQR(method, form)
+    paymentQRStatuses.value = response.items
+    clearQRSelection(method)
+    const input = document.getElementById(`qr-file-${method}`) as HTMLInputElement | null
+    if (input) input.value = ''
+    paymentQRReloadKey.value += 1
+    paymentQRMessage.value = `${label}收款二维码已更新。`
+  } catch (error) {
+    paymentQRMessage.value = error instanceof Error ? error.message : '上传失败'
+  } finally {
+    qrUploading.value = { ...qrUploading.value, [method]: false }
+  }
+}
+
+async function disablePaymentQRImage(method: PaymentQRMethod) {
+  if (qrDisabling.value[method]) return
+  const label = paymentMethodLabel(method)
+  if (!window.confirm(`确认停用当前生效的${label}收款二维码？停用后普通用户将无法查看该二维码，历史记录仍会保留。`)) return
+  qrDisabling.value = { ...qrDisabling.value, [method]: true }
+  paymentQRMessage.value = ''
+  try {
+    const response = await disablePaymentQR(method)
+    paymentQRStatuses.value = response.items
+    paymentQRReloadKey.value += 1
+    paymentQRMessage.value = `${label}收款二维码已停用。`
+  } catch (error) {
+    paymentQRMessage.value = error instanceof Error ? error.message : '停用失败'
+  } finally {
+    qrDisabling.value = { ...qrDisabling.value, [method]: false }
+  }
+}
+
+// The one place the user filter state becomes API parameters. The list, the
+// facet popovers and the export all go through it, which is what keeps the
+// three from ever disagreeing about what is filtered.
+function adminUserFilterParams() {
+  return buildFilterParams(adminUserFilterState.value, ADMIN_USER_RANGE_PARAMS, ADMIN_USER_DATE_PARAMS)
+}
+
+const adminUserActiveFilterCount = computed(() => activeFilterCount(adminUserFilterState.value))
+
+// Facet loader handed to every value popover. The backend drops the requested
+// column's own selection when computing candidates, and names its pager
+// facet_page/facet_page_size — adapted here into the shape the popover reads.
+async function loadAdminUserFacets(request: { column: string; search: string; page: number }): Promise<ColumnFacetResponse> {
+  const params = adminUserFilterParams()
+  params.set('column', request.column)
+  if (request.search) params.set('search', request.search)
+  params.set('facet_page', String(request.page))
+  const response = await getJSON<AdminUserFacetResponse>(`/api/admin/users/facets?${params.toString()}`)
+  return {
+    column: response.column,
+    values: response.values ?? [],
+    total: response.total,
+    blank_count: response.blank_count,
+    page: response.facet_page,
+    page_size: response.facet_page_size,
+    has_more: response.has_more,
+  }
+}
+
+// Applying a filter returns to page 1: staying on page 7 of a result set that
+// just shrank to two pages would show an empty table.
+function applyAdminUserFilters() {
+  adminUserPage.value = 1
+  void loadAdminUsers()
+}
+
+function goToAdminUserPage(page: number) {
+  if (page < 1 || (adminUserTotalPages.value > 0 && page > adminUserTotalPages.value)) return
+  adminUserPage.value = page
+  void loadAdminUsers()
+}
+
+function changeAdminUserPageSize() {
+  adminUserPage.value = 1
+  void loadAdminUsers()
 }
 
 async function loadAdminUsers() {
   adminUsersLoading.value = true
   adminUsersMessage.value = ''
   try {
-    const params = new URLSearchParams()
-    if (adminUserFilters.value.cn.trim()) params.set('cn', adminUserFilters.value.cn.trim())
-    if (adminUserFilters.value.status) params.set('status', adminUserFilters.value.status)
-    const suffix = params.toString() ? `?${params.toString()}` : ''
-    const response = await getJSON<AdminUserListResponse>('/api/admin/users' + suffix)
+    const params = adminUserFilterParams()
+    params.set('page', String(adminUserPage.value))
+    params.set('page_size', String(adminUserPageSize.value))
+    const response = await getJSON<AdminUserListResponse>(`/api/admin/users?${params.toString()}`)
     adminUsers.value = response.items ?? []
     adminUsersSummary.value = response.summary ?? null
-    if (adminUsers.value.length === 0) adminUsersMessage.value = '没有符合条件的用户。'
+    adminUserPage.value = response.page
+    adminUserPageSize.value = response.page_size
+    adminUserTotal.value = response.total
+    adminUserTotalPages.value = response.total_pages
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
@@ -769,21 +1782,31 @@ async function loadAdminUsers() {
       return
     }
     adminUsersSummary.value = null
-    adminUsersMessage.value = error instanceof Error ? error.message : '用户列表加载失败'
+    const detail = error instanceof Error ? error.message : '未知错误'
+    adminUsersMessage.value = `用户列表加载失败：${detail}`
   } finally {
     adminUsersLoading.value = false
   }
 }
 
 function resetAdminUserFilters() {
-  adminUserFilters.value = { cn: '', status: '' }
-  void loadAdminUsers()
+  // clearColumnFilters: the shared helper is aliased because this file already
+  // has its own clearAllFilters for the user-facing query pages.
+  clearColumnFilters(adminUserFilterState.value)
+  applyAdminUserFilters()
 }
 
-async function downloadExport(path: string, params: Record<string, string>) {
-  const searchParams = new URLSearchParams()
-  for (const [key, value] of Object.entries(params)) {
-    if (value.trim()) searchParams.set(key, value.trim())
+// Accepts URLSearchParams so a caller can pass repeated multi-value filter
+// parameters, which a Record<string, string> cannot express.
+async function downloadExport(path: string, params: Record<string, string> | URLSearchParams) {
+  let searchParams: URLSearchParams
+  if (params instanceof URLSearchParams) {
+    searchParams = params
+  } else {
+    searchParams = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+      if (value.trim()) searchParams.set(key, value.trim())
+    }
   }
   const suffix = searchParams.toString() ? `?${searchParams.toString()}` : ''
   const response = await fetch(apiUrl(path + suffix), { credentials: 'include' })
@@ -813,38 +1836,26 @@ async function downloadExport(path: string, params: Record<string, string>) {
   URL.revokeObjectURL(objectURL)
 }
 
+// Exports carry the complete filter state and no pagination, so a download is
+// the whole filtered result set rather than the page on screen.
 function exportAdminUsersExcel() {
-  void downloadExport('/api/admin/export/users.xlsx', {
-    cn: adminUserFilters.value.cn,
-    status: adminUserFilters.value.status,
-  })
+  void downloadExport('/api/admin/export/users.xlsx', adminUserFilterParams())
 }
 
 function exportAdminUsersCSV() {
-  void downloadExport('/api/admin/export/users.csv', {
-    cn: adminUserFilters.value.cn,
-    status: adminUserFilters.value.status,
-  })
+  void downloadExport('/api/admin/export/users.csv', adminUserFilterParams())
 }
 
+// Exports carry the complete filter state and no pagination, so a download is
+// the whole filtered result set rather than the page on screen. The old version
+// passed only cn/method/status/paid dates and silently dropped the amount
+// ranges, so an amount-filtered table exported more rows than it showed.
 function exportPaymentsExcel() {
-  void downloadExport('/api/admin/export/payments.xlsx', {
-    cn: paymentFilters.value.cn,
-    payment_method: paymentFilters.value.paymentMethod,
-    status: paymentFilters.value.status,
-    paid_from: paymentFilters.value.paidFrom,
-    paid_to: paymentFilters.value.paidTo,
-  })
+  void downloadExport('/api/admin/export/payments.xlsx', paymentFilterParams())
 }
 
 function exportPaymentsCSV() {
-  void downloadExport('/api/admin/export/payments.csv', {
-    cn: paymentFilters.value.cn,
-    payment_method: paymentFilters.value.paymentMethod,
-    status: paymentFilters.value.status,
-    paid_from: paymentFilters.value.paidFrom,
-    paid_to: paymentFilters.value.paidTo,
-  })
+  void downloadExport('/api/admin/export/payments.csv', paymentFilterParams())
 }
 
 function exportUnpaidItemsExcel() {
@@ -855,24 +1866,14 @@ function exportUnpaidItemsCSV() {
   void downloadExport('/api/admin/export/order-items.csv', { unpaid_only: '1' })
 }
 
+// Exports carry the complete filter state and no pagination, so a download is
+// the whole filtered result set rather than the page on screen.
 function exportOrderItemsExcel() {
-  void downloadExport('/api/admin/export/order-items.xlsx', {
-    cn: orderFilters.value.cn,
-    project: orderFilters.value.project,
-    series: orderFilters.value.series,
-    category: orderFilters.value.category,
-    role: orderFilters.value.role,
-  })
+  void downloadExport('/api/admin/export/order-items.xlsx', orderFilterParams())
 }
 
 function exportOrderItemsCSV() {
-  void downloadExport('/api/admin/export/order-items.csv', {
-    cn: orderFilters.value.cn,
-    project: orderFilters.value.project,
-    series: orderFilters.value.series,
-    category: orderFilters.value.category,
-    role: orderFilters.value.role,
-  })
+  void downloadExport('/api/admin/export/order-items.csv', orderFilterParams())
 }
 
 async function copyIdentifier(value?: string) {
@@ -995,15 +1996,6 @@ function orderDetailTechnicalIdentifiers(detail: OrderDetailResponse | null) {
     addTechnicalIdentifier(rows, '导入批次 ID', label, item.import_batch_id)
     addTechnicalIdentifier(rows, '来源 Sheet', label, item.source_sheet)
     addTechnicalIdentifier(rows, '来源位置', label, item.source_row_key)
-  }
-  return rows
-}
-
-function importHistoryTechnicalIdentifiers(items: ImportHistoryItem[]) {
-  const rows: TechnicalIdentifier[] = []
-  for (const item of items) {
-    addTechnicalIdentifier(rows, '导入记录 ID', item.original_filename, item.id)
-    addTechnicalIdentifier(rows, '文件 SHA', item.original_filename, item.file_hash)
   }
   return rows
 }
@@ -1474,19 +2466,8 @@ async function savePayment() {
 }
 
 function resetOrderFilters() {
-  orderFilters.value = {
-    cn: '',
-    project: '',
-    item: '',
-    series: '',
-    category: '',
-    role: '',
-    importBatchID: '',
-    status: '',
-    createdFrom: '',
-    createdTo: '',
-  }
-  void loadOrders()
+  clearColumnFilters(orderFilterState.value)
+  applyOrderFilters()
 }
 
 
@@ -1505,6 +2486,10 @@ async function loginQuery() {
     queryUser.value = response.user
     queryCode.value = ''
     await loadQueryOrders(true)
+    // Enter the user module portal (or the originally requested module page).
+    const target = pendingQueryTarget.value || '/query'
+    pendingQueryTarget.value = ''
+    navigate(target)
   } catch (error) {
     queryOrders.value = null
     queryUser.value = null
@@ -1524,6 +2509,7 @@ async function loadQueryOrders(showMessage = true) {
     queryOrders.value = response
     queryUser.value = response.user
     queryCN.value = response.user.cn_code
+    await loadQueryQRAvailability()
     await loadQueryRecoveryEmail()
   } catch (error) {
     queryOrders.value = null
@@ -1540,6 +2526,62 @@ async function loadQueryOrders(showMessage = true) {
   } finally {
     queryLoading.value = false
   }
+}
+
+async function loadQueryQRAvailability() {
+  queryQRLoading.value = true
+  queryQRError.value = ''
+  try {
+    const response = await getPaymentQRAvailability()
+    queryQRAvailability.value = response.items
+    // Both 支付宝 and 微信 are always offered as payment methods; QR
+    // configuration only affects whether an image or an empty state shows.
+    // Default to 支付宝 so an unselected page never implies a WeChat fee.
+    if (!queryQRMethod.value) queryQRMethod.value = 'alipay'
+  } catch (error) {
+    queryQRAvailability.value = []
+    queryQRMethod.value = 'alipay'
+    if (error instanceof ApiError && error.status === 401) {
+      queryUser.value = null
+      queryOrders.value = null
+      queryMessage.value = error.message
+      return
+    }
+    queryQRError.value = '收款二维码信息加载失败，请稍后重试。'
+  } finally {
+    queryQRLoading.value = false
+  }
+}
+
+function selectQueryQRMethod(method: PaymentQRMethod) {
+  // Both methods are always selectable; QR availability only changes the QR
+  // display, not whether the user may choose the method.
+  queryQRMethod.value = method
+  queryQRError.value = ''
+}
+
+// Whether a method's QR image is currently configured/enabled.
+function queryMethodAvailable(method: PaymentQRMethod): boolean {
+  return queryQRAvailability.value.some((item) => item.payment_method === method && item.available)
+}
+
+// queryQRImageURL builds the regular-user image URL for the selected method.
+// The reload counter lets a manual refresh re-fetch; no technical identifier
+// (sha, size, admin) is ever placed in the URL or shown to the user.
+function queryQRImageURL(method: PaymentQRMethod) {
+  return apiUrl(`/api/query/payment-qr/${method}/image`) + `?v=${queryQRReloadKey.value}`
+}
+
+function onQueryQRImageError() {
+  queryQRError.value = '二维码加载失败，请刷新页面或重新登录后再试。'
+}
+
+function openQueryQRZoom() {
+  if (queryQRMethod.value) queryQRZoom.value = true
+}
+
+function closeQueryQRZoom() {
+  queryQRZoom.value = false
 }
 
 async function loadQueryRecoveryEmail() {
@@ -1655,7 +2697,13 @@ async function logoutQuery() {
     querySecurityMessage.value = ''
     queryRecoveryEmail.value = null
     queryRecoveryEmailMessage.value = ''
+    queryQRAvailability.value = []
+    queryQRMethod.value = ''
+    queryQRError.value = ''
+    queryQRZoom.value = false
+    pendingQueryTarget.value = ''
     queryMessage.value = '已退出查询。'
+    navigate('/query')
   } catch (error) {
     queryMessage.value = error instanceof Error ? error.message : '退出失败'
   } finally {
@@ -2202,6 +3250,25 @@ function formatMoney(value: number | null | undefined) {
   return Number(value ?? 0).toFixed(2)
 }
 
+// Alternating tint per order, so consecutive detail rows of the same order read
+// as a group. This is presentation only: rows stay separate and independently
+// filterable, which rowspan merging would destroy.
+const orderRowTints = computed(() => {
+  const tints: boolean[] = []
+  let tinted = false
+  let previousOrderID = ''
+  for (const [index, item] of orderItems.value.entries()) {
+    if (index > 0 && item.order_id !== previousOrderID) tinted = !tinted
+    previousOrderID = item.order_id
+    tints.push(tinted)
+  }
+  return tints
+})
+
+function isAlternateOrderRow(index: number) {
+  return orderRowTints.value[index] ?? false
+}
+
 function formatBytes(value: number) {
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`
@@ -2333,12 +3400,8 @@ function historyTotalAmount(item: ImportHistoryItem) {
 }
 
 window.addEventListener('popstate', () => {
-  routeName.value = routeFromPath(window.location.pathname)
-  routeImportID.value = importIDFromPath(window.location.pathname)
-  routeOrderID.value = orderIDFromPath(window.location.pathname)
-  routePaymentID.value = paymentIDFromPath(window.location.pathname)
-  routeUserID.value = userIDFromPath(window.location.pathname)
-  void handleRouteEntered()
+  applyRoute(window.location.pathname)
+  void handleRouteChange()
 })
 
 onMounted(() => {
@@ -2346,79 +3409,70 @@ onMounted(() => {
     queryRecoveryClock.value = Date.now()
   }, 1000)
   void load()
-  if (isAdminRoute.value) void handleRouteEntered()
-  else {
-    authChecked.value = true
-    void handlePublicRouteEntered()
-  }
+  applyRoute(window.location.pathname)
+  if (!isAdminSurface.value) authChecked.value = true
+  void handleRouteChange()
 })
 
 onUnmounted(() => {
   if (queryRecoveryClockTimer !== undefined) window.clearInterval(queryRecoveryClockTimer)
+  if (submissionPreviewURL.value) URL.revokeObjectURL(submissionPreviewURL.value)
 })
 </script>
 
 <template>
   <div class="app-shell">
-    <header class="topbar">
-      <div>
-        <p class="product-label">PJSK Goods Next</p>
-        <h1>谷子管理工作台</h1>
-      </div>
-      <div class="topbar__actions">
-        <span v-if="admin" class="admin-chip">{{ admin.display_name ?? admin.username }}</span>
-        <span class="connection-pill" :data-online="isBackendOnline">
-          <span class="connection-dot" />
-          {{ isBackendOnline ? '后端在线' : '本地前端模式' }}
-        </span>
-        <button class="icon-button" type="button" title="重新检查后端" @click="load" :disabled="loading">↻</button>
-      </div>
-    </header>
+    <main v-if="isAdminRoute" class="workspace admin-surface">
+      <PortalStatusBar
+        :identity="admin ? (admin.display_name ?? admin.username) : undefined"
+        :online="isBackendOnline"
+        :online-text="isBackendOnline ? '后端在线' : '本地前端模式'"
+        :show-refresh="true"
+        back-label="← 返回谷子管理中心"
+        @back="navigate('/admin')"
+        @refresh="load"
+        @logout="logout"
+      />
 
-    <nav class="tabs" aria-label="工作台导航">
-      <button :class="{ active: routeName === 'home' }" type="button" @click="navigate('/')">总览</button>
-      <button :class="{ active: routeName === 'admin-imports' }" type="button" @click="navigate('/admin/imports')">Excel 导入预览</button>
-      <button :class="{ active: routeName === 'admin-import-history' || routeName === 'admin-import-detail' }" type="button" @click="navigate('/admin/imports/history')">导入历史</button>
-      <button :class="{ active: routeName === 'admin-orders' || routeName === 'admin-order-detail' }" type="button" @click="navigate('/admin/orders')">订单查询</button>
-      <button :class="{ active: routeName === 'admin-users' || routeName === 'admin-user-detail' }" type="button" @click="navigate('/admin/users')">用户管理</button>
-      <button :class="{ active: routeName === 'admin-payments' || routeName === 'admin-payment-detail' }" type="button" @click="navigate('/admin/payments')">付款记录</button>
-    </nav>
-
-    <main v-if="isAdminRoute" class="workspace">
-      <section v-if="!authChecked" class="panel">
-        <div class="panel__header"><h2>管理员状态</h2><span>checking</span></div>
-        <p class="muted">正在检查登录状态。</p>
-      </section>
-
-      <section v-else-if="!admin" class="panel auth-panel">
-        <div class="panel__header"><h2>管理员登录</h2><span>HttpOnly Cookie</span></div>
-        <form class="login-form" @submit.prevent="login">
-          <label><span>用户名</span><input v-model="loginUsername" autocomplete="username" required /></label>
-          <label><span>密码</span><input v-model="loginPassword" type="password" autocomplete="current-password" required /></label>
-          <button class="primary-button" type="submit" :disabled="loginLoading">{{ loginLoading ? '登录中' : '登录' }}</button>
-        </form>
-        <div v-if="authMessage" class="inline-alert">{{ authMessage }}</div>
+      <section v-if="!admin" class="panel module-redirect">
+        <p class="muted">正在前往管理员登录页…</p>
+        <button class="primary-button" type="button" @click="navigate('/admin')">前往管理员登录</button>
       </section>
 
       <template v-else>
-        <section class="panel admin-actions">
-          <div class="panel__header">
-            <div>
-              <h2>管理员导入中心</h2>
-              <p class="muted">当前只提供 Excel 预览、确认导入、历史与详情查询。</p>
-            </div>
-            <button class="secondary-button" type="button" @click="logout">退出</button>
-          </div>
-          <div class="action-row">
-            <button class="secondary-button" type="button" @click="navigate('/admin/imports')">导入预览</button>
-            <button class="secondary-button" type="button" @click="navigate('/admin/imports/history')">导入历史</button>
-            <button class="secondary-button" type="button" @click="navigate('/admin/orders')">订单查询</button>
-            <button class="secondary-button" type="button" @click="navigate('/admin/payments')">付款记录</button>
-            <button class="secondary-button" type="button" @click="navigate('/admin/users')">用户管理</button>
-          </div>
-        </section>
+        <div class="module-header">
+          <h2 class="module-header__title">{{ adminModuleTitle }}</h2>
+          <nav v-if="adminModule === 'data'" class="module-subnav" aria-label="数据导入中心">
+            <button :class="{ active: routeName === 'admin-import' }" type="button" @click="navigate('/admin/data/import')">Excel 导入</button>
+            <button :class="{ active: routeName === 'admin-import-history' || routeName === 'admin-import-detail' }" type="button" @click="navigate('/admin/data/history')">导入历史</button>
+          </nav>
+          <nav v-else-if="adminModule === 'finance'" class="module-subnav" aria-label="收付款管理">
+            <button :class="{ active: routeName === 'admin-payments' || routeName === 'admin-payment-detail' }" type="button" @click="navigate('/admin/finance/payments')">付款记录</button>
+            <button :class="{ active: routeName === 'admin-submissions' || routeName === 'admin-submission-detail' }" type="button" @click="navigate('/admin/finance/submissions')">收肾记录</button>
+            <button :class="{ active: routeName === 'admin-qr' }" type="button" @click="navigate('/admin/finance/qr-codes')">收款二维码</button>
+          </nav>
+        </div>
 
-        <template v-if="routeName === 'admin-imports'">
+        <template v-if="routeName === 'admin-data'">
+          <section class="module-portal">
+            <div class="module-grid">
+              <ModuleCard title="Excel 导入" description="上传并预览 Excel，确认后写入订单与付款" meta="含标准模板下载" accent="blue" cta="进入导入" @enter="navigate('/admin/data/import')" />
+              <ModuleCard title="导入历史" description="查看历史导入批次、状态与详情" accent="neutral" cta="查看历史" @enter="navigate('/admin/data/history')" />
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-finance'">
+          <section class="module-portal">
+            <div class="module-grid">
+              <ModuleCard title="付款记录" description="录入付款、查看付款流水与详情、撤销" accent="blue" cta="进入付款" @enter="navigate('/admin/finance/payments')" />
+              <ModuleCard title="收肾记录" description="核对用户提交的付款凭证，通过后创建正式付款或驳回" accent="green" cta="进入核对" @enter="navigate('/admin/finance/submissions')" />
+              <ModuleCard title="收款二维码" description="维护支付宝 / 微信静态收款二维码" accent="neutral" cta="进入二维码" @enter="navigate('/admin/finance/qr-codes')" />
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-import'">
           <section class="panel upload-panel">
             <div class="panel__header">
               <div>
@@ -2612,7 +3666,13 @@ onUnmounted(() => {
 
         <template v-else-if="routeName === 'admin-payments'">
           <section class="panel">
-            <div class="panel__header"><div><h2>付款记录</h2><p class="muted">只读查看付款流水和关联明细；本页不提供删除、作废或冲正。</p></div><div class="header-actions"><button class="secondary-button" type="button" @click="exportPaymentsExcel">导出付款 Excel</button><button class="secondary-button" type="button" @click="exportUnpaidItemsExcel">导出未付明细 Excel</button><button class="secondary-button ghost-button" type="button" @click="exportPaymentsCSV">付款 CSV</button><button class="secondary-button ghost-button" type="button" @click="exportUnpaidItemsCSV">未付 CSV</button><button class="secondary-button" type="button" :disabled="paymentRecordsLoading" @click="loadPaymentRecords">{{ paymentRecordsLoading ? '加载中' : '刷新' }}</button></div></div>
+            <!-- Row 1: title only. Export actions live on their own row below,
+                 with the result scope after them. -->
+            <div class="page-heading">
+              <h2>付款记录</h2>
+              <p>只读查看付款流水和关联明细。筛选入口在每列表头的漏斗图标中。</p>
+              <p class="muted">本页不提供删除、作废或冲正。</p>
+            </div>
             <section class="panel nested-panel payment-entry-panel">
               <div class="panel__header">
                 <div><h2>录入付款</h2><p class="muted">按 CN 加载尚未付清的订单明细，支持全额或部分付款。</p></div>
@@ -2669,12 +3729,88 @@ onUnmounted(() => {
                   </div>
                 </div>
                 <p class="payment-allocation-hint">填写本次付款分摊到该明细的金额，不能超过剩余应付金额。分摊金额只能由管理员在本页操作，付款保存后不可直接修改。</p>
-                <div class="table-scroll detail-table payment-table"><table><thead><tr><th>选择</th><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th title="填写本次付款分摊到该明细的金额，不能超过剩余应付金额">本次分摊金额</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="12">暂无待付款明细。</td></tr><tr v-for="item in cnPayment.items" :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td><span class="cell-clip" :title="item.project_name">{{ item.project_name }}</span></td><td><span class="cell-clip" :title="item.display_name || item.product_name">{{ item.display_name || item.product_name }}</span></td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
+                <div class="list-filter-bar" aria-label="未付明细筛选">
+                  <span class="list-filter-context">当前 CN：<strong>{{ cnPayment.user.cn_code }}</strong></span>
+                  <label><span>分类</span><select v-model="cnPaymentItemFilters.category"><option value="">全部</option><option v-for="opt in cnPaymentFilterOptions.categories" :key="opt" :value="opt">{{ opt }}</option></select></label>
+                  <label><span>角色</span><select v-model="cnPaymentItemFilters.role"><option value="">全部</option><option v-for="opt in cnPaymentFilterOptions.roles" :key="opt" :value="opt">{{ opt }}</option></select></label>
+                  <label><span>系列</span><select v-model="cnPaymentItemFilters.series"><option value="">全部</option><option v-for="opt in cnPaymentFilterOptions.series" :key="opt" :value="opt">{{ opt }}</option></select></label>
+                  <button class="secondary-button" type="button" :disabled="!cnPaymentFiltersActive" @click="clearCnPaymentItemFilters">清空筛选</button>
+                </div>
+                <p class="muted list-filter-note">筛选只影响下方明细的显示，不影响已勾选项与合计；已勾选但被筛选隐藏的明细仍会计入本次付款。</p>
+                <div class="table-scroll detail-table payment-table"><table><thead><tr><th>选择</th><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th title="填写本次付款分摊到该明细的金额，不能超过剩余应付金额">本次分摊金额</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="12">暂无待付款明细。</td></tr><tr v-else-if="filteredCnPaymentItems.length === 0"><td colspan="12">没有符合当前筛选条件的明细。</td></tr><tr v-for="item in filteredCnPaymentItems" :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td><span class="cell-clip" :title="item.project_name">{{ item.project_name }}</span></td><td><span class="cell-clip" :title="item.display_name || item.product_name">{{ item.display_name || item.product_name }}</span></td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
               </template>
             </section>
-            <form class="order-filters payment-filters-priority" @submit.prevent="loadPaymentRecords"><label class="filter-label--strong"><span>付款时间从</span><input v-model="paymentFilters.paidFrom" type="datetime-local" /></label><label class="filter-label--strong"><span>付款时间到</span><input v-model="paymentFilters.paidTo" type="datetime-local" /></label><label><span>CN</span><input v-model="paymentFilters.cn" placeholder="CN 或显示名" /></label><label><span>交肾状态</span><select v-model="paymentFilters.status"><option value="">全部</option><option value="approved">已交肾</option><option value="submitted">待处理</option><option value="rejected">已驳回</option><option value="voided">已撤销</option></select></label><label><span>付款方式</span><select v-model="paymentFilters.paymentMethod"><option value="">全部</option><option value="alipay">支付宝</option><option value="wechat">微信</option><option value="bank">银行转账</option><option value="cash">现金</option><option value="other">其他</option></select></label><div class="filter-actions"><button class="primary-button" type="submit" :disabled="paymentRecordsLoading">查询</button><button class="secondary-button" type="button" @click="resetPaymentFilters">重置</button></div></form>
+            <!-- Row 2: actions. -->
+            <div class="page-actions">
+              <button class="secondary-button" type="button" @click="exportPaymentsExcel">导出付款 Excel</button>
+              <button class="secondary-button ghost-button" type="button" @click="exportPaymentsCSV">付款 CSV</button>
+              <button class="secondary-button" type="button" @click="exportUnpaidItemsExcel">导出未付明细 Excel</button>
+              <button class="secondary-button ghost-button" type="button" @click="exportUnpaidItemsCSV">未付 CSV</button>
+              <button class="secondary-button" type="button" :disabled="paymentRecordsLoading" @click="loadPaymentRecords">{{ paymentRecordsLoading ? '加载中' : '刷新' }}</button>
+            </div>
+
+            <!-- Row 3: result scope and the single global reset. -->
+            <div class="page-resultbar">
+              <span class="filter-result-count">结果：共 {{ paymentTotal }} 条付款记录</span>
+              <span class="muted">第 {{ paymentPage }} / {{ Math.max(paymentTotalPages, 1) }} 页</span>
+              <label class="page-size-control">
+                <span>每页</span>
+                <select v-model.number="paymentPageSize" :disabled="paymentRecordsLoading" @change="changePaymentPageSize">
+                  <option :value="25">25 条</option>
+                  <option :value="50">50 条</option>
+                  <option :value="100">100 条</option>
+                  <option :value="200">200 条</option>
+                </select>
+              </label>
+              <button class="secondary-button ghost-button" type="button" :disabled="paymentActiveFilterCount === 0" @click="resetPaymentFilters">清空全部筛选<template v-if="paymentActiveFilterCount > 0">（{{ paymentActiveFilterCount }}）</template></button>
+            </div>
+
             <div v-if="paymentRecordsMessage" class="inline-alert">{{ paymentRecordsMessage }}</div>
-            <div class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th>CN</th><th class="col-emphasis">实付金额</th><th>交肾状态</th><th>本金</th><th>手续费</th><th>付款方式</th><th>操作管理员</th><th>备注</th><th>关联明细数量</th><th></th></tr></thead><tbody><tr v-if="!paymentRecordsLoading && paymentRecords.length === 0"><td colspan="11">暂无付款记录。</td></tr><tr v-for="payment in paymentRecords" :key="payment.id"><td>{{ formatDate(payment.paid_at) }}</td><td><strong>{{ payment.cn_code }}</strong><small>{{ payment.display_name || '-' }}</small></td><td class="col-emphasis">{{ formatMoney(payment.payable_amount) }}</td><td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td><td>{{ formatMoney(payment.amount) }}</td><td>{{ formatMoney(payment.fee_amount) }}</td><td>{{ paymentMethodLabel(payment.payment_method || '') }}</td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.note || '-' }}</td><td>{{ payment.payment_item_count }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
+
+            <div class="table-scroll history-table payment-records-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th><ColumnValueFilter v-model="paymentFilterState.values.cn" label="CN" column="cn" :load-facets="loadPaymentFacets" @update:model-value="applyPaymentFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="paymentFilterState.ranges.principal" label="本金" @update:model-value="applyPaymentFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="paymentFilterState.ranges.fee" label="手续费" @update:model-value="applyPaymentFilters" /></th>
+                    <th class="numeric-column col-emphasis"><ColumnRangeFilter v-model="paymentFilterState.ranges.payable" label="实付金额" @update:model-value="applyPaymentFilters" /></th>
+                    <th><ColumnValueFilter v-model="paymentFilterState.values.payment_method" label="付款方式" column="payment_method" :load-facets="loadPaymentFacets" @update:model-value="applyPaymentFilters" /></th>
+                    <th><ColumnValueFilter v-model="paymentFilterState.values.status" label="付款状态" column="status" :load-facets="loadPaymentFacets" @update:model-value="applyPaymentFilters" /></th>
+                    <th><ColumnDateFilter v-model="paymentFilterState.dates.paid" label="付款时间" @update:model-value="applyPaymentFilters" /></th>
+                    <th><ColumnValueFilter v-model="paymentFilterState.values.created_by" label="录入管理员" column="created_by" :load-facets="loadPaymentFacets" @update:model-value="applyPaymentFilters" /></th>
+                    <th><ColumnDateFilter v-model="paymentFilterState.dates.voided" label="撤销时间" allow-blank blank-label="未撤销" @update:model-value="applyPaymentFilters" /></th>
+                    <th><span class="column-header"><span class="column-header__label">查看详情</span></span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-if="paymentRecordsLoading"><td colspan="10">加载中…</td></tr>
+                  <tr v-else-if="paymentRecords.length === 0"><td colspan="10">没有符合当前筛选条件的付款记录。</td></tr>
+                  <!-- payment.id keys the row and drives the detail link; it is
+                       never rendered as a column. A voided payment keeps its
+                       original amounts — only 付款状态 says it no longer counts.
+                       备注 stays on the detail page rather than crowding the table. -->
+                  <tr v-for="payment in paymentRecords" v-else :key="payment.id">
+                    <td><span class="cell-wrap"><strong>{{ payment.cn_code }}</strong></span><small>{{ payment.display_name || '-' }}</small></td>
+                    <td class="numeric-column">{{ formatMoney(payment.principal_amount ?? payment.amount) }}</td>
+                    <td class="numeric-column">{{ formatMoney(payment.fee_amount) }}</td>
+                    <td class="numeric-column col-emphasis">{{ formatMoney(payment.payable_amount ?? payment.total_amount) }}</td>
+                    <td>{{ paymentMethodLabel(payment.payment_method || '') }}</td>
+                    <td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td>
+                    <td>{{ formatDate(payment.paid_at) }}</td>
+                    <td><span class="cell-wrap">{{ payment.created_by || '-' }}</span></td>
+                    <td>{{ payment.voided_at ? formatDate(payment.voided_at) : '未撤销' }}</td>
+                    <td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="paymentTotalPages > 1" class="pagination">
+              <button class="secondary-button" type="button" :disabled="paymentRecordsLoading || paymentPage <= 1" @click="goToPaymentPage(paymentPage - 1)">上一页</button>
+              <span class="muted">第 {{ paymentPage }} / {{ paymentTotalPages }} 页</span>
+              <button class="secondary-button" type="button" :disabled="paymentRecordsLoading || paymentPage >= paymentTotalPages" @click="goToPaymentPage(paymentPage + 1)">下一页</button>
+            </div>
           </section>
         </template>
 
@@ -2714,7 +3850,8 @@ onUnmounted(() => {
               </section>
               <section v-if="paymentDetailTechnicalIdentifiers(paymentDetail).length > 0" class="panel nested-panel technical-section">
                 <details>
-                  <summary><span class="closed-label">▶ 查看技术标识</span><span class="open-label">▼ 收起技术标识</span></summary>
+                  <summary><span class="closed-label">▶ 技术标识</span><span class="open-label">▼ 技术标识</span></summary>
+                  <p class="muted technical-note">仅供技术排查，日常对账与查询无需使用。</p>
                   <div class="technical-list"><article v-for="identifier in mergeTechnicalIdentifiers(paymentDetailTechnicalIdentifiers(paymentDetail))" :key="identifier.type + '-' + identifier.value" class="technical-item"><div class="technical-item__head"><span class="technical-item__type">{{ identifier.type }}</span><span class="technical-item__context">{{ identifier.context }}</span><button type="button" class="copy-button" @click="copyIdentifier(identifier.value)">复制</button></div><code class="technical-item__value">{{ identifier.value }}</code></article></div>
                 </details>
               </section>
@@ -2722,15 +3859,261 @@ onUnmounted(() => {
           </section>
         </template>
 
+        <template v-else-if="routeName === 'admin-submissions'">
+          <section class="panel">
+            <div class="page-heading">
+              <h2>收肾记录</h2>
+              <p>核对用户提交的付款凭证。筛选入口在每列表头的漏斗图标中。</p>
+              <p class="muted">提交本身不改变已付金额；只有核对通过并完成明细分配后才会创建正式付款。</p>
+            </div>
+
+            <div class="page-actions">
+              <button class="secondary-button" type="button" :disabled="paymentSubmissionsLoading" @click="loadPaymentSubmissions">{{ paymentSubmissionsLoading ? '加载中' : '刷新' }}</button>
+            </div>
+
+            <div class="page-resultbar">
+              <span class="filter-result-count">结果：共 {{ submissionTotal }} 条收肾记录</span>
+              <span class="muted">第 {{ submissionPage }} / {{ Math.max(submissionTotalPages, 1) }} 页</span>
+              <label class="page-size-control">
+                <span>每页</span>
+                <select v-model.number="submissionPageSize" :disabled="paymentSubmissionsLoading" @change="changeSubmissionPageSize">
+                  <option :value="25">25 条</option>
+                  <option :value="50">50 条</option>
+                  <option :value="100">100 条</option>
+                  <option :value="200">200 条</option>
+                </select>
+              </label>
+              <button class="secondary-button ghost-button" type="button" :disabled="submissionActiveFilterCount === 0" @click="resetSubmissionFilters">清空全部筛选<template v-if="submissionActiveFilterCount > 0">（{{ submissionActiveFilterCount }}）</template></button>
+            </div>
+
+            <div v-if="paymentSubmissionsMessage" class="inline-alert">{{ paymentSubmissionsMessage }}</div>
+
+            <div class="table-scroll history-table submission-records-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th><ColumnValueFilter v-model="submissionFilterState.values.cn" label="CN" column="cn" :load-facets="loadSubmissionFacets" @update:model-value="applySubmissionFilters" /></th>
+                    <th><ColumnValueFilter v-model="submissionFilterState.values.payment_method" label="付款方式" column="payment_method" :load-facets="loadSubmissionFacets" @update:model-value="applySubmissionFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="submissionFilterState.ranges.principal" label="本金" @update:model-value="applySubmissionFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="submissionFilterState.ranges.fee" label="手续费" @update:model-value="applySubmissionFilters" /></th>
+                    <th class="numeric-column col-emphasis"><ColumnRangeFilter v-model="submissionFilterState.ranges.payable" label="本次应付" @update:model-value="applySubmissionFilters" /></th>
+                    <th><ColumnValueFilter v-model="submissionFilterState.values.status" label="提交状态" column="status" :load-facets="loadSubmissionFacets" @update:model-value="applySubmissionFilters" /></th>
+                    <th><ColumnDateFilter v-model="submissionFilterState.dates.submitted" label="提交时间" @update:model-value="applySubmissionFilters" /></th>
+                    <th><ColumnDateFilter v-model="submissionFilterState.dates.reviewed" label="核对时间" allow-blank blank-label="未核对" @update:model-value="applySubmissionFilters" /></th>
+                    <th><ColumnValueFilter v-model="submissionFilterState.values.reviewed_by" label="核对管理员" column="reviewed_by" :load-facets="loadSubmissionFacets" @update:model-value="applySubmissionFilters" /></th>
+                    <th><span class="column-header"><span class="column-header__label">查看详情</span></span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-if="paymentSubmissionsLoading"><td colspan="10">加载中…</td></tr>
+                  <tr v-else-if="paymentSubmissions.length === 0"><td colspan="10">没有符合当前筛选条件的收肾记录。</td></tr>
+                  <!-- submission.id keys the row and drives the detail link; it is
+                       never rendered as a column. SHA / internal ids stay on the
+                       detail page's collapsed 技术标识 section. -->
+                  <tr v-for="submission in paymentSubmissions" v-else :key="submission.id">
+                    <td><span class="cell-wrap"><strong>{{ submission.cn_code }}</strong></span><small>{{ submission.display_name || '-' }}</small></td>
+                    <td>{{ paymentMethodLabel(submission.payment_method) }}</td>
+                    <td class="numeric-column">{{ formatMoney(submission.principal_amount) }}</td>
+                    <td class="numeric-column">{{ formatMoney(submission.fee_amount) }}</td>
+                    <td class="numeric-column col-emphasis">{{ formatMoney(submission.payable_amount) }}</td>
+                    <td><span class="status-chip" :data-state="submission.status">{{ submissionAdminStatusLabel(submission.status) }}</span></td>
+                    <td>{{ formatDate(submission.submitted_at) }}</td>
+                    <td>{{ submission.reviewed_at ? formatDate(submission.reviewed_at) : '未核对' }}</td>
+                    <td><span class="cell-wrap">{{ submission.reviewed_by || '-' }}</span></td>
+                    <td><button class="secondary-button" type="button" @click="navigate('/admin/finance/submissions/' + submission.id)">详情</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="submissionTotalPages > 1" class="pagination">
+              <button class="secondary-button" type="button" :disabled="paymentSubmissionsLoading || submissionPage <= 1" @click="goToSubmissionPage(submissionPage - 1)">上一页</button>
+              <span class="muted">第 {{ submissionPage }} / {{ submissionTotalPages }} 页</span>
+              <button class="secondary-button" type="button" :disabled="paymentSubmissionsLoading || submissionPage >= submissionTotalPages" @click="goToSubmissionPage(submissionPage + 1)">下一页</button>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-submission-detail'">
+          <section class="panel">
+            <div class="panel__header"><div><h2>收肾记录详情</h2><p class="muted">核对用户提交的付款凭证</p></div><button class="secondary-button" type="button" @click="navigate('/admin/finance/submissions')">返回收肾记录</button></div>
+            <div v-if="submissionDetailMessage" class="inline-alert">{{ submissionDetailMessage }}</div>
+            <p v-if="submissionDetailLoading" class="muted">正在加载收肾记录详情。</p>
+            <template v-if="submissionDetail">
+              <div class="summary-grid">
+                <article class="metric-tile"><span>CN</span><strong>{{ submissionDetail.submission.cn_code }}</strong></article>
+                <article class="metric-tile"><span>付款方式</span><strong>{{ paymentMethodLabel(submissionDetail.submission.payment_method) }}</strong></article>
+                <article class="metric-tile"><span>提交状态</span><strong>{{ submissionAdminStatusLabel(submissionDetail.submission.status) }}</strong></article>
+                <article class="metric-tile"><span>本金</span><strong>{{ formatMoney(submissionDetail.submission.principal_amount) }}</strong></article>
+                <article class="metric-tile"><span>手续费</span><strong>{{ formatMoney(submissionDetail.submission.fee_amount) }}</strong></article>
+                <article class="metric-tile metric-tile--emphasis"><span>本次应付</span><strong>{{ formatMoney(submissionDetail.submission.payable_amount) }}</strong></article>
+                <article class="metric-tile"><span>提交时间</span><strong>{{ formatDate(submissionDetail.submission.submitted_at) }}</strong></article>
+                <article v-if="submissionDetail.submission.reviewed_at" class="metric-tile"><span>核对时间</span><strong>{{ formatDate(submissionDetail.submission.reviewed_at) }}</strong></article>
+                <article v-if="submissionDetail.submission.reviewed_by" class="metric-tile"><span>核对管理员</span><strong>{{ submissionDetail.submission.reviewed_by }}</strong></article>
+                <article v-if="submissionDetail.submission.reject_reason" class="metric-tile wide-metric"><span>驳回原因</span><strong>{{ submissionDetail.submission.reject_reason }}</strong></article>
+              </div>
+
+              <section class="panel nested-panel">
+                <div class="panel__header"><h2>付款凭证图片</h2></div>
+                <div class="submission-image-slot"><img :src="adminSubmissionImageURL(submissionDetail.submission.id)" alt="付款凭证" class="submission-image" /></div>
+              </section>
+
+              <div v-if="submissionActionMessage" class="inline-alert">{{ submissionActionMessage }}</div>
+
+              <template v-if="submissionDetail.submission.status === 'submitted'">
+                <section class="panel nested-panel danger-panel">
+                  <div class="panel__header"><div><h2>驳回</h2><p class="muted">驳回后用户可重新提交新的凭证，旧记录会完整保留。</p></div></div>
+                  <label class="reject-reason-field"><span>驳回原因（必填）</span><textarea v-model="submissionRejectReason" maxlength="500" rows="2" placeholder="请说明驳回原因，例如：图片不清晰 / 金额不符"></textarea></label>
+                  <div class="page-actions"><button class="danger-button" type="button" :disabled="submissionRejecting || submissionRejectReason.trim() === ''" @click="rejectSubmission">{{ submissionRejecting ? '驳回中' : '驳回' }}</button></div>
+                </section>
+
+                <section class="panel nested-panel">
+                  <div class="panel__header"><div><h2>核对通过并创建付款</h2><p class="muted">通过将复用现有付款录入流程：先加载该 CN 的未付明细，勾选并填写本次分摊金额，确认后创建一条正式付款并计入已付。</p></div><button class="secondary-button" type="button" :disabled="cnPaymentLoading" @click="loadSubmissionAllocation">{{ cnPaymentLoading ? '加载中' : '加载该 CN 未付明细' }}</button></div>
+                  <p class="payment-allocation-hint">本次应付参考：{{ formatMoney(submissionDetail.submission.payable_amount) }}（本金 {{ formatMoney(submissionDetail.submission.principal_amount) }} + 手续费 {{ formatMoney(submissionDetail.submission.fee_amount) }}）。手续费由后端按实际分配金额与该付款方式规则重新计算。</p>
+                  <div v-if="cnPaymentMessage" class="inline-alert">{{ cnPaymentMessage }}</div>
+                  <template v-if="cnPayment">
+                    <!-- 一键全选只是逐行调用与复选框相同的 setPaymentItemSelected，
+                         默认分摊金额与手工逐条勾选完全一致，不引入新的分配算法。 -->
+                    <div class="page-actions submission-select-actions">
+                      <button class="secondary-button" type="button" :disabled="selectableCnPaymentItems.length === 0 || allCnPaymentItemsSelected" @click="selectAllCnPaymentItems">全选待付明细</button>
+                      <button class="secondary-button ghost-button" type="button" :disabled="selectedPaymentItems.length === 0" @click="clearAllCnPaymentItemSelection">取消全选</button>
+                      <span class="muted">已选 {{ selectedPaymentItems.length }} / {{ selectableCnPaymentItems.length }} 条</span>
+                    </div>
+                    <div class="table-scroll detail-table"><table><thead><tr><th>选择</th><th>订单号</th><th>谷子名称</th><th>角色</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th>本次分摊金额</th></tr></thead><tbody>
+                      <tr v-if="cnPayment.items.length === 0"><td colspan="8">该 CN 暂无待付款明细。</td></tr>
+                      <tr v-for="item in cnPayment.items" v-else :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td><span class="cell-wrap">{{ item.display_name || item.product_name }}</span></td><td>{{ item.character_name || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td></tr>
+                    </tbody></table></div>
+                    <label class="payment-note"><span>备注</span><input v-model="submissionApproveNote" maxlength="200" placeholder="可选" /></label>
+                    <div class="page-actions"><button class="primary-button" type="button" :disabled="submissionApproving || selectedPaymentItems.length === 0" @click="approveSubmission">{{ submissionApproving ? '通过中' : '确认通过并创建付款' }}</button></div>
+                  </template>
+                </section>
+              </template>
+
+              <section v-else-if="submissionDetail.submission.status === 'approved'" class="panel nested-panel">
+                <div class="panel__header"><h2>已核对通过</h2></div>
+                <p class="muted">已创建正式付款并计入有效已付金额。撤销正式付款不会改写本凭证的历史状态。</p>
+                <div v-if="submissionDetail.submission.linked_payment_id" class="page-actions"><button class="secondary-button" type="button" @click="navigate('/admin/finance/payments/' + submissionDetail.submission.linked_payment_id)">查看关联付款</button></div>
+              </section>
+
+              <section v-else-if="submissionDetail.submission.status === 'rejected'" class="panel nested-panel">
+                <div class="panel__header"><h2>已驳回</h2></div>
+                <p class="muted">驳回原因：{{ submissionDetail.submission.reject_reason || '-' }}。用户可重新提交新的凭证。</p>
+              </section>
+
+              <section class="panel nested-panel technical-section">
+                <details>
+                  <summary><span class="closed-label">▶ 技术标识</span><span class="open-label">▼ 技术标识</span></summary>
+                  <p class="muted technical-note">仅供技术排查，日常对账与查询无需使用。</p>
+                  <div class="technical-list">
+                    <article class="technical-item"><div class="technical-item__head"><span class="technical-item__type">凭证 ID</span><button type="button" class="copy-button" @click="copyIdentifier(submissionDetail.submission.id)">复制</button></div><code class="technical-item__value">{{ submissionDetail.submission.id }}</code></article>
+                    <article class="technical-item"><div class="technical-item__head"><span class="technical-item__type">SHA-256</span><button type="button" class="copy-button" @click="copyIdentifier(submissionDetail.submission.sha256)">复制</button></div><code class="technical-item__value">{{ submissionDetail.submission.sha256 }}</code></article>
+                    <article class="technical-item"><div class="technical-item__head"><span class="technical-item__type">图片格式 / 大小</span></div><code class="technical-item__value">{{ submissionDetail.submission.mime_type }} / {{ submissionDetail.submission.byte_size }} B</code></article>
+                    <article v-if="submissionDetail.submission.linked_payment_id" class="technical-item"><div class="technical-item__head"><span class="technical-item__type">关联付款 ID</span><button type="button" class="copy-button" @click="copyIdentifier(submissionDetail.submission.linked_payment_id)">复制</button></div><code class="technical-item__value">{{ submissionDetail.submission.linked_payment_id }}</code></article>
+                  </div>
+                </details>
+              </section>
+            </template>
+          </section>
+        </template>
+
+        <template v-else-if="routeName === 'admin-qr'">
+          <section class="panel">
+            <div class="panel__header">
+              <div><h2>收款二维码</h2><p class="muted">上传、替换或停用支付宝与微信的静态收款二维码。普通用户登录后可查看当前生效的二维码。</p></div>
+              <div class="header-actions"><button class="secondary-button" type="button" :disabled="paymentQRLoading" @click="loadPaymentQRStatuses">{{ paymentQRLoading ? '加载中' : '刷新' }}</button></div>
+            </div>
+            <div v-if="paymentQRMessage" class="inline-alert">{{ paymentQRMessage }}</div>
+            <div class="qr-admin-grid">
+              <article v-for="method in qrMethods" :key="method" class="qr-card" :class="method === 'alipay' ? 'qr-card--alipay' : 'qr-card--wechat'">
+                <header class="qr-card__head">
+                  <h3>{{ paymentMethodLabel(method) }}收款码</h3>
+                  <span class="status-chip" :data-state="paymentQRStatusByMethod[method].configured ? 'active' : 'disabled'">{{ paymentQRStatusByMethod[method].configured ? '已配置' : '未配置' }}</span>
+                </header>
+                <div class="qr-card__preview">
+                  <img v-if="paymentQRStatusByMethod[method].configured" :src="adminQRImageURL(method)" :alt="paymentMethodLabel(method) + '收款二维码'" class="qr-image" />
+                  <p v-else class="qr-empty muted">未配置该收款二维码</p>
+                </div>
+                <p v-if="paymentQRStatusByMethod[method].configured" class="qr-updated muted">更新时间：{{ formatDate(paymentQRStatusByMethod[method].updated_at) }}</p>
+
+                <div class="qr-card__upload">
+                  <label class="file-picker qr-file-picker">
+                    <span>选择图片（PNG / JPEG / WebP，≤ 5 MiB）</span>
+                    <input :id="`qr-file-${method}`" type="file" accept="image/png,image/jpeg,image/webp" @change="onQRFileChange(method, $event)" />
+                  </label>
+                  <div v-if="qrSelectedFile[method]" class="qr-selected">
+                    <img :src="qrPreviewURL[method]" alt="待上传预览" class="qr-image qr-image--preview" />
+                    <p class="qr-file-meta">{{ qrSelectedFile[method]!.name }} · {{ qrSelectedFile[method]!.type || '未知格式' }} · {{ formatBytes(qrSelectedFile[method]!.size) }}</p>
+                    <div class="qr-actions">
+                      <button class="primary-button" type="button" :disabled="qrUploading[method]" @click="uploadPaymentQRImage(method)">{{ qrUploading[method] ? '上传中' : (paymentQRStatusByMethod[method].configured ? '替换二维码' : '上传二维码') }}</button>
+                      <button class="secondary-button" type="button" :disabled="qrUploading[method]" @click="clearQRSelection(method)">取消</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="paymentQRStatusByMethod[method].configured" class="qr-card__danger">
+                  <button class="secondary-button danger-button" type="button" :disabled="qrDisabling[method]" @click="disablePaymentQRImage(method)">{{ qrDisabling[method] ? '停用中' : '停用二维码' }}</button>
+                </div>
+
+                <!-- Same contract as every other technical area: last thing in
+                     the card, collapsed by default, titled 技术标识, marked
+                     仅供技术排查. 更新管理员/更新时间 moved out of it — those are
+                     ordinary audit facts an operator reads day to day, not
+                     troubleshooting internals. -->
+                <dl v-if="paymentQRStatusByMethod[method].configured" class="qr-meta-list">
+                  <div><dt>格式</dt><dd>{{ paymentQRStatusByMethod[method].mime_type || '-' }}</dd></div>
+                  <div><dt>大小</dt><dd>{{ paymentQRStatusByMethod[method].byte_size ? formatBytes(paymentQRStatusByMethod[method].byte_size ?? 0) : '-' }}</dd></div>
+                  <div><dt>更新管理员</dt><dd>{{ paymentQRStatusByMethod[method].updated_by || '-' }}</dd></div>
+                  <div><dt>更新时间</dt><dd>{{ formatDate(paymentQRStatusByMethod[method].updated_at) }}</dd></div>
+                </dl>
+                <details v-if="paymentQRStatusByMethod[method].configured" class="technical-panel qr-technical">
+                  <summary><span class="closed-label">▶ 技术标识</span><span class="open-label">▼ 技术标识</span></summary>
+                  <p class="muted technical-note">仅供技术排查，日常对账与查询无需使用。</p>
+                  <dl class="qr-tech-list">
+                    <div class="qr-tech-sha"><dt>SHA-256</dt><dd><code>{{ paymentQRStatusByMethod[method].sha256 || '-' }}</code></dd></div>
+                  </dl>
+                </details>
+              </article>
+            </div>
+          </section>
+        </template>
+
         <template v-else-if="routeName === 'admin-users'">
           <section class="panel">
-            <div class="panel__header"><div><h2>用户管理</h2><p class="muted">查看用户订单和付款汇总；本页只读，不提供删除。</p></div><div class="header-actions"><button class="secondary-button" type="button" @click="exportAdminUsersExcel">导出 Excel</button><button class="secondary-button ghost-button" type="button" @click="exportAdminUsersCSV">CSV</button><button class="secondary-button" type="button" :disabled="adminUsersLoading" @click="loadAdminUsers">{{ adminUsersLoading ? '加载中' : '刷新' }}</button></div></div>
-            <form class="order-filters" @submit.prevent="loadAdminUsers">
-              <label><span>CN</span><input v-model="adminUserFilters.cn" placeholder="CN 或显示名" /></label>
-              <label><span>状态</span><select v-model="adminUserFilters.status"><option value="">全部</option><option value="active">正常</option><option value="disabled">已停用</option><option value="merged">已合并</option></select></label>
-              <div class="filter-actions"><button class="primary-button" type="submit" :disabled="adminUsersLoading">查询</button><button class="secondary-button" type="button" @click="resetAdminUserFilters">重置</button></div>
-            </form>
+            <!-- Row 1: title only. -->
+            <div class="page-heading">
+              <h2>用户与账号</h2>
+              <p>查看用户订单与付款汇总、查询码与恢复邮箱状态。筛选入口在每列表头的漏斗图标中。</p>
+              <p class="muted">本页只读，不提供删除。</p>
+            </div>
+
+            <!-- Row 2: actions. -->
+            <div class="page-actions">
+              <button class="secondary-button" type="button" @click="exportAdminUsersExcel">导出 Excel</button>
+              <button class="secondary-button ghost-button" type="button" @click="exportAdminUsersCSV">CSV</button>
+              <button class="secondary-button" type="button" :disabled="adminUsersLoading" @click="loadAdminUsers">{{ adminUsersLoading ? '加载中' : '刷新' }}</button>
+            </div>
+
+            <!-- Row 3: result scope and the single global reset. -->
+            <div class="page-resultbar">
+              <span class="filter-result-count">结果：共 {{ adminUserTotal }} 位用户</span>
+              <span class="muted">第 {{ adminUserPage }} / {{ Math.max(adminUserTotalPages, 1) }} 页</span>
+              <label class="page-size-control">
+                <span>每页</span>
+                <select v-model.number="adminUserPageSize" :disabled="adminUsersLoading" @change="changeAdminUserPageSize">
+                  <option :value="25">25 条</option>
+                  <option :value="50">50 条</option>
+                  <option :value="100">100 条</option>
+                  <option :value="200">200 条</option>
+                </select>
+              </label>
+              <button class="secondary-button ghost-button" type="button" :disabled="adminUserActiveFilterCount === 0" @click="resetAdminUserFilters">清空全部筛选<template v-if="adminUserActiveFilterCount > 0">（{{ adminUserActiveFilterCount }}）</template></button>
+            </div>
+
             <div v-if="adminUsersMessage" class="inline-alert">{{ adminUsersMessage }}</div>
+
+            <!-- The tiles aggregate over the whole filtered set (computed in
+                 SQL, not summed from the page), so they agree with the result
+                 count above rather than describing only the visible rows. -->
             <div v-if="adminUsersSummary" class="summary-grid compact-summary">
               <article class="metric-tile"><span>用户总数</span><strong>{{ adminUsersSummary.user_count }}</strong></article>
               <article class="metric-tile"><span>有订单用户数</span><strong>{{ adminUsersSummary.users_with_orders }}</strong></article>
@@ -2738,7 +4121,53 @@ onUnmounted(() => {
               <article class="metric-tile"><span>有效已付总额</span><strong>{{ formatMoney(adminUsersSummary.paid_amount) }}</strong></article>
               <article class="metric-tile"><span>剩余待付总额</span><strong>{{ formatMoney(adminUsersSummary.remaining_amount) }}</strong></article>
             </div>
-            <div class="table-scroll history-table"><table><thead><tr><th>CN</th><th>查询权限</th><th>查询码</th><th>创建时间</th><th>最后登录</th><th>订单数</th><th>订单总金额</th><th>已付金额</th><th>剩余金额</th><th></th></tr></thead><tbody><tr v-if="!adminUsersLoading && adminUsers.length === 0"><td colspan="10">暂无用户。</td></tr><tr v-for="user in adminUsers" :key="user.id"><td><strong>{{ user.cn_code }}</strong><small>{{ user.display_name || '-' }}</small></td><td><span class="status-chip" :data-state="user.status">{{ userStatusLabel(user.status) }}</span></td><td>{{ user.has_query_code ? '已设置' : '未设置' }}<small v-if="user.query_code_updated_at">{{ formatDate(user.query_code_updated_at) }}</small></td><td>{{ formatDate(user.created_at) }}</td><td>{{ user.last_login_at ? formatDate(user.last_login_at) : '-' }}</td><td>{{ user.order_count }}</td><td>{{ formatMoney(user.total_amount) }}</td><td>{{ formatMoney(user.paid_amount) }}</td><td :class="{ danger: user.remaining_amount > 0 }">{{ formatMoney(user.remaining_amount) }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/users/' + user.id)">详情</button></td></tr></tbody></table></div>
+
+            <div class="table-scroll history-table user-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th><ColumnValueFilter v-model="adminUserFilterState.values.cn" label="CN" column="cn" :load-facets="loadAdminUserFacets" @update:model-value="applyAdminUserFilters" /></th>
+                    <th><ColumnValueFilter v-model="adminUserFilterState.values.name" label="用户名称" column="name" :load-facets="loadAdminUserFacets" @update:model-value="applyAdminUserFilters" /></th>
+                    <th><ColumnValueFilter v-model="adminUserFilterState.values.status" label="查询权限" column="status" :load-facets="loadAdminUserFacets" @update:model-value="applyAdminUserFilters" /></th>
+                    <th><ColumnValueFilter v-model="adminUserFilterState.values.has_query_code" label="查询码" column="has_query_code" :load-facets="loadAdminUserFacets" @update:model-value="applyAdminUserFilters" /></th>
+                    <th><ColumnValueFilter v-model="adminUserFilterState.values.has_recovery_email" label="恢复邮箱" column="has_recovery_email" :load-facets="loadAdminUserFacets" @update:model-value="applyAdminUserFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="adminUserFilterState.ranges.order_count" label="订单数量" step="1" @update:model-value="applyAdminUserFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="adminUserFilterState.ranges.total" label="总金额" @update:model-value="applyAdminUserFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="adminUserFilterState.ranges.paid" label="已付金额" @update:model-value="applyAdminUserFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="adminUserFilterState.ranges.unpaid" label="未付金额" @update:model-value="applyAdminUserFilters" /></th>
+                    <th><ColumnDateFilter v-model="adminUserFilterState.dates.last_login" label="最后登录时间" allow-blank blank-label="从未登录" @update:model-value="applyAdminUserFilters" /></th>
+                    <th><ColumnDateFilter v-model="adminUserFilterState.dates.created" label="创建时间" @update:model-value="applyAdminUserFilters" /></th>
+                    <th><span class="column-header"><span class="column-header__label">查看详情</span></span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-if="adminUsersLoading"><td colspan="12">加载中…</td></tr>
+                  <tr v-else-if="adminUsers.length === 0"><td colspan="12">没有符合当前筛选条件的用户。</td></tr>
+                  <!-- user.id keys the row and drives the detail link; it is
+                       never rendered as a column. -->
+                  <tr v-for="user in adminUsers" v-else :key="user.id">
+                    <td><span class="cell-wrap"><strong>{{ user.cn_code }}</strong></span></td>
+                    <td><span class="cell-wrap">{{ user.display_name || '-' }}</span></td>
+                    <td><span class="status-chip" :data-state="user.status">{{ userStatusLabel(user.status) }}</span></td>
+                    <td>{{ user.has_query_code ? '已设置' : '未设置' }}<small v-if="user.query_code_updated_at">{{ formatDate(user.query_code_updated_at) }}</small></td>
+                    <td>{{ user.has_recovery_email ? '已绑定' : '未绑定' }}</td>
+                    <td class="numeric-column">{{ user.order_count }}</td>
+                    <td class="numeric-column">{{ formatMoney(user.total_amount) }}</td>
+                    <td class="numeric-column">{{ formatMoney(user.paid_amount) }}</td>
+                    <td class="numeric-column" :class="{ danger: user.remaining_amount > 0 }">{{ formatMoney(user.remaining_amount) }}</td>
+                    <td>{{ user.last_login_at ? formatDate(user.last_login_at) : '从未登录' }}</td>
+                    <td>{{ formatDate(user.created_at) }}</td>
+                    <td><button class="secondary-button" type="button" @click="navigate('/admin/users/' + user.id)">详情</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="adminUserTotalPages > 1" class="pagination">
+              <button class="secondary-button" type="button" :disabled="adminUsersLoading || adminUserPage <= 1" @click="goToAdminUserPage(adminUserPage - 1)">上一页</button>
+              <span class="muted">第 {{ adminUserPage }} / {{ adminUserTotalPages }} 页</span>
+              <button class="secondary-button" type="button" :disabled="adminUsersLoading || adminUserPage >= adminUserTotalPages" @click="goToAdminUserPage(adminUserPage + 1)">下一页</button>
+            </div>
           </section>
         </template>
 
@@ -2845,7 +4274,8 @@ onUnmounted(() => {
               </section>
               <section v-if="adminUserTechnicalIdentifiers(adminUserDetail).length > 0" class="panel nested-panel technical-section">
                 <details>
-                  <summary><span class="closed-label">▶ 查看技术标识</span><span class="open-label">▼ 收起技术标识</span></summary>
+                  <summary><span class="closed-label">▶ 技术标识</span><span class="open-label">▼ 技术标识</span></summary>
+                  <p class="muted technical-note">仅供技术排查，日常对账与查询无需使用。</p>
                   <div class="technical-list"><article v-for="identifier in mergeTechnicalIdentifiers(adminUserTechnicalIdentifiers(adminUserDetail))" :key="identifier.type + '-' + identifier.value" class="technical-item"><div class="technical-item__head"><span class="technical-item__type">{{ identifier.type }}</span><span class="technical-item__context">{{ identifier.context }}</span><button type="button" class="copy-button" @click="copyIdentifier(identifier.value)">复制</button></div><code class="technical-item__value">{{ identifier.value }}</code></article></div>
                 </details>
               </section>
@@ -2855,72 +4285,92 @@ onUnmounted(() => {
 
         <template v-else-if="routeName === 'admin-orders'">
           <section class="panel">
-            <div class="panel__header">
-              <div>
-                <h2>订单只读查询</h2>
-                <p class="muted">查看 Excel 确认导入后的正式订单数据；本页不允许修改、删除或撤销。</p>
-              </div>
-              <div class="header-actions"><button class="secondary-button" type="button" @click="exportOrderItemsExcel">导出明细 Excel</button><button class="secondary-button ghost-button" type="button" @click="exportOrderItemsCSV">CSV</button><button class="secondary-button" type="button" :disabled="ordersLoading" @click="loadOrders">刷新</button></div>
+            <!-- Row 1: the title stands alone. Keeping the export buttons off
+                 this row is what stops the heading competing with a cluster of
+                 controls. -->
+            <div class="page-heading">
+              <h2>订单只读查询</h2>
+              <p>每行对应一项谷子明细，同一 CN 或同一订单可出现多行。筛选只保留符合条件的明细，不会把其他谷子合并显示。</p>
+              <p class="muted">本页只读，不允许修改、删除或撤销。筛选入口在每列表头的漏斗图标中。</p>
             </div>
 
-            <form class="order-filters" @submit.prevent="loadOrders">
-              <label :class="{ 'filter-field--active': orderFilters.cn }"><span>CN{{ orderFilters.cn ? ' ●' : '' }}</span><span class="filter-field-row"><input v-model="orderFilters.cn" placeholder="CN 或显示名，支持部分匹配" /><button v-if="orderFilters.cn" type="button" class="filter-clear-button" title="清空此项筛选" @click="orderFilters.cn = ''">×</button></span></label>
-              <label :class="{ 'filter-field--active': orderFilters.project }"><span>项目/批次{{ orderFilters.project ? ' ●' : '' }}</span><span class="filter-field-row"><input v-model="orderFilters.project" placeholder="项目名称或编码" /><button v-if="orderFilters.project" type="button" class="filter-clear-button" title="清空此项筛选" @click="orderFilters.project = ''">×</button></span></label>
-              <label :class="{ 'filter-field--active': orderFilters.item }"><span>谷子名称{{ orderFilters.item ? ' ●' : '' }}</span><span class="filter-field-row"><input v-model="orderFilters.item" placeholder="商品名称，支持部分匹配" /><button v-if="orderFilters.item" type="button" class="filter-clear-button" title="清空此项筛选" @click="orderFilters.item = ''">×</button></span></label>
-              <label :class="{ 'filter-field--active': orderFilters.series }"><span>谷子系列{{ orderFilters.series ? ' ●' : '' }}</span><span class="filter-field-row"><input v-model="orderFilters.series" placeholder="独立筛选，不与种类/角色合并" /><button v-if="orderFilters.series" type="button" class="filter-clear-button" title="清空此项筛选" @click="orderFilters.series = ''">×</button></span></label>
-              <label :class="{ 'filter-field--active': orderFilters.category }"><span>谷子种类{{ orderFilters.category ? ' ●' : '' }}</span><span class="filter-field-row"><input v-model="orderFilters.category" placeholder="独立筛选，不与系列/角色合并" /><button v-if="orderFilters.category" type="button" class="filter-clear-button" title="清空此项筛选" @click="orderFilters.category = ''">×</button></span></label>
-              <label :class="{ 'filter-field--active': orderFilters.role }"><span>谷子角色{{ orderFilters.role ? ' ●' : '' }}</span><span class="filter-field-row"><input v-model="orderFilters.role" placeholder="独立筛选，不与系列/种类合并" /><button v-if="orderFilters.role" type="button" class="filter-clear-button" title="清空此项筛选" @click="orderFilters.role = ''">×</button></span></label>
-              <label :class="{ 'filter-field--active': orderFilters.importBatchID }"><span>导入批次 ID{{ orderFilters.importBatchID ? ' ●' : '' }}</span><input v-model="orderFilters.importBatchID" placeholder="import_batch_id" /></label>
-              <label>
-                <span>订单状态</span>
-                <select v-model="orderFilters.status">
-                  <option value="">全部</option>
-                  <option value="draft">草稿</option>
-                  <option value="submitted">已提交</option>
-                  <option value="partially_paid">部分付款</option>
-                  <option value="paid">已付款</option>
-                  <option value="cancelled">已取消</option>
+            <!-- Row 2: actions. -->
+            <div class="page-actions">
+              <button class="secondary-button" type="button" @click="exportOrderItemsExcel">导出明细 Excel</button>
+              <button class="secondary-button ghost-button" type="button" @click="exportOrderItemsCSV">CSV</button>
+              <button class="secondary-button" type="button" :disabled="ordersLoading" @click="loadOrders">刷新</button>
+            </div>
+
+            <!-- Row 3: result scope and the single global reset. -->
+            <div class="page-resultbar">
+              <span class="filter-result-count">结果：共 {{ orderTotal }} 项谷子明细</span>
+              <span class="muted">第 {{ orderPage }} / {{ Math.max(orderTotalPages, 1) }} 页</span>
+              <label class="page-size-control">
+                <span>每页</span>
+                <select v-model.number="orderPageSize" :disabled="ordersLoading" @change="changeOrderPageSize">
+                  <option :value="25">25 条</option>
+                  <option :value="50">50 条</option>
+                  <option :value="100">100 条</option>
+                  <option :value="200">200 条</option>
                 </select>
               </label>
-              <label><span>创建时间起</span><input v-model="orderFilters.createdFrom" type="date" /></label>
-              <label><span>创建时间止</span><input v-model="orderFilters.createdTo" type="date" /></label>
-              <div class="filter-actions">
-                <button class="primary-button" type="submit" :disabled="ordersLoading">{{ ordersLoading ? '查询中' : '查询' }}</button>
-                <button class="secondary-button" type="button" @click="resetOrderFilters">重置</button>
-              </div>
-            </form>
+              <button class="secondary-button ghost-button" type="button" :disabled="orderActiveFilterCount === 0" @click="resetOrderFilters">清空全部筛选<template v-if="orderActiveFilterCount > 0">（{{ orderActiveFilterCount }}）</template></button>
+            </div>
 
             <div v-if="ordersMessage" class="inline-alert">{{ ordersMessage }}</div>
-            <div class="table-scroll history-table">
+            <div class="table-scroll history-table order-table">
               <table>
                 <thead>
                   <tr>
-                    <th>CN</th>
-                    <th>项目</th>
-                    <th>状态</th>
-                    <th>种类数</th>
-                    <th>商品总数</th>
-                    <th>订单总金额</th>
-
-                    <th>创建时间</th>
-                    <th></th>
+                    <!-- Exactly 13 columns. 用户名称 / 项目名称 / 谷子种类 were
+                         removed outright rather than hidden: no empty <th>, no
+                         placeholder cell, no CSS-hidden column. 单价 and 操作
+                         carry no funnel. -->
+                    <th><ColumnValueFilter v-model="orderFilterState.values.cn" label="CN" column="cn" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnValueFilter v-model="orderFilterState.values.item" label="谷子名称" column="item" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnValueFilter v-model="orderFilterState.values.series" label="谷子系列" column="series" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnValueFilter v-model="orderFilterState.values.role" label="谷子角色" column="role" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="orderFilterState.ranges.quantity" label="数量" step="1" @update:model-value="applyOrderFilters" /></th>
+                    <th class="numeric-column"><span class="column-header"><span class="column-header__label">单价</span></span></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="orderFilterState.ranges.amount" label="明细总金额" @update:model-value="applyOrderFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="orderFilterState.ranges.paid" label="已付金额" @update:model-value="applyOrderFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="orderFilterState.ranges.unpaid" label="未付金额" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnValueFilter v-model="orderFilterState.values.status" label="订单状态" column="status" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnValueFilter v-model="orderFilterState.values.payment_status" label="付款状态" column="payment_status" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnDateFilter v-model="orderFilterState.dates.created" label="创建时间" @update:model-value="applyOrderFilters" /></th>
+                    <th><span class="column-header"><span class="column-header__label">查看详情</span></span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-if="!ordersLoading && orderItems.length === 0"><td colspan="8">暂无订单数据。</td></tr>
-                  <tr v-for="order in orderItems" :key="order.id">
-                    <td><strong>{{ order.cn_code }}</strong><small>{{ order.display_name || '-' }}</small></td>
-                    <td><span class="cell-clip" :title="order.project_name">{{ order.project_name }}</span><small>{{ order.order_no }}</small></td>
-                    <td><span class="status-chip" :data-state="order.status">{{ statusLabel(order.status) }}</span></td>
-                    <td>{{ order.item_type_count }}</td>
-                    <td>{{ order.total_quantity }}</td>
-                    <td>{{ formatMoney(order.total_amount) }}</td>
-
-                    <td>{{ formatDate(order.created_at) }}</td>
-                    <td><button class="secondary-button" type="button" @click="navigate(`/admin/orders/${order.id}`)">详情</button></td>
+                  <tr v-if="ordersLoading"><td colspan="13">加载中…</td></tr>
+                  <tr v-else-if="orderItems.length === 0"><td colspan="13">没有符合当前筛选条件的谷子明细。</td></tr>
+                  <!-- One row per goods line. Rows are never merged with rowspan:
+                       the same CN legitimately repeats, and merging would break
+                       filtering, paging and the mobile layout. Consecutive rows
+                       of one order are only tinted, never combined. -->
+                  <tr v-for="(item, index) in orderItems" v-else :key="item.item_id" :class="{ 'order-row--alt': isAlternateOrderRow(index) }">
+                    <td><strong>{{ item.cn_code }}</strong></td>
+                    <td><span class="cell-wrap">{{ item.item_name }}</span></td>
+                    <td><span class="cell-wrap">{{ item.series_code || '-' }}</span></td>
+                    <td><span class="cell-wrap">{{ item.character_name || '-' }}</span></td>
+                    <td class="numeric-column">{{ item.quantity }}</td>
+                    <td class="numeric-column">{{ formatMoney(item.unit_price) }}</td>
+                    <td class="numeric-column">{{ formatMoney(item.total_amount) }}</td>
+                    <td class="numeric-column">{{ formatMoney(item.paid_amount) }}</td>
+                    <td class="numeric-column" :class="{ danger: item.unpaid_amount > 0 }">{{ formatMoney(item.unpaid_amount) }}</td>
+                    <td><span class="status-chip" :data-state="item.status">{{ statusLabel(item.status) }}</span></td>
+                    <td><span class="status-chip" :data-state="item.payment_status">{{ queryPaymentStatusLabel(item.payment_status) }}</span></td>
+                    <td>{{ formatDate(item.created_at) }}</td>
+                    <td><button class="secondary-button" type="button" @click="navigate(`/admin/orders/${item.order_id}`)">详情</button></td>
                   </tr>
                 </tbody>
               </table>
+            </div>
+
+            <div v-if="orderTotalPages > 1" class="pagination">
+              <button class="secondary-button" type="button" :disabled="ordersLoading || orderPage <= 1" @click="goToOrderPage(orderPage - 1)">上一页</button>
+              <span class="muted">第 {{ orderPage }} / {{ orderTotalPages }} 页</span>
+              <button class="secondary-button" type="button" :disabled="ordersLoading || orderPage >= orderTotalPages" @click="goToOrderPage(orderPage + 1)">下一页</button>
             </div>
           </section>
         </template>
@@ -2986,9 +4436,13 @@ onUnmounted(() => {
                   </table>
                 </div>
               </section>
+              <!-- Technical identifiers live here and nowhere else: last
+                   section of the detail page, collapsed by default. The order
+                   list deliberately carries none of them. -->
               <section v-if="orderDetailTechnicalIdentifiers(orderDetail).length > 0" class="panel nested-panel technical-section">
                 <details>
-                  <summary><span class="closed-label">▶ 查看技术标识</span><span class="open-label">▼ 收起技术标识</span></summary>
+                  <summary><span class="closed-label">▶ 技术标识</span><span class="open-label">▼ 技术标识</span></summary>
+                  <p class="muted technical-note">仅供技术排查，日常对账与查询无需使用。</p>
                   <div class="technical-list"><article v-for="identifier in mergeTechnicalIdentifiers(orderDetailTechnicalIdentifiers(orderDetail))" :key="identifier.type + '-' + identifier.value" class="technical-item"><div class="technical-item__head"><span class="technical-item__type">{{ identifier.type }}</span><span class="technical-item__context">{{ identifier.context }}</span><button type="button" class="copy-button" @click="copyIdentifier(identifier.value)">复制</button></div><code class="technical-item__value">{{ identifier.value }}</code></article></div>
                 </details>
               </section>
@@ -2997,15 +4451,78 @@ onUnmounted(() => {
         </template>
         <template v-else-if="routeName === 'admin-import-history'">
           <section class="panel">
-            <div class="panel__header"><div><h2>导入历史</h2><p class="muted">可查看导入记录，并按导入批次安全软撤销。</p></div><button class="secondary-button" type="button" :disabled="historyLoading" @click="loadHistory">刷新</button></div>
+            <!-- Row 1: title only. -->
+            <div class="page-heading">
+              <h2>导入历史</h2>
+              <p>查看导入记录，可进入详情按导入批次安全软撤销。筛选入口在每列表头的漏斗图标中。</p>
+              <p class="muted">技术标识（导入记录 ID、文件 SHA）仅在导入详情页底部的技术标识区显示。</p>
+            </div>
+
+            <!-- Row 2: actions (no CSV/XLSX export here; refresh only). -->
+            <div class="page-actions">
+              <button class="secondary-button" type="button" :disabled="historyLoading" @click="loadHistory">{{ historyLoading ? '加载中' : '刷新' }}</button>
+            </div>
+
+            <!-- Row 3: result scope and the single global reset. -->
+            <div class="page-resultbar">
+              <span class="filter-result-count">结果：共 {{ importTotal }} 条导入记录</span>
+              <span class="muted">第 {{ importPage }} / {{ Math.max(importTotalPages, 1) }} 页</span>
+              <label class="page-size-control">
+                <span>每页</span>
+                <select v-model.number="importPageSize" :disabled="historyLoading" @change="changeImportPageSize">
+                  <option :value="25">25 条</option>
+                  <option :value="50">50 条</option>
+                  <option :value="100">100 条</option>
+                  <option :value="200">200 条</option>
+                </select>
+              </label>
+              <button class="secondary-button ghost-button" type="button" :disabled="importActiveFilterCount === 0" @click="resetImportFilters">清空全部筛选<template v-if="importActiveFilterCount > 0">（{{ importActiveFilterCount }}）</template></button>
+            </div>
+
             <div v-if="historyMessage" class="inline-alert">{{ historyMessage }}</div>
-            <div class="table-scroll history-table"><table><thead><tr><th>文件</th><th>状态</th><th>上传</th><th>确认</th><th>工作表/批次</th><th>问题</th><th>写入结果</th><th>总金额</th><th></th></tr></thead><tbody><tr v-if="!historyLoading && importHistory.length === 0"><td colspan="9">暂无导入记录。</td></tr><tr v-for="item in importHistory" :key="item.id"><td><strong>{{ item.original_filename }}</strong><small>{{ formatBytes(item.file_size) }}</small></td><td><span class="status-chip" :data-state="item.status">{{ statusLabel(item.status) }}</span><small v-if="item.revoked_at">{{ formatDate(item.revoked_at) }}</small></td><td>{{ item.uploaded_by || '-' }}<small>{{ formatDate(item.created_at) }}</small></td><td>{{ item.confirmed_by || '-' }}<small>{{ formatDate(item.confirmed_at) }}</small></td><td>{{ item.sheet_count }} / {{ item.batch_count }}</td><td>E {{ item.error_count }} / W {{ item.warning_count }} / N {{ item.notice_count }}</td><td>{{ item.confirm_result ? `${item.confirm_result.order_count} 单 / ${item.confirm_result.order_item_count} 明细` : '-' }}<small v-if="item.revoke_result">已撤销 {{ item.revoke_result.order_item_count }} 明细</small></td><td>{{ formatMoney(historyTotalAmount(item)) }}</td><td><button class="secondary-button" type="button" @click="navigate(`/admin/imports/${item.id}`)">详情</button></td></tr></tbody></table></div>
-            <section v-if="importHistoryTechnicalIdentifiers(importHistory).length > 0" class="panel nested-panel technical-section">
-              <details>
-                <summary><span class="closed-label">▶ 查看技术标识</span><span class="open-label">▼ 收起技术标识</span></summary>
-                <div class="technical-list"><article v-for="identifier in mergeTechnicalIdentifiers(importHistoryTechnicalIdentifiers(importHistory))" :key="identifier.type + '-' + identifier.value" class="technical-item"><div class="technical-item__head"><span class="technical-item__type">{{ identifier.type }}</span><span class="technical-item__context">{{ identifier.context }}</span><button type="button" class="copy-button" @click="copyIdentifier(identifier.value)">复制</button></div><code class="technical-item__value">{{ identifier.value }}</code></article></div>
-              </details>
-            </section>
+
+            <div class="table-scroll history-table import-history-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th><ColumnValueFilter v-model="importFilterState.values.filename" label="文件名" column="filename" :load-facets="loadImportFacets" @update:model-value="applyImportFilters" /></th>
+                    <th><ColumnValueFilter v-model="importFilterState.values.status" label="状态" column="status" :load-facets="loadImportFacets" @update:model-value="applyImportFilters" /></th>
+                    <th><ColumnValueFilter v-model="importFilterState.values.uploaded_by" label="上传管理员" column="uploaded_by" :load-facets="loadImportFacets" @update:model-value="applyImportFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="importFilterState.ranges.sheet" label="工作表数" step="1" @update:model-value="applyImportFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="importFilterState.ranges.issue" label="问题数" step="1" @update:model-value="applyImportFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="importFilterState.ranges.written" label="写入明细数" step="1" @update:model-value="applyImportFilters" /></th>
+                    <th class="numeric-column"><ColumnRangeFilter v-model="importFilterState.ranges.amount" label="总金额" @update:model-value="applyImportFilters" /></th>
+                    <th><ColumnDateFilter v-model="importFilterState.dates.created" label="上传时间" @update:model-value="applyImportFilters" /></th>
+                    <th><ColumnDateFilter v-model="importFilterState.dates.confirmed" label="确认时间" allow-blank blank-label="未确认" @update:model-value="applyImportFilters" /></th>
+                    <th><span class="column-header"><span class="column-header__label">查看详情</span></span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-if="historyLoading"><td colspan="10">加载中…</td></tr>
+                  <tr v-else-if="importHistory.length === 0"><td colspan="10">没有符合当前筛选条件的导入记录。</td></tr>
+                  <!-- item.id keys the row and drives the detail link; the main
+                       table renders no technical identifiers (SHA / batch id). -->
+                  <tr v-for="item in importHistory" v-else :key="item.id">
+                    <td><span class="cell-wrap"><strong>{{ item.original_filename }}</strong></span><small>{{ formatBytes(item.file_size) }}</small></td>
+                    <td><span class="status-chip" :data-state="item.status">{{ statusLabel(item.status) }}</span></td>
+                    <td><span class="cell-wrap">{{ item.uploaded_by || '-' }}</span></td>
+                    <td class="numeric-column">{{ item.sheet_count }}</td>
+                    <td class="numeric-column">{{ item.error_count + item.warning_count + item.notice_count }}</td>
+                    <td class="numeric-column">{{ item.confirm_result ? item.confirm_result.order_item_count : '-' }}</td>
+                    <td class="numeric-column">{{ formatMoney(historyTotalAmount(item)) }}</td>
+                    <td>{{ formatDate(item.created_at) }}</td>
+                    <td>{{ item.confirmed_at ? formatDate(item.confirmed_at) : '未确认' }}</td>
+                    <td><button class="secondary-button" type="button" @click="navigate(`/admin/imports/${item.id}`)">详情</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="importTotalPages > 1" class="pagination">
+              <button class="secondary-button" type="button" :disabled="historyLoading || importPage <= 1" @click="goToImportPage(importPage - 1)">上一页</button>
+              <span class="muted">第 {{ importPage }} / {{ importTotalPages }} 页</span>
+              <button class="secondary-button" type="button" :disabled="historyLoading || importPage >= importTotalPages" @click="goToImportPage(importPage + 1)">下一页</button>
+            </div>
           </section>
         </template>
 
@@ -3052,7 +4569,8 @@ onUnmounted(() => {
               </section>
               <section v-if="importDetailTechnicalIdentifiers(importDetail).length > 0" class="panel nested-panel technical-section">
                 <details>
-                  <summary><span class="closed-label">▶ 查看技术标识</span><span class="open-label">▼ 收起技术标识</span></summary>
+                  <summary><span class="closed-label">▶ 技术标识</span><span class="open-label">▼ 技术标识</span></summary>
+                  <p class="muted technical-note">仅供技术排查，日常对账与查询无需使用。</p>
                   <div class="technical-list"><article v-for="identifier in mergeTechnicalIdentifiers(importDetailTechnicalIdentifiers(importDetail))" :key="identifier.type + '-' + identifier.value" class="technical-item"><div class="technical-item__head"><span class="technical-item__type">{{ identifier.type }}</span><span class="technical-item__context">{{ identifier.context }}</span><button type="button" class="copy-button" @click="copyIdentifier(identifier.value)">复制</button></div><code class="technical-item__value">{{ identifier.value }}</code></article></div>
                 </details>
               </section>
@@ -3063,75 +4581,218 @@ onUnmounted(() => {
     </main>
 
     <main v-else class="workspace">
-      <template v-if="routeName === 'query'">
-        <section class="panel query-panel">
-          <div class="panel__header">
-            <div>
-              <h2>CN 查询</h2>
-              <p class="muted">输入 CN 和查询码后，只能查看当前 CN 自己的订单明细。</p>
-            </div>
-            <button v-if="queryUser" class="secondary-button" type="button" :disabled="queryLoading" @click="logoutQuery">退出查询</button>
-          </div>
-          <template v-if="!queryUser && queryView === 'login'">
-            <form class="login-form query-login" @submit.prevent="loginQuery">
+      <template v-if="routeName === 'query' && !queryUser">
+        <div class="entry-page">
+          <header class="entry-brand">
+            <button class="entry-back" type="button" @click="navigate('/')">← 返回系统主页</button>
+            <h1>PJSK 谷子系统</h1>
+            <p class="entry-subtitle">用户服务入口</p>
+          </header>
+
+          <section v-if="queryView === 'login'" class="entry-card">
+            <h2 class="entry-card__title">用户登录</h2>
+            <form class="entry-form" @submit.prevent="loginQuery">
               <label><span>CN</span><input v-model="queryCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
               <label><span>查询码</span><input v-model="queryCode" type="password" autocomplete="current-password" required placeholder="管理员提供的查询码" /></label>
-              <button class="primary-button" type="submit" :disabled="queryLoading">{{ queryLoading ? '查询中' : '查询订单' }}</button>
+              <button class="primary-button entry-submit" type="submit" :disabled="queryLoading">{{ queryLoading ? '查询中' : '查询订单' }}</button>
             </form>
-            <div class="query-entry-list">
-              <p v-if="config.emailDeliveryEnabled" class="query-bind-entry"><button class="link-button" type="button" @click="openRecoveryView">忘记查询码</button><span class="muted">（通过已验证找回邮箱重置）</span></p>
-              <p v-else class="query-bind-entry muted">邮箱找回功能暂不可用（邮件服务未配置）。</p>
-              <p class="query-bind-entry"><button class="link-button" type="button" @click="openBindView">首次设置查询码</button><span class="muted">（仅限尚未设置查询码，需要管理员提供一次性绑定码）</span></p>
+            <div class="entry-aux">
+              <p v-if="config.emailDeliveryEnabled"><button class="link-button" type="button" @click="openRecoveryView">忘记查询码</button><span class="muted">通过已验证找回邮箱重置</span></p>
+              <p v-else class="muted">邮箱找回功能暂不可用（邮件服务未配置）。</p>
+              <p><button class="link-button" type="button" @click="openBindView">首次设置查询码</button><span class="muted">尚未设置查询码，需管理员提供一次性绑定码</span></p>
             </div>
-          </template>
-          <template v-else-if="!queryUser && queryView === 'bind'">
-            <form class="login-form query-login query-bind-form" @submit.prevent="submitBindCode">
+            <div v-if="queryMessage" class="inline-alert">{{ queryMessage }}</div>
+          </section>
+
+          <section v-else-if="queryView === 'bind'" class="entry-card">
+            <h2 class="entry-card__title">首次设置查询码</h2>
+            <form class="entry-form" @submit.prevent="submitBindCode">
               <label><span>CN</span><input v-model="bindCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
               <label><span>一次性绑定码</span><input v-model="bindTokenInput" type="password" autocomplete="one-time-code" required placeholder="管理员提供的绑定码" /></label>
               <label><span>新查询码</span><input v-model="bindNewCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="6-32 位" /></label>
               <label><span>确认新查询码</span><input v-model="bindConfirmCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="再次输入新查询码" /></label>
-              <button class="primary-button" type="submit" :disabled="bindSubmitting">{{ bindSubmitting ? '设置中' : '设置查询码' }}</button>
-              <button class="secondary-button" type="button" :disabled="bindSubmitting" @click="closeBindView">返回登录</button>
+              <button class="primary-button entry-submit" type="submit" :disabled="bindSubmitting">{{ bindSubmitting ? '设置中' : '设置查询码' }}</button>
+              <button class="secondary-button entry-submit" type="button" :disabled="bindSubmitting" @click="closeBindView">返回登录</button>
             </form>
             <div v-if="bindMessage" class="inline-alert">{{ bindMessage }}</div>
-          </template>
-          <template v-else-if="!queryUser && queryView === 'recovery'">
-            <section class="query-recovery-flow" aria-labelledby="query-recovery-title">
-              <div class="query-recovery-flow__header">
-                <div><h3 id="query-recovery-title">忘记查询码</h3><p class="muted">通过管理员登记且已经验证的找回邮箱重置查询码。</p></div>
-                <span class="status-chip" data-state="active">步骤 {{ anonymousRecoveryStep === 'request' ? '1' : (anonymousRecoveryStep === 'verify' ? '2' : '3') }} / 3</span>
-              </div>
-              <ol class="query-recovery-steps" aria-label="查询码找回步骤">
-                <li :data-active="anonymousRecoveryStep === 'request'">输入 CN</li>
-                <li :data-active="anonymousRecoveryStep === 'verify'">邮箱验证</li>
-                <li :data-active="anonymousRecoveryStep === 'reset'">设置新查询码</li>
-              </ol>
-              <form v-if="anonymousRecoveryStep === 'request'" class="login-form query-login query-recovery-form" @submit.prevent="requestAnonymousQueryRecovery">
-                <label><span>CN</span><input v-model="anonymousRecoveryCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
-                <p class="muted query-recovery-notice">无论账号是否存在或是否符合找回条件，页面都会显示相同提示，不会展示邮箱或账户状态。</p>
-                <button class="primary-button" type="submit" :disabled="anonymousRecoveryLoading">{{ anonymousRecoveryLoading ? '请求中' : '发送邮箱验证码' }}</button>
-              </form>
-              <form v-else-if="anonymousRecoveryStep === 'verify'" class="login-form query-login query-recovery-form" @submit.prevent="verifyAnonymousQueryRecovery">
-                <label><span>CN</span><input :value="anonymousRecoveryCN" autocomplete="username" disabled /></label>
-                <label><span>邮箱验证码</span><input v-model="anonymousRecoveryCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required placeholder="输入 6 位数字验证码" /></label>
-                <p class="muted query-recovery-notice">验证码有效期为 10 分钟；页面不会显示邮箱地址。</p>
-                <button class="primary-button" type="submit" :disabled="anonymousRecoveryLoading || anonymousRecoveryCode.trim().length !== 6">{{ anonymousRecoveryLoading ? '验证中' : '确认邮箱验证码' }}</button>
-              </form>
-              <form v-else class="login-form query-login query-recovery-form" @submit.prevent="submitRecoveredQueryCode">
-                <label><span>新查询码</span><input v-model="anonymousRecoveryNewCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="6-32 位" /></label>
-                <label><span>确认新查询码</span><input v-model="anonymousRecoveryConfirmCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="再次输入新查询码" /></label>
-                <p v-if="anonymousRecoveryTokenExpiresAt" class="muted query-recovery-notice">本次重置授权将在 {{ formatDate(anonymousRecoveryTokenExpiresAt) }} 过期；刷新页面后需要重新开始。</p>
-                <button class="primary-button" type="submit" :disabled="anonymousRecoveryLoading">{{ anonymousRecoveryLoading ? '重置中' : '重置查询码' }}</button>
-              </form>
-              <button class="secondary-button query-recovery-back" type="button" :disabled="anonymousRecoveryLoading" @click="closeRecoveryView">返回查询登录</button>
-            </section>
-            <div v-if="anonymousRecoveryMessage" class="inline-alert">{{ anonymousRecoveryMessage }}</div>
-          </template>
-          <div v-if="queryMessage" class="inline-alert">{{ queryMessage }}</div>
-        </section>
+          </section>
 
-        <template v-if="queryOrders">
-          <section class="panel query-security-panel">
+          <section v-else-if="queryView === 'recovery'" class="entry-card">
+            <h2 class="entry-card__title">忘记查询码</h2>
+            <p class="muted entry-card__hint">通过管理员登记且已经验证的找回邮箱重置查询码。</p>
+            <ol class="query-recovery-steps" aria-label="查询码找回步骤">
+              <li :data-active="anonymousRecoveryStep === 'request'">输入 CN</li>
+              <li :data-active="anonymousRecoveryStep === 'verify'">邮箱验证</li>
+              <li :data-active="anonymousRecoveryStep === 'reset'">设置新查询码</li>
+            </ol>
+            <form v-if="anonymousRecoveryStep === 'request'" class="entry-form" @submit.prevent="requestAnonymousQueryRecovery">
+              <label><span>CN</span><input v-model="anonymousRecoveryCN" autocomplete="username" required placeholder="输入自己的 CN" /></label>
+              <p class="muted query-recovery-notice">无论账号是否存在或是否符合找回条件，页面都会显示相同提示，不会展示邮箱或账户状态。</p>
+              <button class="primary-button entry-submit" type="submit" :disabled="anonymousRecoveryLoading">{{ anonymousRecoveryLoading ? '请求中' : '发送邮箱验证码' }}</button>
+            </form>
+            <form v-else-if="anonymousRecoveryStep === 'verify'" class="entry-form" @submit.prevent="verifyAnonymousQueryRecovery">
+              <label><span>CN</span><input :value="anonymousRecoveryCN" autocomplete="username" disabled /></label>
+              <label><span>邮箱验证码</span><input v-model="anonymousRecoveryCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required placeholder="输入 6 位数字验证码" /></label>
+              <p class="muted query-recovery-notice">验证码有效期为 10 分钟；页面不会显示邮箱地址。</p>
+              <button class="primary-button entry-submit" type="submit" :disabled="anonymousRecoveryLoading || anonymousRecoveryCode.trim().length !== 6">{{ anonymousRecoveryLoading ? '验证中' : '确认邮箱验证码' }}</button>
+            </form>
+            <form v-else class="entry-form" @submit.prevent="submitRecoveredQueryCode">
+              <label><span>新查询码</span><input v-model="anonymousRecoveryNewCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="6-32 位" /></label>
+              <label><span>确认新查询码</span><input v-model="anonymousRecoveryConfirmCode" type="password" autocomplete="new-password" required minlength="6" maxlength="32" placeholder="再次输入新查询码" /></label>
+              <p v-if="anonymousRecoveryTokenExpiresAt" class="muted query-recovery-notice">本次重置授权将在 {{ formatDate(anonymousRecoveryTokenExpiresAt) }} 过期；刷新页面后需要重新开始。</p>
+              <button class="primary-button entry-submit" type="submit" :disabled="anonymousRecoveryLoading">{{ anonymousRecoveryLoading ? '重置中' : '重置查询码' }}</button>
+            </form>
+            <div class="entry-aux">
+              <button class="link-button" type="button" :disabled="anonymousRecoveryLoading" @click="closeRecoveryView">返回查询登录</button>
+            </div>
+            <div v-if="anonymousRecoveryMessage" class="inline-alert">{{ anonymousRecoveryMessage }}</div>
+          </section>
+        </div>
+      </template>
+
+      <template v-else-if="routeName === 'query'">
+        <PortalStatusBar :identity="queryUser ? ('CN：' + queryUser.cn_code) : undefined" back-label="← 返回系统主页" @back="navigate('/')" @logout="logoutQuery" />
+        <section class="portal-hero">
+          <h1 class="portal-hero__title">用户中心</h1>
+          <p class="portal-hero__subtitle">当前登录 CN：{{ queryUser?.cn_code }}</p>
+        </section>
+        <div v-if="queryOrders" class="summary-grid portal-summary">
+          <article class="metric-tile"><span>总金额</span><strong>{{ formatMoney(queryOrders.total_amount) }}</strong></article>
+          <article class="metric-tile"><span>已付金额</span><strong>{{ formatMoney(queryOrders.paid_amount) }}</strong></article>
+          <article class="metric-tile"><span>未付金额</span><strong class="danger">{{ formatMoney(queryOrders.remaining_amount) }}</strong></article>
+          <article class="metric-tile"><span>订单数</span><strong>{{ queryOrders.orders.length }}</strong></article>
+        </div>
+        <section class="module-portal">
+          <div class="module-grid">
+            <ModuleCard title="我的订单" description="订单汇总、商品明细与分类/角色/系列筛选" :meta="queryOrders ? ('共 ' + queryOrders.orders.length + ' 个订单') : ''" accent="blue" cta="查看订单" @enter="navigate('/query/orders')" />
+            <ModuleCard title="付款中心" description="选择支付宝 / 微信、查看应付金额与收款二维码" :meta="queryOrders ? ('未付 ' + formatMoney(queryOrders.remaining_amount)) : ''" accent="green" cta="去付款" @enter="navigate('/query/payment')" />
+            <ModuleCard title="付款记录" description="历史付款流水与可展开的关联明细" :meta="queryOrders ? (queryOrders.payments.length + ' 条记录') : ''" accent="neutral" cta="查看记录" @enter="navigate('/query/payments')" />
+            <ModuleCard title="账户安全" description="修改查询码、找回邮箱验证" accent="neutral" cta="账户设置" @enter="navigate('/query/security')" />
+          </div>
+        </section>
+      </template>
+
+      <template v-else-if="isUserRoute">
+        <PortalStatusBar :identity="queryUser ? ('CN：' + queryUser.cn_code) : undefined" back-label="← 返回用户中心" @back="navigate('/query')" @logout="logoutQuery" />
+        <div class="module-header"><h2 class="module-header__title">{{ userModuleTitle }}</h2></div>
+
+        <template v-if="routeName === 'query-payment'">
+          <section class="panel query-pay-panel" aria-label="付款">
+            <div class="panel__header"><div><h2>付款汇总</h2><p class="muted">以下金额由管理员核对录入，付款完成仍以管理员最终录入结果为准。</p></div></div>
+            <div class="summary-grid query-pay-summary">
+              <article class="metric-tile"><span>总金额</span><strong>{{ formatMoney(queryOrders?.total_amount ?? 0) }}</strong></article>
+              <article class="metric-tile"><span>共件数</span><strong>{{ queryOrders?.total_quantity ?? 0 }}</strong></article>
+              <article class="metric-tile"><span>已付金额</span><strong>{{ formatMoney(queryOrders?.paid_amount ?? 0) }}</strong></article>
+              <article class="metric-tile"><span>未付金额</span><strong class="danger">{{ formatMoney(queryOrders?.remaining_amount ?? 0) }}</strong></article>
+            </div>
+
+            <div class="query-pay-block">
+              <h3>选择付款方式</h3>
+              <div class="query-method-options">
+                <button
+                  v-for="method in queryPayMethods"
+                  :key="method"
+                  type="button"
+                  class="query-method-button"
+                  :class="[method === 'alipay' ? 'query-method-button--alipay' : 'query-method-button--wechat', { active: queryQRMethod === method }]"
+                  @click="selectQueryQRMethod(method)"
+                >{{ paymentMethodLabel(method) }}</button>
+              </div>
+            </div>
+
+            <div class="query-pay-block">
+              <h3>本次应付</h3>
+              <div class="summary-grid query-amount-grid">
+                <article class="metric-tile"><span>本金</span><strong>{{ formatMoney(queryBaseAmount) }}</strong></article>
+                <article class="metric-tile"><span>手续费</span><strong>{{ formatMoney(queryFeeAmount) }}</strong></article>
+                <article class="metric-tile metric-tile--emphasis query-payable-tile"><span>本次应付</span><strong>{{ formatMoney(queryPayableAmount) }}</strong></article>
+              </div>
+              <p class="muted query-payable-note">{{ queryQRMethod === 'wechat' ? '微信付款含 0.1% 手续费（向上取整到分）。' : '支付宝付款无手续费。' }}请按「本次应付」金额付款；付款完成不代表系统已自动确认，最终以管理员录入结果为准。</p>
+            </div>
+
+            <div class="query-pay-block query-pay-block--qr">
+              <h3>{{ queryQRMethod ? paymentMethodLabel(queryQRMethod) + '收款二维码' : '收款二维码' }}</h3>
+              <p v-if="queryQRError" class="inline-alert">{{ queryQRError }}</p>
+              <!-- Fixed-height, centered slot: the configured image and the
+                   empty state occupy the same footprint, so switching between
+                   支付宝/微信 (or configured/unconfigured) never jumps the layout.
+                   Title and image share this same center axis. -->
+              <div class="query-qr-slot">
+                <template v-if="queryQRMethod && queryMethodAvailable(queryQRMethod)">
+                  <figure class="query-qr-figure">
+                    <img
+                      :key="queryQRMethod + '-' + queryQRReloadKey"
+                      :src="queryQRImageURL(queryQRMethod)"
+                      :alt="paymentMethodLabel(queryQRMethod) + '收款二维码'"
+                      class="query-qr-image"
+                      @click="openQueryQRZoom"
+                      @error="onQueryQRImageError"
+                    />
+                    <figcaption class="muted">点击二维码可放大</figcaption>
+                  </figure>
+                </template>
+                <p v-else class="qr-empty muted">管理员暂未配置{{ queryQRMethod ? paymentMethodLabel(queryQRMethod) : '该付款方式' }}的收款二维码。</p>
+              </div>
+            </div>
+          </section>
+
+          <div v-if="queryQRZoom && queryQRMethod && queryMethodAvailable(queryQRMethod)" class="qr-zoom-overlay" role="dialog" aria-modal="true" @click="closeQueryQRZoom">
+            <div class="qr-zoom-inner" @click.stop>
+              <button class="qr-zoom-close" type="button" aria-label="关闭" @click="closeQueryQRZoom">×</button>
+              <img :src="queryQRImageURL(queryQRMethod)" :alt="paymentMethodLabel(queryQRMethod) + '收款二维码'" class="qr-zoom-image" @error="onQueryQRImageError" />
+              <p class="qr-zoom-caption">{{ paymentMethodLabel(queryQRMethod) }}收款码</p>
+            </div>
+          </div>
+
+          <section class="panel query-submission-panel">
+            <div class="panel__header"><div><h2>提交收肾记录</h2><p class="muted">用微信或支付宝付款后，在这里上传付款截图作为凭证。提交后状态为「已交肾（待管理员核对）」，管理员核对通过后才会计入已付金额。</p></div></div>
+            <div class="query-submission-grid">
+              <div class="query-submission-upload">
+                <label class="file-field">
+                  <span>选择付款截图（PNG / JPEG / WebP，≤10 MiB）</span>
+                  <input id="submission-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="onSubmissionFileChange" />
+                </label>
+                <div class="submission-preview-slot">
+                  <img v-if="submissionPreviewURL" :src="submissionPreviewURL" alt="待提交付款截图预览" class="submission-preview-image" />
+                  <p v-else class="qr-empty muted">尚未选择图片</p>
+                </div>
+              </div>
+              <div class="query-submission-meta">
+                <div class="query-amount-grid query-submission-amounts">
+                  <article class="metric-tile"><span>付款方式</span><strong>{{ queryQRMethod ? paymentMethodLabel(queryQRMethod) : '请先选择' }}</strong></article>
+                  <article class="metric-tile"><span>本金</span><strong>{{ formatMoney(queryBaseAmount) }}</strong></article>
+                  <article class="metric-tile"><span>手续费</span><strong>{{ formatMoney(queryFeeAmount) }}</strong></article>
+                  <article class="metric-tile metric-tile--emphasis"><span>本次应付</span><strong>{{ formatMoney(queryPayableAmount) }}</strong></article>
+                </div>
+                <p v-if="submissionUploadMessage" class="inline-alert">{{ submissionUploadMessage }}</p>
+                <button class="primary-button query-submission-button" type="button" :disabled="!canSubmitProof || queryQRMethod === ''" @click="submitUserProof">{{ submissionUploading ? '提交中…' : '提交收肾记录' }}</button>
+                <p v-if="queryQRMethod === ''" class="muted">请先在上方选择付款方式，再提交收肾记录。</p>
+              </div>
+            </div>
+
+            <div class="query-submission-history">
+              <h3>我的收肾记录</h3>
+              <p v-if="userSubmissionsLoading" class="muted">正在加载我的收肾记录。</p>
+              <p v-else-if="userSubmissionsMessage" class="inline-alert">{{ userSubmissionsMessage }}</p>
+              <p v-else-if="userSubmissions.length === 0" class="muted">暂无收肾记录。上传付款截图后会显示在这里。</p>
+              <ul v-else class="submission-history-list">
+                <li v-for="submission in userSubmissions" :key="submission.id" class="submission-history-item" :data-state="submission.status">
+                  <div class="submission-history-head">
+                    <span class="status-chip" :data-state="submission.status">{{ submissionStatusLabel(submission.status) }}</span>
+                    <span class="muted submission-history-time">{{ formatDate(submission.submitted_at) }}</span>
+                  </div>
+                  <div class="submission-history-body">
+                    <span>{{ paymentMethodLabel(submission.payment_method) }}</span>
+                    <span>本次应付 {{ formatMoney(submission.payable_amount) }}</span>
+                  </div>
+                  <p v-if="submission.status === 'rejected' && submission.reject_reason" class="submission-reject-reason">驳回原因：{{ submission.reject_reason }}。可重新选择图片后再次提交。</p>
+                </li>
+              </ul>
+            </div>
+          </section>
+        </template>
+
+        <section v-if="routeName === 'query-security'" class="panel query-security-panel">
             <div class="panel__header">
               <div>
                 <h2>账号安全</h2>
@@ -3178,61 +4839,85 @@ onUnmounted(() => {
               <div v-if="queryRecoveryEmailMessage" class="inline-alert">{{ queryRecoveryEmailMessage }}</div>
             </div>
           </section>
-          <section class="summary-grid">
-            <article class="metric-tile"><span>CN</span><strong>{{ queryOrders.user.cn_code }}</strong></article>
-            <article class="metric-tile"><span>订单数</span><strong>{{ queryOrders.orders.length }}</strong></article>
-            <article class="metric-tile"><span>总件数</span><strong>{{ queryOrders.total_quantity }}</strong></article>
-            <article class="metric-tile"><span>总金额</span><strong>{{ formatMoney(queryOrders.total_amount) }}</strong></article>
-            <article class="metric-tile"><span>已付金额</span><strong>{{ formatMoney(queryOrders.paid_amount) }}</strong></article>
-            <article class="metric-tile"><span>未付金额</span><strong class="danger">{{ formatMoney(queryOrders.remaining_amount) }}</strong></article>
+
+        <template v-if="routeName === 'query-orders' && queryOrders">
+          <section class="summary-grid query-order-overview" aria-label="订单汇总">
+            <article class="metric-tile query-order-overview__tile">
+              <span>总金额</span>
+              <strong class="query-order-overview__amount">{{ formatMoney(queryOrders.total_amount) }}</strong>
+            </article>
+            <article class="metric-tile query-order-overview__tile">
+              <span>共多少件</span>
+              <strong class="query-order-overview__quantity">{{ queryOrders.total_quantity }}</strong>
+            </article>
+            <article class="metric-tile query-order-overview__tile query-order-overview__tile--paid">
+              <span>已付金额</span>
+              <strong class="query-order-overview__amount">{{ formatMoney(queryOrders.paid_amount) }}</strong>
+            </article>
+            <article class="metric-tile query-order-overview__tile query-order-overview__tile--unpaid">
+              <span>未付金额</span>
+              <strong class="query-order-overview__amount">{{ formatMoney(queryOrders.remaining_amount) }}</strong>
+            </article>
           </section>
 
-          <section v-for="(order, orderIndex) in queryOrders.orders" :key="orderIndex" class="panel query-order-card">
-            <div class="panel__header">
-              <div>
-                <h2>{{ queryOrders.orders.length > 1 ? `订单明细 ${orderIndex + 1}` : '订单明细' }}</h2>
-              </div>
-              <div class="query-order-summary">
-                <span><em>总金额</em><strong>{{ formatMoney(order.total_amount) }}</strong></span>
-                <span><em>共</em><strong>{{ order.total_quantity }}</strong><em>件</em></span>
-                <span><em>已付</em><strong>{{ formatMoney(order.paid_amount) }}</strong></span>
-                <span class="is-unpaid"><em>未付</em><strong>{{ formatMoney(order.remaining_amount) }}</strong></span>
-              </div>
+          <section v-if="queryOrders.orders.length > 0" class="panel query-orders-panel">
+            <div class="query-orders-heading">
+              <h2>订单明细</h2>
+              <span class="muted query-order-result-count">筛选结果：{{ filteredQueryOrderItemCount }} 项谷子明细（{{ filteredQueryOrders.length }} 个订单）</span>
+            </div>
+            <div class="query-order-filter-grid" aria-label="订单筛选">
+              <label><span>谷子种类</span><select v-model="queryOrderFilters.category"><option value="">全部</option><option v-for="opt in queryOrderFilterOptions.categories" :key="opt" :value="opt">{{ opt }}</option></select></label>
+              <label><span>角色</span><select v-model="queryOrderFilters.role"><option value="">全部</option><option v-for="opt in queryOrderFilterOptions.roles" :key="opt" :value="opt">{{ opt }}</option></select></label>
+              <label><span>系列</span><select v-model="queryOrderFilters.series"><option value="">全部</option><option v-for="opt in queryOrderFilterOptions.series" :key="opt" :value="opt">{{ opt }}</option></select></label>
+              <label><span>付款状态</span><select v-model="queryOrderFilters.paymentStatus"><option value="">全部</option><option value="unpaid">未付款</option><option value="partial">部分付款</option><option value="paid">已付款</option></select></label>
+            </div>
+            <div class="query-order-filter-actions">
+              <span class="muted">筛选仅改变下方明细，汇总金额始终采用后端完整结果。</span>
+              <button class="secondary-button" type="button" :disabled="!queryOrderFiltersActive" @click="clearQueryOrderFilters">清空筛选</button>
+            </div>
+          </section>
+
+          <section v-if="queryOrders.orders.length > 0 && filteredQueryOrders.length === 0" class="panel"><p class="muted">没有符合当前筛选条件的订单明细。<button class="link-button" type="button" @click="clearQueryOrderFilters">清空筛选</button></p></section>
+
+          <section v-for="(order, orderIndex) in filteredQueryOrders" :key="orderIndex" class="panel query-order-card">
+            <div class="query-order-card__heading">
+              <h2>订单 {{ orderIndex + 1 }}</h2>
+              <span class="muted">{{ order.items.length }} 项谷子明细</span>
             </div>
             <div class="table-scroll detail-table query-order-desktop-table">
               <table>
                 <thead>
-                  <tr><th>谷子名称</th><th>谷子系列</th><th>分类</th><th>角色</th><th>数量</th><th>单价</th><th>小计</th><th>已付</th><th>剩余未付</th><th>付款状态</th></tr>
+                  <tr><th>谷子名称</th><th>角色</th><th>谷子种类</th><th>系列</th><th>数量</th><th>总金额</th><th>已付金额</th><th>未付金额</th><th>付款状态</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="(item, itemIndex) in order.items" :key="`${item.goods_name}-${item.character_name}-${itemIndex}`">
-                    <td>{{ item.display_name || item.goods_name }}</td>
-                    <td>{{ item.series_code || '-' }}</td>
-                    <td>{{ item.category || '-' }}</td>
+                    <td class="query-order-name">{{ item.display_name || item.goods_name }}</td>
                     <td>{{ queryCharacterLabel(item) }}</td>
-                    <td>{{ item.quantity }}</td>
-                    <td>{{ formatMoney(item.unit_price) }}</td>
-                    <td>{{ formatMoney(item.amount) }}</td>
-                    <td>{{ formatMoney(item.paid_amount) }}</td>
-                    <td :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</td>
-                    <td>{{ queryPaymentStatusLabel(item.payment_status) }}</td>
+                    <td>{{ item.category || '-' }}</td>
+                    <td>{{ item.series_code || '-' }}</td>
+                    <td class="query-order-number">{{ item.quantity }}</td>
+                    <td class="query-order-number">{{ formatMoney(item.amount) }}</td>
+                    <td class="query-order-number">{{ formatMoney(item.paid_amount) }}</td>
+                    <td class="query-order-number" :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</td>
+                    <td><span class="status-chip" :data-state="item.payment_status">{{ queryPaymentStatusLabel(item.payment_status) }}</span></td>
                   </tr>
                 </tbody>
               </table>
             </div>
             <div class="query-order-mobile-items" aria-label="订单明细卡片">
               <article v-for="(item, itemIndex) in order.items" :key="`${item.goods_name}-${item.character_name}-${itemIndex}`" class="query-order-mobile-item">
-                <h3>{{ item.display_name || item.goods_name }}</h3>
+                <div class="query-order-mobile-item__heading">
+                  <h3>{{ item.display_name || item.goods_name }}</h3>
+                  <span class="status-chip" :data-state="item.payment_status">{{ queryPaymentStatusLabel(item.payment_status) }}</span>
+                </div>
                 <dl>
-                  <div><dt>系列</dt><dd>{{ item.series_code || '—' }}</dd></div>
-                  <div><dt>分类</dt><dd>{{ item.category || '—' }}</dd></div>
                   <div><dt>角色</dt><dd>{{ queryCharacterLabel(item) }}</dd></div>
-                  <div><dt>数量</dt><dd>{{ item.quantity }}</dd></div>
-                  <div><dt>单价</dt><dd>{{ formatMoney(item.unit_price) }}</dd></div>
-                  <div><dt>小计</dt><dd>{{ formatMoney(item.amount) }}</dd></div>
-                  <div><dt>已付</dt><dd>{{ formatMoney(item.paid_amount) }}</dd></div>
-                  <div><dt>未付</dt><dd :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</dd></div>
-                  <div><dt>付款状态</dt><dd>{{ queryPaymentStatusLabel(item.payment_status) }}</dd></div>
+                  <div><dt>谷子种类</dt><dd>{{ item.category || '—' }}</dd></div>
+                  <div><dt>系列</dt><dd>{{ item.series_code || '—' }}</dd></div>
+                  <div><dt>数量</dt><dd class="query-order-number">{{ item.quantity }}</dd></div>
+                  <div><dt>总金额</dt><dd class="query-order-number">{{ formatMoney(item.amount) }}</dd></div>
+                  <div><dt>已付金额</dt><dd class="query-order-number">{{ formatMoney(item.paid_amount) }}</dd></div>
+                  <div><dt>未付金额</dt><dd class="query-order-number" :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</dd></div>
                 </dl>
               </article>
             </div>
@@ -3240,18 +4925,26 @@ onUnmounted(() => {
           <section v-if="queryOrders.orders.length === 0" class="panel"><p class="muted">当前 CN 暂无可查询订单。</p></section>
         </template>
 
-          <section v-if="queryUser" class="panel query-payments-card">
+          <section v-if="routeName === 'query-payments'" class="panel query-payments-card">
             <div class="panel__header"><div><h2>付款历史</h2><p class="muted">已撤销的付款不计入有效已付款金额。展开关联明细可查看每笔付款分摊到了哪些谷子上。</p></div></div>
+            <div v-if="queryOrders && queryOrders.payments.length > 0" class="list-filter-bar" aria-label="付款历史筛选">
+              <label><span>付款方式</span><select v-model="queryPaymentFilters.method"><option value="">全部</option><option value="alipay">支付宝</option><option value="wechat">微信</option><option value="bank">银行转账</option><option value="cash">现金</option><option value="other">其他</option></select></label>
+              <label><span>状态</span><select v-model="queryPaymentFilters.status"><option value="">全部</option><option value="approved">已交肾</option><option value="voided">已撤销</option><option value="submitted">待处理</option><option value="rejected">已驳回</option></select></label>
+              <label><span>时间从</span><input v-model="queryPaymentFilters.dateFrom" type="datetime-local" /></label>
+              <label><span>时间到</span><input v-model="queryPaymentFilters.dateTo" type="datetime-local" /></label>
+              <button class="secondary-button" type="button" :disabled="!queryPaymentFiltersActive" @click="clearQueryPaymentFilters">清空筛选</button>
+            </div>
             <p v-if="queryLoading" class="query-payment-state muted">正在加载付款历史。</p>
             <p v-else-if="queryOrdersError" class="query-payment-state inline-alert">{{ queryOrdersError }}</p>
             <p v-else-if="!queryOrders || queryOrders.payments.length === 0" class="query-payment-state muted">暂无付款记录</p>
+            <p v-else-if="filteredQueryPayments.length === 0" class="query-payment-state muted">没有符合当前筛选条件的付款记录。<button class="link-button" type="button" @click="clearQueryPaymentFilters">清空筛选</button></p>
             <div v-else class="table-scroll history-table">
               <table>
                 <thead>
                   <tr><th>付款时间</th><th class="col-emphasis">实付金额</th><th>交肾状态</th><th>本金</th><th>手续费</th><th>付款方式</th><th>关联明细</th></tr>
                 </thead>
                 <tbody>
-                  <template v-for="(payment, paymentIndex) in queryOrders.payments" :key="`${payment.paid_at}-${paymentIndex}`">
+                  <template v-for="(payment, paymentIndex) in filteredQueryPayments" :key="`${payment.paid_at}-${paymentIndex}`">
                     <tr :class="{ 'voided-row': payment.status === 'voided' }">
                       <td>{{ formatDate(payment.paid_at) }}</td>
                       <td class="col-emphasis">{{ formatMoney(payment.total_amount) }}</td>
@@ -3294,17 +4987,68 @@ onUnmounted(() => {
           </section>
       </template>
 
+      <template v-else-if="routeName === 'admin'">
+        <template v-if="admin">
+          <PortalStatusBar
+            :identity="admin.display_name ?? admin.username"
+            :online="isBackendOnline"
+            :online-text="isBackendOnline ? '后端在线' : '本地前端模式'"
+            :show-refresh="true"
+            back-label="← 返回系统主页"
+            @back="navigate('/')"
+            @refresh="load"
+            @logout="logout"
+          />
+          <section class="portal-hero">
+            <h1 class="portal-hero__title">谷子管理中心</h1>
+            <p class="portal-hero__subtitle">请选择要进入的管理模块</p>
+          </section>
+          <section class="module-portal">
+            <div class="module-grid">
+              <ModuleCard title="数据导入中心" description="Excel 导入预览、确认导入、导入历史与详情" accent="blue" cta="进入模块" @enter="navigate('/admin/data')" />
+              <ModuleCard title="订单管理" description="订单查询、明细筛选、订单详情与导出" accent="neutral" cta="进入模块" @enter="navigate('/admin/orders')" />
+              <ModuleCard title="用户与账号" description="用户管理、查询码与恢复邮箱状态" accent="neutral" cta="进入模块" @enter="navigate('/admin/users')" />
+              <ModuleCard title="收付款管理" description="付款记录、撤销、未付明细与收款二维码" accent="green" cta="进入模块" @enter="navigate('/admin/finance')" />
+            </div>
+          </section>
+        </template>
+        <div v-else class="entry-page">
+          <header class="entry-brand">
+            <button class="entry-back" type="button" @click="navigate('/')">← 返回系统主页</button>
+            <h1>PJSK 谷子系统</h1>
+            <p class="entry-subtitle">管理员入口</p>
+          </header>
+          <section class="entry-card">
+            <h2 class="entry-card__title">管理员登录</h2>
+            <form class="entry-form" @submit.prevent="login">
+              <label><span>管理员用户名</span><input v-model="loginUsername" autocomplete="username" required placeholder="输入管理员用户名" /></label>
+              <label><span>密码</span><input v-model="loginPassword" type="password" autocomplete="current-password" required placeholder="输入密码" /></label>
+              <button class="primary-button entry-submit" type="submit" :disabled="loginLoading">{{ loginLoading ? '登录中' : '登录' }}</button>
+            </form>
+            <div v-if="authMessage" class="inline-alert">{{ authMessage }}</div>
+          </section>
+        </div>
+      </template>
+
       <template v-else>
-      <section class="metrics" aria-label="运行指标">
-        <article class="metric-tile"><span>可用模块</span><strong>{{ readyCount }}</strong></article>
-        <article class="metric-tile"><span>待接入模块</span><strong>{{ queuedCount }}</strong></article>
-        <article class="metric-tile"><span>后端服务</span><strong>{{ health?.service ?? '未连接' }}</strong></article>
-        <article class="metric-tile"><span>检查时间</span><strong>{{ checkedAt || '待检查' }}</strong></article>
-      </section>
-      <nav class="subtabs" aria-label="首页信息"><button :class="{ active: activeView === 'overview' }" type="button" @click="activeView = 'overview'">总览</button><button :class="{ active: activeView === 'ops' }" type="button" @click="activeView = 'ops'">接口</button><button :class="{ active: activeView === 'legacy' }" type="button" @click="activeView = 'legacy'">旧版</button></nav>
-      <section v-if="activeView === 'overview'" class="panel"><div class="panel__header"><h2>模块状态</h2><span>{{ config.stage }}</span></div><div v-if="errorMessage" class="inline-alert">{{ errorMessage }}</div><div class="module-table"><div class="module-row module-row--head"><span>模块</span><span>状态</span><span>说明</span></div><div v-for="item in config.modules" :key="item.key" class="module-row"><strong>{{ item.title }}</strong><span class="status-chip" :data-state="item.status">{{ item.status }}</span><span>{{ item.description }}</span></div></div></section>
-      <section v-else-if="activeView === 'ops'" class="workspace workspace--two"><div class="panel"><div class="panel__header"><h2>后端接口</h2><span>{{ isBackendOnline ? 'online' : 'offline' }}</span></div><div class="endpoint-list"><div><code>GET /health</code><span>{{ health?.status ?? 'waiting' }}</span></div><div><code>GET /api/config</code><span>{{ isBackendOnline ? 'ready' : 'waiting' }}</span></div><div><code>POST /api/admin/imports/preview</code><span>admin only</span></div><div><code>POST /api/admin/imports/confirm</code><span>admin only</span></div><div><code>GET /api/admin/imports</code><span>admin only</span></div></div></div><div class="panel"><div class="panel__header"><h2>下一步</h2><span>history first</span></div><ol class="task-list"><li>验收确认导入幂等保护。</li><li>查看导入历史和详情。</li><li>再进入订单只读管理。</li></ol></div></section>
-      <section v-else class="workspace workspace--two"><div class="panel"><div class="panel__header"><h2>Streamlit 管理端</h2><span>port {{ config.legacyAdminPort }}</span></div><code>cd legacy-streamlit && python -m streamlit run main.py --server.port {{ config.legacyAdminPort }}</code></div><div class="panel"><div class="panel__header"><h2>Streamlit 用户端</h2><span>port {{ config.legacyUserPort }}</span></div><code>cd legacy-streamlit && python -m streamlit run user.py --server.port {{ config.legacyUserPort }}</code></div></section>
+        <div class="entry-page">
+          <header class="entry-brand">
+            <h1>PJSK 谷子系统</h1>
+            <p class="entry-subtitle">请选择登录入口</p>
+          </header>
+          <div class="entry-choices">
+            <button class="entry-choice entry-choice--user" type="button" @click="navigate('/query')">
+              <span class="entry-choice__title">普通用户入口</span>
+              <span class="entry-choice__desc">查询订单、付款信息及账户安全设置</span>
+              <span class="entry-choice__cta">进入 →</span>
+            </button>
+            <button class="entry-choice entry-choice--admin" type="button" @click="navigate('/admin')">
+              <span class="entry-choice__title">管理员入口</span>
+              <span class="entry-choice__desc">导入数据、管理用户、订单及付款信息</span>
+              <span class="entry-choice__cta">进入 →</span>
+            </button>
+          </div>
+        </div>
       </template>
     </main>
   </div>

@@ -401,6 +401,68 @@ func (h *Handler) userFromRequest(w http.ResponseWriter, r *http.Request) (User,
 	return h.userFromRequestWithHash(w, r, false)
 }
 
+// RequireSession wraps a handler so it only runs for a request carrying a valid
+// query session cookie. It reuses the same validation, cookie clearing, and
+// Chinese error responses as the regular query endpoints, so other packages
+// (e.g. payment QR image serving) can gate on "a logged-in regular user" without
+// duplicating session logic. The wrapped handler never sees the user identity —
+// it only needs to know a valid session exists.
+func (h *Handler) RequireSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := h.userFromRequest(w, r); !ok {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// sessionUserContextKey keys the authenticated regular-user identity in a
+// request context. It is unexported so only this package can set it; other
+// packages read it through CurrentSessionUser.
+type sessionUserContextKey struct{}
+
+// SessionUser is the minimal, server-trusted identity of a logged-in regular
+// user. It carries only what the database session proves — the internal user id
+// and the canonical CN — never anything a client supplied in the request body.
+// Handlers in other packages (e.g. payment proof submission) must take the CN
+// and user id from here, not from a multipart field.
+type SessionUser struct {
+	UserID string
+	CNCode string
+}
+
+// RequireSessionUser is RequireSession plus identity: it validates the query
+// session with the exact same logic and Chinese error responses, then injects
+// the authenticated SessionUser into the request context for the wrapped
+// handler to read via CurrentSessionUser. Use this (instead of RequireSession)
+// when the handler must act as the current user.
+func (h *Handler) RequireSessionUser(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, ok := h.userFromRequest(w, r)
+		if !ok {
+			return
+		}
+		ctx := context.WithValue(r.Context(), sessionUserContextKey{}, SessionUser{
+			UserID: user.ID,
+			CNCode: user.CNCode,
+		})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// CurrentSessionUser returns the authenticated regular user injected by
+// RequireSessionUser, or ok=false when none is present.
+func CurrentSessionUser(ctx context.Context) (SessionUser, bool) {
+	user, ok := ctx.Value(sessionUserContextKey{}).(SessionUser)
+	return user, ok
+}
+
+// ContextWithSessionUser mirrors what RequireSessionUser injects, for unit
+// tests that exercise a session-scoped handler without a real cookie/session.
+func ContextWithSessionUser(ctx context.Context, user SessionUser) context.Context {
+	return context.WithValue(ctx, sessionUserContextKey{}, user)
+}
+
 func (h *Handler) userFromRequestWithHash(w http.ResponseWriter, r *http.Request, keepQueryCodeHash bool) (User, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
