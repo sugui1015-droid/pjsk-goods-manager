@@ -629,3 +629,174 @@ df -h / /var/lib/pjsk/backups /var/log/pjsk
 - 未运行构建、迁移、备份、恢复、安装或部署命令；文中的部署命令全部是尚未执行的计划。
 - 未暂存、提交或推送。
 - 未使用子代理。
+
+## 12. 阶段 2：运行环境、构建与 PostgreSQL 隔离兼容性验证（2026-07-18）
+
+### 12.1 阶段 2A 本地基线复核
+
+- 已重新阅读 `AGENTS.md`、本文前序调查、根/前后端 README、`HANDOVER.md`、内网部署与密钥文档、迁移编号核对、数据库备份/恢复/保留、Windows 服务化、Caddy 示例、两份环境变量示例以及 Go/前端 manifest/lockfile。
+- 当前分支：`main`。
+- 当前 HEAD：`e03e4467c11dd27fff8443c3e1fcc5d3ee86c5ce`（上一轮仅提交本调查日志）。
+- 本地 `origin/main` 引用：`898a711d6376d34069931ba275d0c9297fa72c50`；当前 `main` 比本地远端引用 ahead 1，未 fetch、未 push。
+- 工作树与暂存区在本阶段开始时干净。
+- 未读取或输出 SSH 私钥正文；私钥路径只作为 `ssh -i` 参数使用。
+
+### 12.2 阶段 2A 首次服务器只读命令失败与停止点
+
+- 计划操作：通过 SSH 一次性执行只读基线检查（身份、OS、CPU、内存、磁盘、时间、监听端口、目标目录权限/内容、相关包/服务/进程和失败服务）。
+- 实际命令类别：`ssh.exe -i <LOCAL_SSH_PRIVATE_KEY> ... ubuntu@43.161.238.145 "set -eu; ..."`。日志不记录本机私钥绝对路径，也不记录/复制私钥正文。
+- 结果：SSH 已到达远端 shell，但组合命令在 bash 解析阶段因本地到远端的引号嵌套不匹配而失败；错误为 `bash: -c: line 1: unexpected EOF while looking for matching '"'`。
+- 退出码：`2`（bash 命令语法错误）。
+- 服务器影响：整段 `bash -c` 在解析完成前即失败，没有进入命令执行；未安装软件、未写文件、未改目录/权限、未启停服务、未连接数据库、未改防火墙、未打开任何端口。
+- 私钥边界：仅被 OpenSSH 作为身份文件读取；正文未由本轮命令、工具输出或日志显示。
+- 依照任务硬约束“任何一步失败立即停止后续阶段，不用替代命令绕过，记录后等待人工确认”，本轮停在此处。未重试 SSH，未进入 2B 发布包、2C 安装、2D 上传构建、2E PostgreSQL 隔离验证或 2F 完成态。
+- 建议修复：获得人工确认后，把远端只读检查改为无嵌套双引号的最小命令序列（或上传不含秘密的只读检查脚本后显式执行），先完成 2A 并确认无非预期服务/端口，再决定是否继续。
+- 本阶段未使用子代理，未提交、未推送。
+
+### 12.5 阶段 2A LF 修复后重跑失败与停止点
+
+- 人工仅授权修复本地临时只读检查脚本的 CRLF 问题并重跑阶段 2A，不得进入 2B–2F。
+- 已将本地临时脚本转换为 UTF-8 无 BOM、LF 换行；执行前验证结果为 2100 bytes、CR 字符数 0、LF 字符数 98、末字节 `0A`，未发现 PowerShell/Bash 提示符或写入、安装、服务状态变更、数据库操作命令。脚本 SHA-256 为 `6E0485E6D265EE79730819572C6EA82C09EAA3535CBE83CFAAE115A70841E5D5`。
+- 上一次失败原因仍明确为 CRLF：远端 `bash -s` 把末尾 CR 解释为额外命令，导致 SSH 总退出码 127。本次脚本自身的 CRLF 问题已在本地消除。
+- 本次计划通过标准输入执行脚本，脚本未永久上传到服务器；但 Windows `cmd` 在管道命令中错误解析带引号的本地脚本路径及 SSH `-i` 路径，先报告 `The filename, directory name, or volume label syntax is incorrect.`，随后 OpenSSH 报告身份文件不可访问并以公钥认证失败结束。
+- 本次 SSH 总退出码为 `255`。由于 SSH 认证前即失败，远端 `bash -s` 未执行，阶段 2A 的系统、端口、目录、软件、服务及进程检查没有得到新的复验结果；未读取或输出私钥正文。
+- 按“整个 SSH 命令最终退出码非 0 即立即停止、不得继续”的要求，本次不再改用其他本地管道或引号方式重试。阶段 2A **仍未正式通过**；之前取得的服务器基线结果不因本次失败而改变，但不能据此替代本轮要求的成功复验。
+- 本次没有修改服务器文件，没有安装软件、上传发布包、创建用户/数据库/角色/配置文件，没有启动、停止或重启服务，也没有进入 2B–2F。
+- 本轮未使用子代理，未提交、未推送；停止并等待新的人工确认。
+
+### 12.3 数据迁移方向确认（人工补充）
+
+- 用户已明确：本地 PostgreSQL 保存的是必须保留的现役数据；腾讯云最终目标是迁移该现役库，不是创建空库替代。
+- 因此删除“空库直接上线”这一正式部署分支。云端正式库只能在以下链路全部通过后建立：冻结现役写入 → 生成一致性逻辑备份与 SHA-256 → 云端隔离测试库恢复 → 校验来源迁移集合与关键业务不变量 → 候选后端仅在隔离库补齐至 21/0021 → 再新建云端正式库并恢复同一份已验证备份 → 启动候选后端应用待执行迁移 → 验收后切换。
+- 阶段 2E 本身仍只允许创建 `pjsk_compat_test` 等隔离角色/数据库；不得创建正式 `pjsk`，不得读取、备份、停止、恢复或修改本地现役数据库。现役数据导出与迁移必须放入后续获明确授权的停写窗口。
+- 数据库回滚边界：任何隔离恢复或兼容性验证失败都不得影响本地现役库；云端正式切换后若已有新写入，不得用旧备份直接覆盖，必须先停写并评估增量数据处置。
+- 本补充只记录部署决策；没有连接本地或云端 PostgreSQL，没有读取任何现役数据或凭据，阶段 2A 仍保持停止并等待人工确认是否允许重试只读基线命令。
+
+### 12.4 阶段 2A 获准重试：只读检查结果与第二个停止点
+
+- 人工已明确授权：只重试并完成阶段 2A，不得自动进入 2B–2F；允许把本地只读检查脚本经 stdin 传给远端 `bash -s`。
+- 执行方式：在本机临时目录生成只含读取命令的脚本，先扫描确认没有安装、目录/权限修改、文件写入、服务启停、数据库操作等命令；随后用 `Get-Content -Raw | ssh.exe -i <LOCAL_SSH_PRIVATE_KEY> ... "bash -s"` 通过 stdin 执行。脚本未作为远端文件上传，私钥正文未读取或输出。
+- 上一次失败与本次明确区分：12.2 是整段组合命令引号未闭合、一个检查也未执行；本次脚本中的全部计划只读检查均已执行并输出各自退出码，但脚本末尾混入 Windows CR 字符，远端最终把单独的 CR 解释为命令，报 `bash: line 99: $'\\r': command not found`，导致 SSH 总退出码 `127`。
+
+#### 服务器基线（本次实际取得）
+
+- OS：Ubuntu 24.04.4 LTS（Noble）；内核 `6.8.0-136-generic`；架构 `x86_64` / dpkg `amd64`。相关命令退出码均 0。
+- CPU：2 vCPU，Intel Xeon E5-26xx v4，KVM；`nproc`/`lscpu` 退出码 0。`lscpu` 同时报告部分 CPU 漏洞状态为 vulnerable（MDS/MMIO stale data/spec store bypass）；这是云宿主/微码风险记录，阶段 2A 未修改内核或系统。
+- 内存：3.6 GiB，总可用约 3.2 GiB；swap 1.9 GiB、当前使用 0。`free -h` 退出码 0。
+- 系统盘：根分区 59 GiB，已用 6.0 GiB，可用 51 GiB，使用率 11%。`df -h /` 退出码 0。
+- 时间：Asia/Shanghai（CST +08:00）；系统时钟已同步、NTP active、RTC 使用 UTC。`timedatectl` 退出码 0。
+- 身份/主机：远端用户 `ubuntu`，主机名 `VM-0-15-ubuntu`，本次检查时 uptime 约 2 小时 12 分、load average `0.08/0.02/0.01`。三项退出码均 0。
+- sudo 只读权限：`sudo -n ss -lntp` 与 `sudo -n ls -ld ...` 均退出 0，无密码提示或权限异常。
+
+#### 监听与目录
+
+- 全部 TCP 监听：`0.0.0.0:22`、`[::]:22`（sshd/systemd），以及仅回环的 `127.0.0.53:53`、`127.0.0.54:53`（systemd-resolved）。没有 80、443、5432、8080、5173、5174、5175，也没有其他非回环 TCP 监听。
+- 重点端口过滤退出 0，仅命中 22 双栈；loopback DNS 53 不在重点公网端口集合，且不构成公网服务。
+- 目录状态（`ls -ld` 退出 0）：
+  - `/opt/pjsk`：`drwxr-xr-x ubuntu:ubuntu`；
+  - `/etc/pjsk`：`drwxr-x--- root:root`；
+  - `/var/lib/pjsk`：`drwxr-x--- root:root`；
+  - `/var/lib/pjsk/backups`：`drwxr-x--- root:root`；
+  - `/var/log/pjsk`：`drwxr-x--- root:root`。
+- 本阶段只读取目录元数据，没有列举或写入目录内容，没有修改 owner/mode。
+
+#### 软件、包、服务与进程
+
+- `command -v go/node/pnpm/psql/postgres/caddy` 均退出 1：命令当前不在 PATH，属于“未安装/未匹配”的允许结果。
+- `dpkg-query` 候选过滤退出 1：未匹配 PostgreSQL、Caddy、Go、Node.js 或 npm 已安装包。
+- 两个 systemd 候选过滤均退出 1：没有 PostgreSQL、Caddy 或 PJSK unit file，也没有相应已加载 service。
+- 进程过滤退出 1：没有 postgres、caddy、pjsk、node 或 vite 进程。
+- 未发现现存 PostgreSQL/Caddy/PJSK 服务或残留进程，未发现 5432/8080/Vite 端口监听。
+
+#### 退出码异常、影响与结论
+
+- 每项计划检查均记录退出码；非零项只来自允许的“未安装/未匹配”。所有服务器基线本身符合继续准备构建环境的条件，未发现服务/端口/权限阻断项。
+- 但 stdin 脚本末尾 CR 字符造成额外的非计划空白命令失败，SSH 总退出码为 127。该命令没有写入行为，服务器没有被修改；没有安装软件、上传发布包、创建用户/数据库/角色/配置、启停服务或连接数据库。
+- 按本轮规则“SSH 失败立即停止”，阶段 2A **尚不能形式化标记为通过**；本轮停止于此，不进入 2B–2F。修复方式是先把本地临时脚本规范化为 LF，再在获得新的人工确认后只重跑 2A；不得借此进入后续阶段。
+- 本阶段未使用子代理，未提交、未推送。
+
+### 12.6 阶段 2A 审计收口：证据性通过
+
+- 人工决定结束阶段 2A 的重复重跑，不再为了取得形式上的 SSH 总退出码 0 而第三次执行相同的服务器基线检查。
+- 阶段 2A 的正式判断以 12.4 已经成功取得并逐项记录退出码的服务器检查结果为依据：OS、内核与架构、CPU、内存、磁盘、时间与时区、当前用户与主机、全部监听端口、目标目录权限、候选软件包、systemd 服务和相关进程均已实际检查。
+- 12.4 中所有实际基线检查命令均成功；非零结果仅为 `command -v`、包/服务/进程过滤没有匹配，明确表示相关软件未安装或相关对象不存在。未发现 PostgreSQL、Caddy、PJSK 服务或残留进程，未发现 5432、8080、5173–5175 监听，也未发现目录权限或其他部署阻断项。
+- 12.4 的 SSH 总退出码 127 仅由 Windows CR 字符在全部计划检查结束后被远端 shell 解释为额外空白命令造成；12.5 的退出码 255 则由 Windows 本地管道及 SSH 私钥路径引号解析失败造成，远端没有执行。二者均属于执行器包装问题，不代表任何服务器基线检查失败，也没有修改服务器。
+- 12.2、12.4、12.5 的失败记录全部原样保留，作为完整审计过程；本节仅补充最终判断，不删除、不覆盖或改写既有证据。
+- 阶段 2A 最终结论：**证据性通过**。截至已取得的实际只读证据，服务器无部署阻断项，可以在新的明确授权范围内进入阶段 2B；本结论不授权或代表已执行 2C–2F。
+
+### 12.7 阶段 2B：本地干净运行发布包构建与审查停止点
+
+#### 开始基线
+
+- 当前分支 `main`，HEAD `e03e4467c11dd27fff8443c3e1fcc5d3ee86c5ce`，本地 `origin/main` 为 `898a711d6376d34069931ba275d0c9297fa72c50`；`origin/main...HEAD` 为 behind 0 / ahead 1，未 fetch、未 push。
+- 阶段开始时唯一工作树改动为本部署日志，暂存区为空。
+- 本机版本：Go `go1.26.5 windows/amd64`、Node.js `v24.18.0`、pnpm `11.11.0`。`backend/go.mod` 声明 `go 1.26.0`；前端存在 `pnpm-lock.yaml`，`pnpm run build` 对应 `vue-tsc -b && vite build`。
+- 仓库外目标 `C:\PJSK-Release-Staging\e03e446` 及复验目录、目标压缩包在开始前均不存在；随后仅新建全新的版本目录及其 `bin` 子目录，没有覆盖或清空既有目录。
+
+#### 测试与构建结果
+
+- 后端 `go test ./...` 退出 0，全部包通过或无测试文件；`go vet ./...` 退出 0、无输出。
+- 仅在交叉编译 PowerShell 进程内设置 `GOOS=linux`、`GOARCH=amd64`、`CGO_ENABLED=0`，执行 `go build -trimpath -o C:\PJSK-Release-Staging\e03e446\bin\pjsk-backend .` 成功；`finally` 已清除三个环境变量。
+- 后端产物大小 17,505,435 bytes，前四字节为 `7F 45 4C 46`，确认为 ELF 魔数而非 Windows PE；目标为 Linux amd64，未执行该二进制。SHA-256：`AE9FE6C2336986A086028074708DE903DE74302FAD89F15EEFA72F89F4205022`。
+- `pnpm.cmd install --frozen-lockfile` 退出 0，锁文件未更新；pnpm 的自身更新元数据请求出现 `ERR_PNPM_META_FETCH_FAIL` 警告，但安装报告 `Already up to date`，未安装或升级全局 pnpm。
+- `pnpm.cmd test` 退出 0：185 项通过、0 失败、0 跳过。`pnpm.cmd run build` 退出 0，Vite 8.1.4 完成生产构建；仅把 `frontend/dist` 的 6 个文件显式复制到发布目录的 `frontend`。
+- 构建后一次中间态 `git status` 曾短暂显示非预期未跟踪文件 `.claude/settings.local.json`；本阶段没有读取、修改、删除或复制该文件。最终复核时该路径已不再出现在工作树状态中，当前唯一改动仍为本部署日志。
+
+#### 发布目录与元数据
+
+- 发布目录顶层为 `bin`、`frontend`、`REVISION`、`MANIFEST.sha256`；`bin` 中仅有 `pjsk-backend`。
+- 业务文件 8 个：后端二进制 1 个、前端生产文件 6 个、`REVISION` 1 个；加上 `MANIFEST.sha256` 后发布目录共 9 个文件，总大小 17,866,959 bytes。
+- `REVISION` 仅包含完整 HEAD。`MANIFEST.sha256` 排除自身并记录全部 8 个业务文件的相对路径和 SHA-256。
+- 清单检查未发现 `.git`、`.env`、密钥扩展名、dump/backup/partial、CSV、日志、`node_modules`、Go/Vue/TypeScript 源码或 Windows exe/cmd/ps1；前端包含允许的 SVG 构建图片与公开 Excel 导入模板。
+
+#### 敏感扫描结果与停止原因
+
+- 扫描范围严格限制为新发布目录，没有读取真实 `backend/.env`、其他 ignored 环境文件或本地秘密目录。
+- `DATABASE_URL=`、`DATABASE_PASSWORD=`、`RECOVERY_EMAIL_ENCRYPTION_KEY=`、`RECOVERY_EMAIL_HMAC_KEY=`、`QUERY_CODE_RECOVERY_HMAC_KEY=`、`SMTP_PASSWORD=`、`Authorization:` 和精确 `D:\pjsk` 均无命中。
+- 后端二进制命中通用字符串 `PRIVATE KEY`、`Bearer`、`localhost`、`127.0.0.1` 及 Windows 盘符模式；这些可能来自解析、认证、默认回环监听或校验代码，但因随后已触发明确的前端停止点，本阶段没有继续做发布批准判定。
+- 前端生产 bundle `frontend/assets/index-kdHsKTnn.js` 明确命中 `http://localhost:5173` 与 `http://127.0.0.1:5173`，上下文为 `frontendOrigins` 配置。它们是 Vite 开发地址，违反“前端静态产物不得包含开发 API 地址、Vite 地址或 Windows 本地路径”的发布要求。
+- 阶段 2B 因此前端产物审查失败而立即停止。没有生成 `pjsk-release-e03e446.tar.gz` 或其 SHA-256 文件，没有进行解压复验，也没有连接或修改腾讯云服务器。
+- 未上传文件、未安装软件、未创建用户/数据库/角色、未启动后端、未运行迁移、未提交、未推送、未使用子代理；未进入阶段 2C。
+
+### 12.8 阶段 2B-Fix：生产 bundle 开发地址修复与 retry1 发布包
+
+#### 根因与调用链
+
+- 原候选 `C:\PJSK-Release-Staging\e03e446` 因前端 bundle 包含 `http://localhost:5173` 与 `http://127.0.0.1:5173` 被拒绝，未生成压缩包。本轮将其保留并重命名隔离为 `C:\PJSK-Release-Staging\rejected-e03e446-localhost-bundle`，没有覆盖或删除。
+- 两个字符串的真实源码来源是 `frontend/src/App.vue` 的 `fallbackConfig.frontendOrigins`。`load()` 并行请求同源 `/health` 与 `/api/config`；请求失败时才把 `config` 恢复为 `fallbackConfig`。
+- `frontendOrigins` 在前端没有其他消费调用，不参与 API 请求地址、CORS 决策、登录跳转、`postMessage`/message origin、iframe 或页面导航。API 基址仍由 `frontend/src/api/client.ts` 独立决定：开发模式使用相对路径交给 Vite 代理，生产默认空基址并使用当前页面同源。
+- 实际 CORS 安全判断在后端 `config.go` → `router.go/withCORS`：production 未配置时为空白名单；有 Origin 时仅精确匹配允许项，未知跨域来源不返回允许头；同源浏览器请求没有 Origin 头，不需要 CORS。既有定向 Go 测试覆盖这些语义。
+- Vite 原先没有裁剪两个地址，是因为它们处于无条件对象字面量中，不属于 `import.meta.env.DEV` 可静态替换的死分支。
+
+#### 最小修复与测试
+
+- 修改 `frontend/src/App.vue`：`fallbackConfig.frontendOrigins` 改为 `import.meta.env.DEV ? localDevelopmentFrontendOrigins() : []`，生产同源部署不硬编码域名，也不扩大未知 origin 权限。
+- 新增 `frontend/src/developmentOrigins.ts`：只提供两个精确的本地 Vite 开发 origin；仅由 DEV 分支调用，生产构建可静态消除整个模块及字符串。
+- 新增 `frontend/tests/development-origins.test.mjs` 两项测试：开发辅助函数保留两个精确来源；App 的生产分支明确为空且不再使用无条件字面量。
+- 定向测试：新前端测试 2/2 通过；`go test ./internal/api -run TestCORS` 与 `go test ./internal/config -run TestLoadCORSAllowedOrigins` 均通过，确认开发来源、production 默认、同源请求与未知跨域拒绝语义未变。
+- `git diff --check` 通过。完整阶段 2B 重跑中：`go test ./...` 退出 0，`go vet ./...` 退出 0；`pnpm.cmd install --frozen-lockfile` 退出 0（锁文件未变化，只有 pnpm 自身更新元数据网络警告）；完整前端测试 187/187 通过；`pnpm.cmd run build` 退出 0，Vite 8.1.4 构建成功。
+- 修复后的 `frontend/dist` 与最终发布/解压目录均无 `http://localhost:5173`、`http://127.0.0.1:5173`、其他 `:5173`、`/@vite`、`vite/client` 或 Windows 本地路径。
+
+#### retry1 发布目录
+
+- 从全新空目录 `C:\PJSK-Release-Staging\e03e446-retry1` 重建，未复用旧二进制、旧前端或旧元数据。
+- 后端仅在构建 PowerShell 进程内设置 `GOOS=linux`、`GOARCH=amd64`、`CGO_ENABLED=0` 并在 `finally` 清除；`go build -trimpath` 成功。产物 17,505,435 bytes，魔数 `7F 45 4C 46`，Linux amd64 ELF SHA-256 为 `AE9FE6C2336986A086028074708DE903DE74302FAD89F15EEFA72F89F4205022`，未执行该二进制。
+- 新发布目录顶层仅有 `bin`、`frontend`、`REVISION`、`MANIFEST.sha256`；`bin` 仅有 `pjsk-backend`。业务文件 8 个，加 manifest 后共 9 个文件、17,866,912 bytes。
+- `REVISION` 按要求仅含当前完整 HEAD `e03e4467c11dd27fff8443c3e1fcc5d3ee86c5ce`；`MANIFEST.sha256` 排除自身并覆盖 8 个业务文件，发布目录内复验 8/8 通过。
+- 严格清单无 `.git`、env、私钥文件、备份/dump/partial、CSV、日志、`node_modules`、Go/Vue/TypeScript 源码或 Windows 可执行/脚本；保留允许的生产 JS/CSS/HTML/SVG 与公开 Excel 模板。
+
+#### 敏感扫描逐类结论
+
+- 扫描仅覆盖新发布目录和最终解压目录，没有读取 ignored 的真实 env 或其他秘密文件。
+- 前端全部指定模式无命中：两个 Vite URL、`localhost`、`127.0.0.1`、`D:\pjsk`、Windows 盘符路径、`PRIVATE KEY`、秘密变量赋值、`Authorization:`、`Bearer` 均为 0。
+- 后端 `http://localhost:5173` 与 `http://127.0.0.1:5173` 来自 `config.go` 的 development/test 默认精确 CORS 来源，不用于 production 默认值；`127.0.0.1` 也包含允许的默认回环监听配置。
+- 后端 `PRIVATE KEY` 命中来自 Go 标准库 crypto/tls/x509 的算法、PEM 类型标签及错误文本，没有 PEM 边界或密钥正文；`Bearer` 命中来自 pgx 依赖的 OAuthBearer/SASL 支持文本，没有令牌值。
+- 后端 Windows 盘符正则命中是不可读二进制字节偶合，不是路径；精确 `D:\pjsk` 无命中。所有带 `=` 的数据库、恢复邮件、查询码与 SMTP 秘密变量模式均无命中，`Authorization:` 也无命中；未发现真实凭据。
+
+#### 压缩包与解压复验
+
+- 生成 `C:\PJSK-Release-Staging\pjsk-release-e03e446-retry1.tar.gz`，大小 8,566,883 bytes，SHA-256 `779F81D9543E9794E44777C498B90C0145FFDDE335916957E5688D65979D0D43`；对应 `.tar.gz.sha256` 已生成并验证一致。
+- tar 内容从 `./bin`、`./frontend`、`./REVISION`、`./MANIFEST.sha256` 开始，没有额外版本目录或绝对路径层。
+- 解压到全新的 `C:\PJSK-Release-Staging\verify-e03e446-retry1`。解压后顶层严格为四个允许项；源发布目录与解压目录均为 9 个文件、17,866,912 bytes，逐文件 SHA-256 比较 0 差异。
+- 解压后 `MANIFEST.sha256` 8/8 通过；第二次完整敏感扫描与原发布目录分类一致，前端仍无任何开发服务器 URL 或本地路径。
+- 本轮没有连接或修改腾讯云服务器，没有上传、安装、创建数据库/用户/角色、启动后端、运行迁移、提交或推送；未使用子代理，完成后停在阶段 2B-Fix，不进入 2C。

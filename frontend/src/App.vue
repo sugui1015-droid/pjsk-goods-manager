@@ -103,6 +103,7 @@ import {
   clearAllFilters as clearColumnFilters,
   createFilterState,
 } from './filters/columnFilters'
+import { localDevelopmentFrontendOrigins } from './developmentOrigins'
 const maxExcelSize = 20 * 1024 * 1024
 const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
@@ -123,7 +124,7 @@ const fallbackConfig: ConfigResponse = {
   stage: 'local-shell',
   legacyAdminPort: '8512',
   legacyUserPort: '8513',
-  frontendOrigins: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  frontendOrigins: import.meta.env.DEV ? localDevelopmentFrontendOrigins() : [],
   emailDeliveryEnabled: false,
   modules: [
     { key: 'frontend-shell', title: '前端工作台', status: 'ready', description: 'Vue 管理端已启动。' },
