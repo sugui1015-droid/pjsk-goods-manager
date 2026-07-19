@@ -22,6 +22,9 @@ function Check([bool]$Condition, [string]$Name) {
 
 . (Join-Path $scriptDir '_BackupMetadata.ps1')
 . (Join-Path $scriptDir '_RetentionCommon.ps1')
+. (Join-Path $scriptDir '_MigrationFacts.ps1')
+$currentMigrationFacts = Get-MigrationFacts -MigrationsDirectory (Resolve-RepositoryMigrationsDirectory -ScriptDirectory $scriptDir)
+$currentMockMigrations = $currentMigrationFacts.Names -join ','
 
 # Throwaway root OUTSIDE the repo and outside any protected directory. It cannot
 # live under %TEMP% because that sits inside the user profile, which
@@ -90,6 +93,9 @@ class MockPsql {
 '@
     & $csc '/nologo' '/target:exe' ("/out:" + (Join-Path $mockBin 'psql.exe')) $psqlSource | Out-Null
     Check ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $mockBin 'psql.exe'))) "mock psql built (no real PostgreSQL involved)"
+    # The default/current-mode mock must track the repository dynamically. A
+    # stale literal would make this suite fail whenever a real migration lands.
+    $env:PJSK_MOCK_MIGRATIONS = $currentMockMigrations
 
     $powershell = (Get-Command powershell.exe).Source
     function Invoke-Verify {
@@ -152,8 +158,8 @@ class MockPsql {
     Check ($v -and $v.isolatedTestBackup -is [bool] -and $v.isolatedTestBackup -eq $false) "validation carries isolatedTestBackup as a real boolean"
     Check ($v -and $v.schemaVersion -is [int]) "schemaVersion is a number, not a string"
     Check ($v -and ($v.dumpSizeBytes -is [int] -or $v.dumpSizeBytes -is [long]) -and [long]$v.dumpSizeBytes -eq $fx.Size) "dumpSizeBytes is a number matching the dump"
-    Check ($v -and $v.migrationCount -is [int] -and $v.migrationCount -eq 19) "migrationCount is a number"
-    Check ($v -and $v.migrationMax -eq '0019_admin_auth_audit_events.sql') "migrationMax recorded"
+    Check ($v -and $v.migrationCount -is [int] -and $v.migrationCount -eq $currentMigrationFacts.Count) "migrationCount is a number and tracks the repository"
+    Check ($v -and $v.migrationMax -eq $currentMigrationFacts.MaxVersion) "migrationMax tracks the repository"
     Check ($v -and $v.restoreDatabaseName -eq 'pjsk_restore_test_a') "restoreDatabaseName records only the throwaway test database name"
     $validatedOk = $false
     if ($v) { try { $null = [datetime]::Parse($v.validatedUtc); $validatedOk = ($v.validatedUtc -match 'Z|\+00:00') } catch {} }
@@ -387,7 +393,7 @@ class MockPsql {
     Check ($result.ExitCode -ne 0) "pre-migration without an explicit baseline is refused (never inferred)"
 
     # --- baseline arguments are refused outside pre-migration mode ---
-    $env:PJSK_MOCK_MIGRATIONS = ''
+    $env:PJSK_MOCK_MIGRATIONS = $currentMockMigrations
     $strayDir = Join-Path $testRoot 'stray-args'
     $fxStray = New-BackupSetFixture -Dir $strayDir -Base 'pjsk-stray' -Isolated $false
     $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm11', '-PostgresBin', $mockBin, '-BackupFile', $fxStray.Dump,
@@ -405,10 +411,10 @@ class MockPsql {
     $defDir = Join-Path $testRoot 'default-purpose'
     $fxDef = New-BackupSetFixture -Dir $defDir -Base 'pjsk-def' -Isolated $false
     $result = Invoke-Verify @('-RestoredDatabase', 'pjsk_restore_test_pm13', '-PostgresBin', $mockBin, '-BackupFile', $fxDef.Dump)
-    Check ($result.ExitCode -eq 0) "default mode still passes against the repository's 19 migrations"
+    Check ($result.ExitCode -eq 0) "default mode still passes against the repository's current migrations"
     $vdef = Get-Content -LiteralPath (Join-Path $defDir 'pjsk-def.validation.json') -Raw | ConvertFrom-Json
     Check ($vdef.validationPurpose -eq 'current') "default validation records validationPurpose = current, not pre-migration"
-    Check ($vdef.expectedMigrationCount -eq 19 -and $vdef.expectedMigrationMax -eq '0019_admin_auth_audit_events.sql') "default validation records the repository's 19 / 0019 expectation"
+    Check ($vdef.expectedMigrationCount -eq $currentMigrationFacts.Count -and $vdef.expectedMigrationMax -eq $currentMigrationFacts.MaxVersion) "default validation records the repository's dynamic migration expectation"
     Remove-Item Env:\PJSK_MOCK_MIGRATIONS -ErrorAction SilentlyContinue
 
     # =====================================================================

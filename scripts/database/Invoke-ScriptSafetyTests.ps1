@@ -167,6 +167,17 @@ $validationExit = $LASTEXITCODE
 $ErrorActionPreference = $prevPref
 if ($validationExit -ne 0) { $script:failures++ }
 
+# Also run the exported-snapshot coordinator tests. These compile local mock
+# PostgreSQL tools and never connect to a database.
+Write-Output "--- snapshot coordinator tests ---"
+$snapshotTests = Join-Path $scriptDir 'Invoke-SnapshotCoordinatorTests.ps1'
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $snapshotTests
+$snapshotExit = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
+if ($snapshotExit -ne 0) { $script:failures++ }
+
 if ($script:failures -gt 0) {
     Write-Output "RESULT: $script:failures failure(s)"
     exit 1
