@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 
 	"pjsk/backend/internal/clientip"
 	"pjsk/backend/internal/logsafe"
+	"pjsk/backend/internal/recoveryemail"
 )
 
 const sessionCookieName = "pjsk_admin_session"
@@ -34,6 +36,21 @@ type Handler struct {
 	random          io.Reader
 	limiter         *loginLimiter
 	resolveClientIP ClientIPResolver
+
+	// Owner/security capabilities, wired via ConfigureSecurity. All optional:
+	// endpoints answer an explicit "not enabled" when a capability is absent.
+	security            SecurityStore
+	recoveryCodeHMACKey []byte
+	emailProtector      *recoveryemail.Protector
+	emailSender         RecoveryVerificationSender
+}
+
+// RecoveryVerificationSender delivers emailed verification codes. It is
+// structurally satisfied by the recoveryemailverification senders; declaring
+// it here keeps the admin package free of that import (which would create an
+// import cycle through the users package).
+type RecoveryVerificationSender interface {
+	SendRecoveryVerification(ctx context.Context, to string, code string, expiresAt time.Time) error
 }
 
 // ClientIPResolver returns a stable, already-normalized rate-limit key for

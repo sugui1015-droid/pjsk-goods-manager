@@ -70,8 +70,9 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		return clientIPResolver.Resolve(r).Key()
 	}
 
+	adminStore := admin.NewPostgresStore(dbPool)
 	adminHandler := admin.NewHandler(
-		admin.NewPostgresStore(dbPool),
+		adminStore,
 		cfg.AdminSessionTTL,
 		cfg.CookieSecure,
 	)
@@ -79,6 +80,21 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("/api/admin/login", adminHandler.Login)
 	mux.Handle("/api/admin/me", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Me)))
 	mux.Handle("/api/admin/logout", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Logout)))
+
+	// Owner/security endpoints. Recovery-code generation is owner-only and,
+	// like recovery-email binding, requires a fresh re-authentication. The
+	// three /api/admin/recovery/* endpoints are deliberately unauthenticated
+	// single-step reset flows: they never issue a session.
+	mux.Handle("/api/admin/reauth", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.Reauth)))
+	mux.Handle("/api/admin/security/password", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.ChangePassword)))
+	mux.Handle("/api/admin/security/recovery-email", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.RecoveryEmailStatus)))
+	mux.Handle("/api/admin/security/recovery-email/request", adminHandler.RequireAuthentication(adminHandler.RequireRecentReauth(http.HandlerFunc(adminHandler.RecoveryEmailBindRequest))))
+	mux.Handle("/api/admin/security/recovery-email/confirm", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.RecoveryEmailBindConfirm)))
+	mux.Handle("/api/admin/security/audit-summary", adminHandler.RequireAuthentication(http.HandlerFunc(adminHandler.AuditSummary)))
+	mux.Handle("/api/admin/owner/recovery-codes", adminHandler.RequireAuthentication(adminHandler.RequireOwner(adminHandler.RequireRecentReauthWhen(admin.MutatingMatch, http.HandlerFunc(adminHandler.OwnerRecoveryCodes)))))
+	mux.HandleFunc("/api/admin/recovery/code-reset", adminHandler.RecoveryCodeReset)
+	mux.HandleFunc("/api/admin/recovery/email-request", adminHandler.RecoveryEmailResetRequest)
+	mux.HandleFunc("/api/admin/recovery/email-reset", adminHandler.RecoveryEmailReset)
 
 	importPreviewHandler := importpreview.NewHandler(importpreview.NewPostgresStore(dbPool))
 	mux.Handle(
@@ -101,7 +117,12 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	)
 	mux.Handle(
 		"/api/admin/imports/",
-		adminHandler.RequireAuthentication(http.HandlerFunc(importPreviewHandler.Detail)),
+		// Import revert is high-risk: mutating …/revert requests additionally
+		// require a fresh re-authentication; detail reads stay ungated.
+		adminHandler.RequireAuthentication(adminHandler.RequireRecentReauthWhen(
+			admin.MutatingSuffixMatch("/revert"),
+			http.HandlerFunc(importPreviewHandler.Detail),
+		)),
 	)
 
 	ordersHandler := orders.NewHandler(orders.NewPostgresStore(dbPool))
@@ -144,7 +165,8 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	)
 	mux.Handle(
 		"/api/admin/users/merge",
-		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.Merge)),
+		// User merge is high-risk and always requires a fresh re-authentication.
+		adminHandler.RequireAuthentication(adminHandler.RequireRecentReauth(http.HandlerFunc(usersHandler.Merge))),
 	)
 	mux.Handle(
 		"/api/admin/users/",
@@ -169,7 +191,12 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	)
 	mux.Handle(
 		"/api/admin/payments/",
-		adminHandler.RequireAuthentication(http.HandlerFunc(paymentsHandler.Detail)),
+		// Payment void is high-risk: mutating …/void requests additionally
+		// require a fresh re-authentication; detail reads stay ungated.
+		adminHandler.RequireAuthentication(adminHandler.RequireRecentReauthWhen(
+			admin.MutatingSuffixMatch("/void"),
+			http.HandlerFunc(paymentsHandler.Detail),
+		)),
 	)
 	mux.Handle(
 		"/api/admin/payments",
@@ -239,6 +266,30 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 			}
 		}
 	}
+	// Owner/security capabilities for the admin handler. Email delivery
+	// reuses the user recovery sender mode; with mode "disabled" the sender
+	// stays nil and every admin email-recovery endpoint answers an explicit
+	// 503 instead of pretending to send. The admin protector uses its own
+	// AAD so admin and user recovery email ciphertexts stay domain-separated.
+	var adminEmailSender recoveryemailverification.Sender
+	switch cfg.RecoveryEmailSenderMode {
+	case "fake":
+		adminEmailSender = recoveryemailverification.NewFakeSender()
+	case "smtp":
+		adminEmailSender, _ = recoveryemailverification.NewSMTPSender(recoveryemailverification.SMTPConfig{
+			Host: cfg.RecoveryEmailSMTP.Host, Port: cfg.RecoveryEmailSMTP.Port,
+			Username: cfg.RecoveryEmailSMTP.Username, Password: cfg.RecoveryEmailSMTP.Password,
+			From: cfg.RecoveryEmailSMTP.From, FromName: cfg.RecoveryEmailSMTP.FromName,
+			TLSMode: cfg.RecoveryEmailSMTP.TLSMode,
+		})
+	}
+	adminRecoveryEmailProtector, _ := recoveryemail.NewProtectorWithAAD(
+		cfg.RecoveryEmailEncryptionKey,
+		cfg.RecoveryEmailHMACKey,
+		admin.AdminRecoveryEmailAAD,
+	)
+	adminHandler.ConfigureSecurity(adminStore, cfg.AdminRecoveryCodeHMACKey, adminRecoveryEmailProtector, adminEmailSender)
+
 	mux.HandleFunc("/api/query/login", queryHandler.Login)
 	mux.HandleFunc("/api/query/change-code", queryHandler.ChangeCode)
 	mux.HandleFunc("/api/query/bind-code", queryHandler.BindCode)
@@ -257,11 +308,19 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	qrHandler := paymentqr.NewHandler(paymentqr.NewPostgresStore(dbPool))
 	mux.Handle(
 		"/api/admin/payment-qr",
-		adminHandler.RequireAuthentication(http.HandlerFunc(qrHandler.AdminCollection)),
+		// QR changes are high-risk: mutating requests additionally require a
+		// fresh re-authentication; status reads stay ungated.
+		adminHandler.RequireAuthentication(adminHandler.RequireRecentReauthWhen(
+			admin.MutatingMatch,
+			http.HandlerFunc(qrHandler.AdminCollection),
+		)),
 	)
 	mux.Handle(
 		"/api/admin/payment-qr/",
-		adminHandler.RequireAuthentication(http.HandlerFunc(qrHandler.AdminItem)),
+		adminHandler.RequireAuthentication(adminHandler.RequireRecentReauthWhen(
+			admin.MutatingMatch,
+			http.HandlerFunc(qrHandler.AdminItem),
+		)),
 	)
 	mux.Handle(
 		"/api/query/payment-qr",

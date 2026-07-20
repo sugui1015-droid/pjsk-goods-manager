@@ -46,6 +46,21 @@ type Protector struct {
 	aead    cipher.AEAD
 	hmacKey []byte
 	random  io.Reader
+	aad     []byte
+}
+
+// NewProtectorWithAAD builds a Protector bound to a caller-supplied additional
+// authenticated data context, so ciphertexts from different tables (for
+// example user vs admin recovery emails) can never be spliced across domains.
+func NewProtectorWithAAD(encryptionKey []byte, hmacKey []byte, aad string) (*Protector, error) {
+	protector, err := NewProtector(encryptionKey, hmacKey)
+	if err != nil {
+		return nil, err
+	}
+	if aad != "" {
+		protector.aad = []byte(aad)
+	}
+	return protector, nil
 }
 
 func NewProtector(encryptionKey []byte, hmacKey []byte) (*Protector, error) {
@@ -60,7 +75,7 @@ func NewProtector(encryptionKey []byte, hmacKey []byte) (*Protector, error) {
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	return &Protector{aead: aead, hmacKey: append([]byte(nil), hmacKey...), random: rand.Reader}, nil
+	return &Protector{aead: aead, hmacKey: append([]byte(nil), hmacKey...), random: rand.Reader, aad: emailAAD}, nil
 }
 
 func (p *Protector) Protect(value string) (Protected, error) {
@@ -79,7 +94,7 @@ func (p *Protector) Protect(value string) (Protected, error) {
 	result := make([]byte, 1, 1+len(nonce)+len(normalized)+p.aead.Overhead())
 	result[0] = cipherVersion
 	result = append(result, nonce...)
-	result = p.aead.Seal(result, nonce, []byte(normalized), emailAAD)
+	result = p.aead.Seal(result, nonce, []byte(normalized), p.aad)
 	return Protected{Encrypted: result, LookupHash: p.LookupHash(normalized), Masked: masked}, nil
 }
 
@@ -89,7 +104,7 @@ func (p *Protector) reveal(encrypted []byte) (string, error) {
 		return "", ErrInvalidData
 	}
 	nonce := encrypted[1 : 1+nonceSize]
-	plaintext, err := p.aead.Open(nil, nonce, encrypted[1+nonceSize:], emailAAD)
+	plaintext, err := p.aead.Open(nil, nonce, encrypted[1+nonceSize:], p.aad)
 	if err != nil {
 		return "", ErrInvalidData
 	}

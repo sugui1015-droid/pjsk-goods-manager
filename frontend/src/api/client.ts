@@ -151,6 +151,36 @@ export function apiUrl(path: string) {
   return endpoint(path)
 }
 
+// The backend marks high-risk endpoints that need a fresh re-authentication
+// with HTTP 403 and this exact error string. It rides on 403 (not 401) so the
+// app's "session expired" handling never fires for it.
+export const REAUTH_REQUIRED = 'reauth_required'
+
+type ReauthHandler = () => Promise<boolean>
+let reauthHandler: ReauthHandler | null = null
+
+// setReauthHandler registers the app's re-authentication dialog. When a
+// request is rejected with reauth_required, the handler runs (prompting for
+// the password and calling /api/admin/reauth); a true result retries the
+// original request once.
+export function setReauthHandler(handler: ReauthHandler | null) {
+  reauthHandler = handler
+}
+
+async function execute<T>(run: () => Promise<Response>): Promise<T> {
+  try {
+    return await parseResponse<T>(await run())
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 403 && error.message === REAUTH_REQUIRED && reauthHandler) {
+      const confirmed = await reauthHandler()
+      if (confirmed) {
+        return parseResponse<T>(await run())
+      }
+    }
+    throw error
+  }
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = response.statusText
@@ -171,65 +201,59 @@ async function parseResponse<T>(response: Response): Promise<T> {
 }
 
 export async function getJSON<T>(path: string): Promise<T> {
-  const response = await fetch(endpoint(path), {
+  return execute<T>(() => fetch(endpoint(path), {
     credentials: 'include',
-  })
-  return parseResponse<T>(response)
+  }))
 }
 
 export async function postJSON<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(endpoint(path), {
+  return execute<T>(() => fetch(endpoint(path), {
     method: 'POST',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-  })
-  return parseResponse<T>(response)
+  }))
 }
 
 export async function patchJSON<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(endpoint(path), {
+  return execute<T>(() => fetch(endpoint(path), {
     method: 'PATCH',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-  })
-  return parseResponse<T>(response)
+  }))
 }
 export async function putJSON<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(endpoint(path), {
+  return execute<T>(() => fetch(endpoint(path), {
     method: 'PUT',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-  })
-  return parseResponse<T>(response)
+  }))
 }
 
 export async function deleteJSON<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(endpoint(path), {
+  return execute<T>(() => fetch(endpoint(path), {
     method: 'DELETE',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-  })
-  return parseResponse<T>(response)
+  }))
 }
 export async function postForm<T>(path: string, body: FormData): Promise<T> {
-  const response = await fetch(endpoint(path), {
+  return execute<T>(() => fetch(endpoint(path), {
     method: 'POST',
     credentials: 'include',
     body,
-  })
-  return parseResponse<T>(response)
+  }))
 }
 
 
@@ -1065,4 +1089,77 @@ export type ApprovePaymentSubmissionRequest = {
 
 export function approvePaymentSubmission(id: string, request: ApprovePaymentSubmissionRequest): Promise<AdminPaymentSubmissionDetailResponse> {
   return postJSON<AdminPaymentSubmissionDetailResponse>(`/api/admin/payment-submissions/${encodeURIComponent(id)}/approve`, request)
+}
+
+// --- Admin owner/security (stage 2H-2B) ---
+
+export type AdminSecurityRecoveryEmail = {
+  storage_configured: boolean
+  delivery_enabled: boolean
+  has_recovery_email: boolean
+  status?: string
+  masked_email?: string
+  verified_at?: string
+}
+
+export type AdminAuditEvent = {
+  event_type: string
+  occurred_at: string
+  client_ip: string
+  result: string
+  reason_code: string
+}
+
+export type OwnerRecoveryCodesStatus = {
+  enabled: boolean
+  remaining_codes: number
+  generated_at?: string
+}
+
+export type OwnerRecoveryCodesGenerated = {
+  codes: string[]
+  generated_at: string
+}
+
+export function adminReauth(password: string): Promise<void> {
+  return postJSON<void>('/api/admin/reauth', { password })
+}
+
+export function changeAdminPassword(currentPassword: string, newPassword: string): Promise<void> {
+  return postJSON<void>('/api/admin/security/password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  })
+}
+
+export function getAdminSecurityRecoveryEmail(): Promise<AdminSecurityRecoveryEmail> {
+  return getJSON<AdminSecurityRecoveryEmail>('/api/admin/security/recovery-email')
+}
+
+export function requestAdminRecoveryEmailBind(email: string): Promise<{ masked_email: string }> {
+  return postJSON<{ masked_email: string }>('/api/admin/security/recovery-email/request', { email })
+}
+
+export function confirmAdminRecoveryEmailBind(code: string): Promise<void> {
+  return postJSON<void>('/api/admin/security/recovery-email/confirm', { code })
+}
+
+export function getAdminAuditSummary(): Promise<{ events: AdminAuditEvent[] }> {
+  return getJSON<{ events: AdminAuditEvent[] }>('/api/admin/security/audit-summary')
+}
+
+export function getOwnerRecoveryCodesStatus(): Promise<OwnerRecoveryCodesStatus> {
+  return getJSON<OwnerRecoveryCodesStatus>('/api/admin/owner/recovery-codes')
+}
+
+export function generateOwnerRecoveryCodes(): Promise<OwnerRecoveryCodesGenerated> {
+  return postJSON<OwnerRecoveryCodesGenerated>('/api/admin/owner/recovery-codes', {})
+}
+
+export function adminRecoveryCodeReset(username: string, recoveryCode: string, newPassword: string): Promise<void> {
+  return postJSON<void>('/api/admin/recovery/code-reset', {
+    username,
+    recovery_code: recoveryCode,
+    new_password: newPassword,
+  })
 }

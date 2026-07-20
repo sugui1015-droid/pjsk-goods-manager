@@ -3606,3 +3606,77 @@ table td small { display: block; font-size: var(--fs-hint); color: var(--color-h
   }
   .column-filter-popover.is-mobile .column-filter-actions button { flex: 1 1 0; }
 }
+
+/* ===== 账户安全与身份重验证（2026-07-20，阶段 2H-2B）===== */
+
+/* Screen-reader-only field: keeps the username in the form for password
+   managers without rendering it. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.security-panel { margin-bottom: 18px; }
+.security-panel .security-form { max-width: 460px; margin: 0 auto; }
+
+.recovery-codes__list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+.recovery-codes__list code {
+  display: block;
+  padding: 8px 10px;
+  background: #f6f9fb;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+.recovery-codes__actions { display: flex; justify-content: center; gap: 12px; }
+
+.reauth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(23, 34, 45, 0.45);
+  padding: 16px;
+}
+.reauth-dialog {
+  width: 100%;
+  max-width: 380px;
+  background: #ffffff;
+  border: 1px solid #dce4ea;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(23, 34, 45, 0.2);
+}
+.reauth-dialog h3 { font-size: 18px; color: #274b6d; margin-bottom: 6px; }
+.reauth-dialog__actions { display: flex; justify-content: center; gap: 12px; margin-top: 8px; }
+
+@media (max-width: 560px) {
+  .recovery-codes__list { grid-template-columns: minmax(0, 1fr); }
+}
+
+.entry-link {
+  margin-top: 10px;
+  background: none;
+  border: none;
+  color: #315b7d;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}

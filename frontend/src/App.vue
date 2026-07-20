@@ -2,8 +2,18 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   ApiError,
+  adminReauth,
+  adminRecoveryCodeReset,
   apiUrl,
   bindQueryCode,
+  changeAdminPassword,
+  confirmAdminRecoveryEmailBind,
+  generateOwnerRecoveryCodes,
+  getAdminAuditSummary,
+  getAdminSecurityRecoveryEmail,
+  getOwnerRecoveryCodesStatus,
+  requestAdminRecoveryEmailBind,
+  setReauthHandler,
   changeQueryCode,
   createQueryCodeBindToken,
   deleteAdminRecoveryEmail,
@@ -74,6 +84,11 @@ import {
   type RecoveryEmailState,
   type QueryUser,
 } from './api/client'
+import type {
+  AdminAuditEvent,
+  AdminSecurityRecoveryEmail,
+  OwnerRecoveryCodesStatus,
+} from './api/client'
 import {
   buildConfirmRules as buildImportConfirmRules,
   cleanCategoryInput,
@@ -115,6 +130,7 @@ type RouteName =
   | 'admin-users' | 'admin-user-detail'
   | 'admin-finance' | 'admin-payments' | 'admin-payment-detail' | 'admin-qr'
   | 'admin-submissions' | 'admin-submission-detail'
+  | 'admin-security'
 type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
 type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
 type QuickFilterGroup = { key: TextFilterKey; label: string; options: string[] }
@@ -619,9 +635,10 @@ const adminModule = computed(() => {
   if (r === 'admin-orders' || r === 'admin-order-detail') return 'orders'
   if (r === 'admin-users' || r === 'admin-user-detail') return 'users'
   if (r === 'admin-finance' || r === 'admin-payments' || r === 'admin-payment-detail' || r === 'admin-qr' || r === 'admin-submissions' || r === 'admin-submission-detail') return 'finance'
+  if (r === 'admin-security') return 'security'
   return ''
 })
-const adminModuleTitle = computed(() => (({ data: '数据导入中心', orders: '订单管理', users: '用户与账号', finance: '收付款管理' }) as Record<string, string>)[adminModule.value] ?? '')
+const adminModuleTitle = computed(() => (({ data: '数据导入中心', orders: '订单管理', users: '用户与账号', finance: '收付款管理', security: '账户安全' }) as Record<string, string>)[adminModule.value] ?? '')
 // The user module the current route belongs to, and its display name.
 const userModule = computed(() => {
   const r = routeName.value
@@ -741,6 +758,7 @@ function routeFromPath(path: string): RouteName {
   if (path === '/admin/finance/payments') return 'admin-payments'
   if (path.startsWith('/admin/finance/payments/')) return 'admin-payment-detail'
   if (path === '/admin/finance/qr-codes') return 'admin-qr'
+  if (path === '/admin/security') return 'admin-security'
   if (path === '/admin/finance/submissions') return 'admin-submissions'
   if (path.startsWith('/admin/finance/submissions/')) return 'admin-submission-detail'
   return 'home'
@@ -814,6 +832,7 @@ async function handleAdminRouteEntered() {
   if (routeName.value === 'admin-user-detail' && routeUserID.value) await loadAdminUserDetail(routeUserID.value)
   if (routeName.value === 'admin-submissions') await loadPaymentSubmissions()
   if (routeName.value === 'admin-submission-detail' && routeSubmissionID.value) await loadSubmissionDetail(routeSubmissionID.value)
+  if (routeName.value === 'admin-security') await loadAdminSecurity()
 }
 
 async function handleAdminPortalEntered() {
@@ -929,6 +948,251 @@ async function logout() {
   // Leave the admin surface entirely: back to the admin login page.
   navigate('/admin')
 }
+
+// ===== 账户安全（阶段 2H-2B）=====
+const isOwner = computed(() => admin.value?.role === 'owner')
+
+const pwdCurrent = ref('')
+const pwdNew = ref('')
+const pwdConfirm = ref('')
+const pwdLoading = ref(false)
+const pwdMessage = ref('')
+
+async function submitPasswordChange() {
+  if (pwdLoading.value) return
+  pwdMessage.value = ''
+  if (pwdNew.value !== pwdConfirm.value) {
+    pwdMessage.value = '两次输入的新密码不一致'
+    return
+  }
+  pwdLoading.value = true
+  try {
+    await changeAdminPassword(pwdCurrent.value, pwdNew.value)
+    pwdCurrent.value = ''
+    pwdNew.value = ''
+    pwdConfirm.value = ''
+    pwdMessage.value = '密码已更新，其他设备的登录已全部退出。'
+    await loadSecurityAudit()
+  } catch (error) {
+    pwdMessage.value = error instanceof Error ? error.message : '修改密码失败'
+  } finally {
+    pwdLoading.value = false
+  }
+}
+
+const securityRecoveryEmail = ref<AdminSecurityRecoveryEmail | null>(null)
+const recoveryEmailDraft = ref('')
+const recoveryEmailCode = ref('')
+const recoveryEmailBusy = ref(false)
+const recoveryEmailMessage = ref('')
+const recoveryEmailPendingMask = ref('')
+
+async function loadSecurityRecoveryEmail() {
+  try {
+    securityRecoveryEmail.value = await getAdminSecurityRecoveryEmail()
+  } catch {
+    securityRecoveryEmail.value = null
+  }
+}
+
+async function submitRecoveryEmailBind() {
+  if (recoveryEmailBusy.value || !recoveryEmailDraft.value.trim()) return
+  recoveryEmailBusy.value = true
+  recoveryEmailMessage.value = ''
+  try {
+    const result = await requestAdminRecoveryEmailBind(recoveryEmailDraft.value.trim())
+    recoveryEmailPendingMask.value = result.masked_email
+    recoveryEmailDraft.value = ''
+    recoveryEmailMessage.value = `验证码已发送至 ${result.masked_email}，10 分钟内有效。`
+  } catch (error) {
+    recoveryEmailMessage.value = error instanceof Error ? error.message : '发送验证码失败'
+  } finally {
+    recoveryEmailBusy.value = false
+  }
+}
+
+async function submitRecoveryEmailConfirm() {
+  if (recoveryEmailBusy.value || !recoveryEmailCode.value.trim()) return
+  recoveryEmailBusy.value = true
+  recoveryEmailMessage.value = ''
+  try {
+    await confirmAdminRecoveryEmailBind(recoveryEmailCode.value.trim())
+    recoveryEmailCode.value = ''
+    recoveryEmailPendingMask.value = ''
+    recoveryEmailMessage.value = '恢复邮箱已验证生效。'
+    await Promise.all([loadSecurityRecoveryEmail(), loadSecurityAudit()])
+  } catch (error) {
+    recoveryEmailMessage.value = error instanceof Error ? error.message : '验证失败'
+  } finally {
+    recoveryEmailBusy.value = false
+  }
+}
+
+const recoveryCodesStatus = ref<OwnerRecoveryCodesStatus | null>(null)
+const generatedCodes = ref<string[]>([])
+const codesBusy = ref(false)
+const codesMessage = ref('')
+const codesCopied = ref(false)
+
+async function loadRecoveryCodesStatus() {
+  if (!isOwner.value) return
+  try {
+    recoveryCodesStatus.value = await getOwnerRecoveryCodesStatus()
+  } catch {
+    recoveryCodesStatus.value = null
+  }
+}
+
+async function regenerateRecoveryCodes() {
+  if (codesBusy.value) return
+  const existing = recoveryCodesStatus.value?.remaining_codes ?? 0
+  const message = existing > 0
+    ? `重新生成会立即作废现有的 ${existing} 张恢复码，且新恢复码只显示一次。确认继续吗？`
+    : '恢复码只显示一次，请准备好安全的保存方式（打印或密码管理器）。确认生成吗？'
+  if (!window.confirm(message)) return
+  codesBusy.value = true
+  codesMessage.value = ''
+  codesCopied.value = false
+  try {
+    const result = await generateOwnerRecoveryCodes()
+    generatedCodes.value = result.codes
+    await loadRecoveryCodesStatus()
+  } catch (error) {
+    codesMessage.value = error instanceof Error ? error.message : '生成恢复码失败'
+  } finally {
+    codesBusy.value = false
+  }
+}
+
+async function copyRecoveryCodes() {
+  try {
+    await navigator.clipboard.writeText(generatedCodes.value.join('\n'))
+    codesCopied.value = true
+  } catch {
+    codesMessage.value = '复制失败，请手动抄录。'
+  }
+}
+
+function acknowledgeRecoveryCodes() {
+  if (!window.confirm('确认已妥善保存？关闭后将无法再次查看这批恢复码。')) return
+  generatedCodes.value = []
+  codesCopied.value = false
+}
+
+const securityAuditEvents = ref<AdminAuditEvent[]>([])
+
+async function loadSecurityAudit() {
+  try {
+    securityAuditEvents.value = (await getAdminAuditSummary()).events
+  } catch {
+    securityAuditEvents.value = []
+  }
+}
+
+const auditEventLabels: Record<string, string> = {
+  admin_login_succeeded: '登录成功',
+  admin_login_failed: '登录失败',
+  admin_login_rate_limited: '登录被限速',
+  admin_logout_succeeded: '退出登录',
+  admin_reauth_succeeded: '身份重验证成功',
+  admin_reauth_failed: '身份重验证失败',
+  admin_password_changed: '修改密码',
+  admin_recovery_email_bound: '绑定恢复邮箱',
+  admin_recovery_email_bind_failed: '绑定恢复邮箱失败',
+  admin_recovery_codes_generated: '生成恢复码',
+  admin_recovery_code_reset_succeeded: '恢复码重置密码成功',
+  admin_recovery_code_reset_failed: '恢复码重置密码失败',
+  admin_recovery_email_reset_succeeded: '邮箱找回成功',
+  admin_recovery_email_reset_failed: '邮箱找回失败',
+  owner_promoted: '升级为系统所有者',
+  owner_cli_password_reset: '服务器紧急重置密码',
+}
+
+function auditEventLabel(eventType: string) {
+  return auditEventLabels[eventType] ?? eventType
+}
+
+async function loadAdminSecurity() {
+  await Promise.all([loadSecurityRecoveryEmail(), loadRecoveryCodesStatus(), loadSecurityAudit()])
+}
+
+// 登录页的恢复码重置表单（未认证的单步受限流程，不会签发会话）。
+const adminRecoveryVisible = ref(false)
+const adminRecoveryUsername = ref('')
+const adminRecoveryCode = ref('')
+const adminRecoveryNewPassword = ref('')
+const adminRecoveryConfirmPassword = ref('')
+const adminRecoveryBusy = ref(false)
+const adminRecoveryMessage = ref('')
+
+async function submitAdminRecovery() {
+  if (adminRecoveryBusy.value) return
+  adminRecoveryMessage.value = ''
+  if (adminRecoveryNewPassword.value !== adminRecoveryConfirmPassword.value) {
+    adminRecoveryMessage.value = '两次输入的新密码不一致'
+    return
+  }
+  adminRecoveryBusy.value = true
+  try {
+    await adminRecoveryCodeReset(adminRecoveryUsername.value.trim(), adminRecoveryCode.value, adminRecoveryNewPassword.value)
+    adminRecoveryCode.value = ''
+    adminRecoveryNewPassword.value = ''
+    adminRecoveryConfirmPassword.value = ''
+    adminRecoveryVisible.value = false
+    authMessage.value = '密码已重置，这张恢复码已失效。请用新密码登录。'
+  } catch (error) {
+    adminRecoveryMessage.value = error instanceof Error ? error.message : '重置失败'
+  } finally {
+    adminRecoveryBusy.value = false
+  }
+}
+
+// 全局身份重验证弹窗：高风险接口返回 reauth_required 时由 api/client 调起，
+// 验证成功后自动重试原请求。
+const reauthVisible = ref(false)
+const reauthPassword = ref('')
+const reauthBusy = ref(false)
+const reauthMessage = ref('')
+let reauthResolver: ((ok: boolean) => void) | null = null
+
+function openReauthDialog(): Promise<boolean> {
+  if (reauthResolver) return Promise.resolve(false)
+  reauthVisible.value = true
+  reauthPassword.value = ''
+  reauthMessage.value = ''
+  return new Promise((resolve) => {
+    reauthResolver = resolve
+  })
+}
+
+async function submitReauth() {
+  if (reauthBusy.value || !reauthPassword.value) return
+  reauthBusy.value = true
+  reauthMessage.value = ''
+  try {
+    await adminReauth(reauthPassword.value)
+    reauthVisible.value = false
+    reauthPassword.value = ''
+    const resolve = reauthResolver
+    reauthResolver = null
+    resolve?.(true)
+  } catch (error) {
+    reauthMessage.value = error instanceof Error ? error.message : '验证失败'
+  } finally {
+    reauthBusy.value = false
+  }
+}
+
+function cancelReauth() {
+  reauthVisible.value = false
+  reauthPassword.value = ''
+  const resolve = reauthResolver
+  reauthResolver = null
+  resolve?.(false)
+}
+
+setReauthHandler(openReauthDialog)
+onUnmounted(() => setReauthHandler(null))
 
 function onFileChange(event: Event) {
   const input = event.target as HTMLInputElement
@@ -4578,7 +4842,77 @@ onUnmounted(() => {
             </template>
           </section>
         </template>
+
+        <template v-else-if="routeName === 'admin-security'">
+          <section class="panel security-panel" aria-label="修改密码">
+            <div class="panel__header"><div><h2>修改密码</h2><p class="muted">修改成功后，其他设备上的登录会全部退出。建议使用密码管理器生成并保存新密码。</p></div></div>
+            <form class="entry-form security-form" @submit.prevent="submitPasswordChange">
+              <input class="visually-hidden" type="text" name="username" :value="admin?.username ?? ''" autocomplete="username" readonly tabindex="-1" aria-hidden="true" />
+              <label><span>当前密码</span><input v-model="pwdCurrent" type="password" autocomplete="current-password" required placeholder="输入当前密码" /></label>
+              <label><span>新密码</span><input v-model="pwdNew" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="至少 10 位，建议由密码管理器生成" /></label>
+              <label><span>确认新密码</span><input v-model="pwdConfirm" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="再次输入新密码" /></label>
+              <button class="primary-button" type="submit" :disabled="pwdLoading">{{ pwdLoading ? '提交中' : '更新密码' }}</button>
+            </form>
+            <div v-if="pwdMessage" class="inline-alert">{{ pwdMessage }}</div>
+          </section>
+
+          <section v-if="isOwner" class="panel security-panel" aria-label="一次性恢复码">
+            <div class="panel__header"><div><h2>一次性恢复码</h2><p class="muted">忘记密码时可用一张恢复码设置新密码。每张只能使用一次；重新生成会立即作废旧批次。</p></div></div>
+            <p v-if="recoveryCodesStatus" class="muted">当前可用恢复码：{{ recoveryCodesStatus.remaining_codes }} 张<template v-if="recoveryCodesStatus.generated_at">（生成于 {{ formatDate(recoveryCodesStatus.generated_at) }}）</template></p>
+            <div v-if="generatedCodes.length > 0" class="recovery-codes">
+              <p class="muted">这批恢复码只显示这一次，请立即打印或存入密码管理器：</p>
+              <ol class="recovery-codes__list"><li v-for="code in generatedCodes" :key="code"><code>{{ code }}</code></li></ol>
+              <div class="recovery-codes__actions">
+                <button class="secondary-button" type="button" @click="copyRecoveryCodes">{{ codesCopied ? '已复制' : '复制全部' }}</button>
+                <button class="primary-button" type="button" @click="acknowledgeRecoveryCodes">我已妥善保存</button>
+              </div>
+            </div>
+            <button v-else class="secondary-button" type="button" :disabled="codesBusy" @click="regenerateRecoveryCodes">{{ codesBusy ? '生成中' : ((recoveryCodesStatus?.remaining_codes ?? 0) > 0 ? '重新生成恢复码' : '生成恢复码') }}</button>
+            <div v-if="codesMessage" class="inline-alert">{{ codesMessage }}</div>
+          </section>
+
+          <section class="panel security-panel" aria-label="恢复邮箱">
+            <div class="panel__header"><div><h2>恢复邮箱</h2><p class="muted">绑定并验证后，可通过邮箱验证码找回密码。</p></div></div>
+            <div v-if="!securityRecoveryEmail || !securityRecoveryEmail.delivery_enabled" class="inline-alert">邮箱恢复尚未启用：系统当前未配置邮件发送服务，绑定与找回功能将在启用 SMTP 后开放。</div>
+            <template v-else>
+              <p v-if="securityRecoveryEmail.has_recovery_email" class="muted">当前恢复邮箱:{{ securityRecoveryEmail.masked_email }}({{ securityRecoveryEmail.status === 'verified' ? '已验证' : '待验证' }})</p>
+              <form class="entry-form security-form" @submit.prevent="submitRecoveryEmailBind">
+                <label><span>{{ securityRecoveryEmail.has_recovery_email ? '更换恢复邮箱' : '绑定恢复邮箱' }}</span><input v-model="recoveryEmailDraft" type="email" autocomplete="email" maxlength="254" placeholder="输入邮箱地址" /></label>
+                <button class="secondary-button" type="submit" :disabled="recoveryEmailBusy">发送验证码</button>
+              </form>
+              <form v-if="recoveryEmailPendingMask || (securityRecoveryEmail.has_recovery_email && securityRecoveryEmail.status !== 'verified')" class="entry-form security-form" @submit.prevent="submitRecoveryEmailConfirm">
+                <label><span>邮箱验证码</span><input v-model="recoveryEmailCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="输入 6 位数字验证码" /></label>
+                <button class="primary-button" type="submit" :disabled="recoveryEmailBusy">确认绑定</button>
+              </form>
+            </template>
+            <div v-if="recoveryEmailMessage" class="inline-alert">{{ recoveryEmailMessage }}</div>
+          </section>
+
+          <section class="panel security-panel" aria-label="安全审计摘要">
+            <div class="panel__header"><div><h2>最近安全事件</h2><p class="muted">本账号最近 20 条登录与安全操作记录。</p></div></div>
+            <div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>来源 IP</th><th>结果</th></tr></thead><tbody>
+              <tr v-for="(event, index) in securityAuditEvents" :key="index"><td>{{ formatDate(event.occurred_at) }}</td><td>{{ auditEventLabel(event.event_type) }}</td><td>{{ event.client_ip }}</td><td>{{ event.result === 'success' ? '成功' : '失败' }}</td></tr>
+              <tr v-if="securityAuditEvents.length === 0"><td colspan="4" class="muted">暂无记录</td></tr>
+            </tbody></table></div>
+          </section>
+        </template>
       </template>
+
+      <div v-if="reauthVisible" class="reauth-overlay" role="dialog" aria-modal="true" aria-label="身份重验证">
+        <div class="reauth-dialog">
+          <h3>身份重验证</h3>
+          <p class="muted">此操作风险较高，请重新输入密码确认身份（10 分钟内有效）。</p>
+          <form class="entry-form" @submit.prevent="submitReauth">
+            <input class="visually-hidden" type="text" name="username" :value="admin?.username ?? ''" autocomplete="username" readonly tabindex="-1" aria-hidden="true" />
+            <label><span>密码</span><input v-model="reauthPassword" type="password" autocomplete="current-password" required placeholder="输入当前密码" /></label>
+            <div class="reauth-dialog__actions">
+              <button class="secondary-button" type="button" @click="cancelReauth">取消</button>
+              <button class="primary-button" type="submit" :disabled="reauthBusy">{{ reauthBusy ? '验证中' : '确认' }}</button>
+            </div>
+          </form>
+          <div v-if="reauthMessage" class="inline-alert">{{ reauthMessage }}</div>
+        </div>
+      </div>
     </main>
 
     <main v-else class="workspace">
@@ -5010,6 +5344,7 @@ onUnmounted(() => {
               <ModuleCard title="订单管理" description="订单查询、明细筛选、订单详情与导出" accent="neutral" cta="进入模块" @enter="navigate('/admin/orders')" />
               <ModuleCard title="用户与账号" description="用户管理、查询码与恢复邮箱状态" accent="neutral" cta="进入模块" @enter="navigate('/admin/users')" />
               <ModuleCard title="收付款管理" description="付款记录、撤销、未付明细与收款二维码" accent="green" cta="进入模块" @enter="navigate('/admin/finance')" />
+              <ModuleCard title="账户安全" description="修改密码、恢复码、恢复邮箱与安全审计" accent="neutral" cta="进入模块" @enter="navigate('/admin/security')" />
             </div>
           </section>
         </template>
@@ -5020,13 +5355,29 @@ onUnmounted(() => {
             <p class="entry-subtitle">管理员入口</p>
           </header>
           <section class="entry-card">
-            <h2 class="entry-card__title">管理员登录</h2>
-            <form class="entry-form" @submit.prevent="login">
-              <label><span>管理员用户名</span><input v-model="loginUsername" autocomplete="username" required placeholder="输入管理员用户名" /></label>
-              <label><span>密码</span><input v-model="loginPassword" type="password" autocomplete="current-password" required placeholder="输入密码" /></label>
-              <button class="primary-button entry-submit" type="submit" :disabled="loginLoading">{{ loginLoading ? '登录中' : '登录' }}</button>
-            </form>
-            <div v-if="authMessage" class="inline-alert">{{ authMessage }}</div>
+            <template v-if="!adminRecoveryVisible">
+              <h2 class="entry-card__title">管理员登录</h2>
+              <form class="entry-form" @submit.prevent="login">
+                <label><span>管理员用户名</span><input v-model="loginUsername" autocomplete="username" required placeholder="输入管理员用户名" /></label>
+                <label><span>密码</span><input v-model="loginPassword" type="password" autocomplete="current-password" required placeholder="输入密码" /></label>
+                <button class="primary-button entry-submit" type="submit" :disabled="loginLoading">{{ loginLoading ? '登录中' : '登录' }}</button>
+              </form>
+              <button class="entry-link" type="button" @click="adminRecoveryVisible = true; adminRecoveryMessage = ''">忘记密码？使用恢复码重置</button>
+            </template>
+            <template v-else>
+              <h2 class="entry-card__title">恢复码重置密码</h2>
+              <p class="muted">输入一张未使用的一次性恢复码。重置成功后所有旧登录会退出，需要用新密码重新登录。</p>
+              <form class="entry-form" @submit.prevent="submitAdminRecovery">
+                <label><span>管理员用户名</span><input v-model="adminRecoveryUsername" autocomplete="username" required placeholder="输入管理员用户名" /></label>
+                <label><span>恢复码</span><input v-model="adminRecoveryCode" type="text" autocomplete="one-time-code" required placeholder="例如 ABCDE-FGHJK-MNPQR-STVWX" /></label>
+                <label><span>新密码</span><input v-model="adminRecoveryNewPassword" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="至少 10 位" /></label>
+                <label><span>确认新密码</span><input v-model="adminRecoveryConfirmPassword" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="再次输入新密码" /></label>
+                <button class="primary-button entry-submit" type="submit" :disabled="adminRecoveryBusy">{{ adminRecoveryBusy ? '重置中' : '重置密码' }}</button>
+              </form>
+              <button class="entry-link" type="button" @click="adminRecoveryVisible = false">← 返回登录</button>
+              <div v-if="adminRecoveryMessage" class="inline-alert">{{ adminRecoveryMessage }}</div>
+            </template>
+            <div v-if="!adminRecoveryVisible && authMessage" class="inline-alert">{{ authMessage }}</div>
           </section>
         </div>
       </template>

@@ -6,8 +6,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
+	"pjsk/backend/internal/admincli"
 	"pjsk/backend/internal/api"
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/database"
@@ -32,6 +34,12 @@ const (
 )
 
 func main() {
+	// Owner maintenance subcommands (promote-owner, reset-owner-password)
+	// run interactively and never start the HTTP server or migrations.
+	if len(os.Args) > 1 {
+		os.Exit(admincli.Run(os.Args[1:]))
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)

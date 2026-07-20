@@ -13,20 +13,40 @@ type AdminAuthAuditResult string
 type AdminAuthReasonCode string
 
 const (
-	AdminAuthEventLoginSucceeded   AdminAuthEventType = "admin_login_succeeded"
-	AdminAuthEventLoginFailed      AdminAuthEventType = "admin_login_failed"
-	AdminAuthEventLoginRateLimited AdminAuthEventType = "admin_login_rate_limited"
-	AdminAuthEventLogoutSucceeded  AdminAuthEventType = "admin_logout_succeeded"
+	AdminAuthEventLoginSucceeded              AdminAuthEventType = "admin_login_succeeded"
+	AdminAuthEventLoginFailed                 AdminAuthEventType = "admin_login_failed"
+	AdminAuthEventLoginRateLimited            AdminAuthEventType = "admin_login_rate_limited"
+	AdminAuthEventLogoutSucceeded             AdminAuthEventType = "admin_logout_succeeded"
+	AdminAuthEventReauthSucceeded             AdminAuthEventType = "admin_reauth_succeeded"
+	AdminAuthEventReauthFailed                AdminAuthEventType = "admin_reauth_failed"
+	AdminAuthEventPasswordChanged             AdminAuthEventType = "admin_password_changed"
+	AdminAuthEventRecoveryEmailBound          AdminAuthEventType = "admin_recovery_email_bound"
+	AdminAuthEventRecoveryEmailBindFailed     AdminAuthEventType = "admin_recovery_email_bind_failed"
+	AdminAuthEventRecoveryCodesGenerated      AdminAuthEventType = "admin_recovery_codes_generated"
+	AdminAuthEventRecoveryCodeResetSucceeded  AdminAuthEventType = "admin_recovery_code_reset_succeeded"
+	AdminAuthEventRecoveryCodeResetFailed     AdminAuthEventType = "admin_recovery_code_reset_failed"
+	AdminAuthEventRecoveryEmailResetSucceeded AdminAuthEventType = "admin_recovery_email_reset_succeeded"
+	AdminAuthEventRecoveryEmailResetFailed    AdminAuthEventType = "admin_recovery_email_reset_failed"
+	AdminAuthEventOwnerPromoted               AdminAuthEventType = "owner_promoted"
+	AdminAuthEventOwnerCLIPasswordReset       AdminAuthEventType = "owner_cli_password_reset"
 
 	AdminAuthResultSuccess AdminAuthAuditResult = "success"
 	AdminAuthResultFailure AdminAuthAuditResult = "failure"
 
-	AdminAuthReasonNone               AdminAuthReasonCode = "none"
-	AdminAuthReasonInvalidCredentials AdminAuthReasonCode = "invalid_credentials"
-	AdminAuthReasonAccountDisabled    AdminAuthReasonCode = "account_disabled"
-	AdminAuthReasonRateLimited        AdminAuthReasonCode = "rate_limited"
-	AdminAuthReasonDatabaseError      AdminAuthReasonCode = "database_error"
-	AdminAuthReasonAuditWriteError    AdminAuthReasonCode = "audit_write_error"
+	AdminAuthReasonNone                       AdminAuthReasonCode = "none"
+	AdminAuthReasonInvalidCredentials         AdminAuthReasonCode = "invalid_credentials"
+	AdminAuthReasonAccountDisabled            AdminAuthReasonCode = "account_disabled"
+	AdminAuthReasonRateLimited                AdminAuthReasonCode = "rate_limited"
+	AdminAuthReasonDatabaseError              AdminAuthReasonCode = "database_error"
+	AdminAuthReasonAuditWriteError            AdminAuthReasonCode = "audit_write_error"
+	AdminAuthReasonInvalidRecoveryCode        AdminAuthReasonCode = "invalid_recovery_code"
+	AdminAuthReasonInvalidVerificationCode    AdminAuthReasonCode = "invalid_verification_code"
+	AdminAuthReasonVerificationCodeExpired    AdminAuthReasonCode = "verification_code_expired"
+	AdminAuthReasonRecoveryEmailNotConfigured AdminAuthReasonCode = "recovery_email_not_configured"
+	AdminAuthReasonEmailDeliveryDisabled      AdminAuthReasonCode = "email_delivery_disabled"
+	AdminAuthReasonWeakPassword               AdminAuthReasonCode = "weak_password"
+	AdminAuthReasonNotOwner                   AdminAuthReasonCode = "not_owner"
+	AdminAuthReasonValidationFailed           AdminAuthReasonCode = "validation_failed"
 )
 
 var ErrInvalidAdminAuthAuditEvent = errors.New("invalid admin auth audit event")
@@ -131,7 +151,13 @@ func validateAdminAuthAuditEvent(event AdminAuthAuditEvent) error {
 
 func validAdminAuthEventType(value AdminAuthEventType) bool {
 	switch value {
-	case AdminAuthEventLoginSucceeded, AdminAuthEventLoginFailed, AdminAuthEventLoginRateLimited, AdminAuthEventLogoutSucceeded:
+	case AdminAuthEventLoginSucceeded, AdminAuthEventLoginFailed, AdminAuthEventLoginRateLimited, AdminAuthEventLogoutSucceeded,
+		AdminAuthEventReauthSucceeded, AdminAuthEventReauthFailed, AdminAuthEventPasswordChanged,
+		AdminAuthEventRecoveryEmailBound, AdminAuthEventRecoveryEmailBindFailed,
+		AdminAuthEventRecoveryCodesGenerated,
+		AdminAuthEventRecoveryCodeResetSucceeded, AdminAuthEventRecoveryCodeResetFailed,
+		AdminAuthEventRecoveryEmailResetSucceeded, AdminAuthEventRecoveryEmailResetFailed,
+		AdminAuthEventOwnerPromoted, AdminAuthEventOwnerCLIPasswordReset:
 		return true
 	default:
 		return false
@@ -144,7 +170,10 @@ func validAdminAuthResult(value AdminAuthAuditResult) bool {
 
 func validAdminAuthReason(value AdminAuthReasonCode) bool {
 	switch value {
-	case AdminAuthReasonNone, AdminAuthReasonInvalidCredentials, AdminAuthReasonAccountDisabled, AdminAuthReasonRateLimited, AdminAuthReasonDatabaseError, AdminAuthReasonAuditWriteError:
+	case AdminAuthReasonNone, AdminAuthReasonInvalidCredentials, AdminAuthReasonAccountDisabled, AdminAuthReasonRateLimited, AdminAuthReasonDatabaseError, AdminAuthReasonAuditWriteError,
+		AdminAuthReasonInvalidRecoveryCode, AdminAuthReasonInvalidVerificationCode, AdminAuthReasonVerificationCodeExpired,
+		AdminAuthReasonRecoveryEmailNotConfigured, AdminAuthReasonEmailDeliveryDisabled,
+		AdminAuthReasonWeakPassword, AdminAuthReasonNotOwner, AdminAuthReasonValidationFailed:
 		return true
 	default:
 		return false

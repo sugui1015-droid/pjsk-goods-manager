@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ type Config struct {
 	RecoveryEmailHMACKey             []byte
 	RecoveryEmailVerificationHMACKey []byte
 	QueryCodeRecoveryHMACKey         []byte
+	AdminRecoveryCodeHMACKey         []byte
 	RecoveryEmailSenderMode          string
 	RecoveryEmailSMTP                RecoveryEmailSMTPConfig
 	TrustedProxyCIDRs                []netip.Prefix
@@ -79,6 +81,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	adminRecoveryCodeHMACKey, err := loadAdminRecoveryCodeHMACKey(appEnvironment, queryCodeRecoveryHMACKey)
+	if err != nil {
+		return Config{}, err
+	}
 	trustedProxyCIDRs, err := loadTrustedProxyCIDRs()
 	if err != nil {
 		return Config{}, err
@@ -106,6 +112,7 @@ func Load() (Config, error) {
 		RecoveryEmailHMACKey:             recoveryEmailHMACKey,
 		RecoveryEmailVerificationHMACKey: verificationHMACKey,
 		QueryCodeRecoveryHMACKey:         queryCodeRecoveryHMACKey,
+		AdminRecoveryCodeHMACKey:         adminRecoveryCodeHMACKey,
 		RecoveryEmailSenderMode:          senderMode,
 		RecoveryEmailSMTP:                smtpConfig,
 		TrustedProxyCIDRs:                trustedProxyCIDRs,
@@ -270,6 +277,30 @@ func loadQueryCodeRecoveryHMACKey(appEnvironment string) ([]byte, error) {
 		return nil, err
 	}
 	log.Printf("%s is not configured; using temporary %s compatibility fallback outside production", currentName, legacyName)
+	return key, nil
+}
+
+// loadAdminRecoveryCodeHMACKey parses ADMIN_RECOVERY_CODE_HMAC_KEY, the key
+// that hashes admin one-time recovery codes. It is deliberately independent:
+// reusing the query-code recovery key would let one leaked key forge both
+// user and admin recovery material, so an identical value is rejected.
+func loadAdminRecoveryCodeHMACKey(appEnvironment string, queryCodeRecoveryHMACKey []byte) ([]byte, error) {
+	const name = "ADMIN_RECOVERY_CODE_HMAC_KEY"
+
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		if strings.EqualFold(strings.TrimSpace(appEnvironment), "production") {
+			return nil, fmt.Errorf("%s is required in production", name)
+		}
+		return nil, nil
+	}
+	key, err := decodeHMACKey(name, value)
+	if err != nil {
+		return nil, err
+	}
+	if len(queryCodeRecoveryHMACKey) > 0 && subtle.ConstantTimeCompare(key, queryCodeRecoveryHMACKey) == 1 {
+		return nil, fmt.Errorf("%s must not reuse QUERY_CODE_RECOVERY_HMAC_KEY", name)
+	}
 	return key, nil
 }
 
