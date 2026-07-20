@@ -9,6 +9,9 @@ defineProps<{
   accent?: 'blue' | 'green' | 'neutral'
   cta?: string
   disabled?: boolean
+  // When true the meta badge row is always rendered (invisible if meta is
+  // empty), so sibling cards keep their title/desc/meta/cta rows aligned.
+  reserveMeta?: boolean
 }>()
 defineEmits<{ (e: 'enter'): void }>()
 </script>
@@ -23,7 +26,7 @@ defineEmits<{ (e: 'enter'): void }>()
   >
     <span class="module-card__title">{{ title }}</span>
     <span class="module-card__desc">{{ description }}</span>
-    <span v-if="meta" class="module-card__meta">{{ meta }}</span>
+    <span v-if="meta || reserveMeta" class="module-card__meta" :class="{ 'module-card__meta--empty': !meta }">{{ meta || '·' }}</span>
     <span class="module-card__cta">{{ cta ?? '进入模块' }}</span>
   </button>
 </template>

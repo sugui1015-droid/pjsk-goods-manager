@@ -4664,11 +4664,11 @@ onUnmounted(() => {
           <article class="metric-tile"><span>订单数</span><strong>{{ queryOrders.orders.length }}</strong></article>
         </div>
         <section class="module-portal">
-          <div class="module-grid">
-            <ModuleCard title="我的订单" description="订单汇总、商品明细与分类/角色/系列筛选" :meta="queryOrders ? ('共 ' + queryOrders.orders.length + ' 个订单') : ''" accent="blue" cta="查看订单" @enter="navigate('/query/orders')" />
-            <ModuleCard title="付款中心" description="选择支付宝 / 微信、查看应付金额与收款二维码" :meta="queryOrders ? ('未付 ' + formatMoney(queryOrders.remaining_amount)) : ''" accent="green" cta="去付款" @enter="navigate('/query/payment')" />
-            <ModuleCard title="付款记录" description="历史付款流水与可展开的关联明细" :meta="queryOrders ? (queryOrders.payments.length + ' 条记录') : ''" accent="neutral" cta="查看记录" @enter="navigate('/query/payments')" />
-            <ModuleCard title="账户安全" description="修改查询码、找回邮箱验证" accent="neutral" cta="账户设置" @enter="navigate('/query/security')" />
+          <div class="module-grid module-grid--user">
+            <ModuleCard title="我的订单" description="订单汇总、商品明细与分类/角色/系列筛选" :meta="queryOrders ? ('共 ' + queryOrders.orders.length + ' 个订单') : ''" reserve-meta accent="blue" cta="查看订单" @enter="navigate('/query/orders')" />
+            <ModuleCard title="付款中心" description="选择支付宝 / 微信、查看应付金额与收款二维码" :meta="queryOrders ? ('未付 ' + formatMoney(queryOrders.remaining_amount)) : ''" reserve-meta accent="green" cta="去付款" @enter="navigate('/query/payment')" />
+            <ModuleCard title="付款记录" description="历史付款流水与可展开的关联明细" :meta="queryOrders ? (queryOrders.payments.length + ' 条记录') : ''" reserve-meta accent="neutral" cta="查看记录" @enter="navigate('/query/payments')" />
+            <ModuleCard title="账户安全" description="修改查询码、找回邮箱验证" reserve-meta accent="neutral" cta="账户设置" @enter="navigate('/query/security')" />
           </div>
         </section>
       </template>

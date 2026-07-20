@@ -3009,6 +3009,41 @@ th {
   .module-grid { grid-template-columns: minmax(0, 1fr); max-width: 360px; }
 }
 
+/* ===== 用户中心门户四卡布局（阶段 2H-2A）=====
+   统计区与功能区共用同一内容容器：同 max-width、同 gap、同列宽、同中心线。
+   双类选择器只作用于用户中心两处网格与付款汇总，管理端 .module-grid 与其余
+   .summary-grid 不受影响。断点：≥1200px 四列，641–1199px 两列，≤640px 单列。 */
+.summary-grid.portal-summary,
+.module-grid.module-grid--user {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  width: 100%;
+  max-width: 1040px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* 卡片槽位纵向对齐：标题在顶、说明占中、meta 与 CTA 沉底，四卡同线。 */
+.module-grid--user .module-card { justify-content: flex-start; }
+.module-grid--user .module-card__desc { flex: 1; display: flex; align-items: center; justify-content: center; }
+.module-grid--user .module-card__cta { margin-top: auto; }
+.module-card__meta--empty { visibility: hidden; }
+
+/* 付款汇总同为四卡：仅修正 5 列默认模板造成的 4/5 偏左，不加容器宽度（位于面板内）。 */
+.summary-grid.query-pay-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+@media (max-width: 1199px) {
+  .summary-grid.portal-summary,
+  .module-grid.module-grid--user { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 720px; }
+  .summary-grid.query-pay-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+  .summary-grid.portal-summary,
+  .module-grid.module-grid--user { grid-template-columns: minmax(0, 1fr); max-width: 420px; }
+  .summary-grid.query-pay-summary { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ===== 全站文字居中（2026-07-17）=====
    Text within every visible region is centered, while preserving equal control
    heights, natural wrapping, and no horizontal overflow. Layout containers keep
