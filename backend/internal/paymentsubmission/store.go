@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"pjsk/backend/internal/payments"
 
@@ -71,20 +72,61 @@ func (s *PostgresStore) Create(ctx context.Context, in CreateInput) (UserSubmiss
 	}
 	feeCents, payableCents := payments.FeeForPrincipalCents(principalCents, method)
 
-	var id, submittedAt string
+	requestID := normalizeRequestID(in.RequestID)
+
+	// Idempotent insert: a retry of the SAME submission (same user, same
+	// client-generated request id) must return the original row rather than
+	// create a second 收肾记录. `do nothing` + a follow-up select is race-safe —
+	// two concurrent retries cannot both insert, and the loser reads the
+	// winner's row. Deduplication is deliberately keyed on the request id, not
+	// the image hash: the same screenshot may legitimately be submitted twice.
+	var id, submittedAt, status string
 	err = s.pool.QueryRow(ctx, `
 		insert into payment_submissions (
 			user_id, cn_code, payment_method,
 			principal_amount, fee_amount, payable_amount,
-			image_data, mime_type, byte_size, sha256, original_filename_safe
+			image_data, mime_type, byte_size, sha256, original_filename_safe,
+			request_id
 		)
-		values ($1::uuid, $2, $3, $4::numeric(12,2), $5::numeric(12,2), $6::numeric(12,2), $7, $8, $9, $10, $11)
-		returning id::text, to_char(submitted_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		values ($1::uuid, $2, $3, $4::numeric(12,2), $5::numeric(12,2), $6::numeric(12,2), $7, $8, $9, $10, $11, $12)
+		on conflict (user_id, request_id) where request_id is not null do nothing
+		returning id::text, to_char(submitted_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), status
 	`,
 		in.UserID, in.CNCode, method,
 		centsToNumeric(principalCents), centsToNumeric(feeCents), centsToNumeric(payableCents),
 		in.ImageData, in.MimeType, in.ByteSize, in.SHA256, in.OriginalFilename,
-	).Scan(&id, &submittedAt)
+		nullableRequestID(requestID),
+	).Scan(&id, &submittedAt, &status)
+
+	if errors.Is(err, pgx.ErrNoRows) && requestID != "" {
+		// The insert was suppressed by the unique index: this is a retry.
+		// Return the original submission verbatim, including its real amounts
+		// and current status — an already-reviewed proof must not look pending
+		// again just because the client retried.
+		var principal, fee, payable float64
+		err = s.pool.QueryRow(ctx, `
+			select
+				id::text,
+				to_char(submitted_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+				status,
+				principal_amount::float8, fee_amount::float8, payable_amount::float8
+			from payment_submissions
+			where user_id = $1::uuid and request_id = $2
+		`, in.UserID, requestID).Scan(&id, &submittedAt, &status, &principal, &fee, &payable)
+		if err != nil {
+			return UserSubmission{}, err
+		}
+		return UserSubmission{
+			ID:              id,
+			PaymentMethod:   method,
+			PrincipalAmount: principal,
+			FeeAmount:       fee,
+			PayableAmount:   payable,
+			Status:          status,
+			SubmittedAt:     submittedAt,
+			Deduplicated:    true,
+		}, nil
+	}
 	if err != nil {
 		return UserSubmission{}, err
 	}
@@ -95,9 +137,39 @@ func (s *PostgresStore) Create(ctx context.Context, in CreateInput) (UserSubmiss
 		PrincipalAmount: centsToFloat(principalCents),
 		FeeAmount:       centsToFloat(feeCents),
 		PayableAmount:   centsToFloat(payableCents),
-		Status:          StatusSubmitted,
+		Status:          status,
 		SubmittedAt:     submittedAt,
 	}, nil
+}
+
+// normalizeRequestID trims and bounds a client-supplied idempotency key. An
+// unusable value degrades to "no key" (a normal, non-deduplicated insert)
+// rather than an error: a malformed key must never block a real payment proof.
+func normalizeRequestID(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) < 8 || len(trimmed) > 100 {
+		return ""
+	}
+	for _, char := range trimmed {
+		switch {
+		case char >= 'a' && char <= 'z':
+		case char >= 'A' && char <= 'Z':
+		case char >= '0' && char <= '9':
+		case char == '-' || char == '_':
+		default:
+			return ""
+		}
+	}
+	return trimmed
+}
+
+// nullableRequestID keeps the column NULL for absent keys, so the partial
+// unique index ignores those rows entirely.
+func nullableRequestID(requestID string) any {
+	if requestID == "" {
+		return nil
+	}
+	return requestID
 }
 
 func (s *PostgresStore) ListForUser(ctx context.Context, userID string) ([]UserSubmission, error) {

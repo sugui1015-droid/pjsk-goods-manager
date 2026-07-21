@@ -51,10 +51,10 @@ func TestPostgresQueryCodeRecoveryLifecycle(t *testing.T) {
 		t.Fatal("valid recovery code did not issue a short-lived reset capability")
 	}
 	newCode := "RecoveredCode-456"
-	if err := service.Reset(context.Background(), verified.ResetToken, newCode, newCode); err != nil {
+	if resetCN, err := service.Reset(context.Background(), verified.ResetToken, newCode, newCode); err != nil || resetCN == "" {
 		t.Fatal("valid reset capability did not reset the query code")
 	}
-	if err := service.Reset(context.Background(), verified.ResetToken, "AnotherCode-789", "AnotherCode-789"); !errors.Is(err, ErrRejected) {
+	if _, err := service.Reset(context.Background(), verified.ResetToken, "AnotherCode-789", "AnotherCode-789"); !errors.Is(err, ErrRejected) {
 		t.Fatal("used reset capability was replayable")
 	}
 	var storedHash string
@@ -149,7 +149,8 @@ func TestPostgresQueryCodeRecoveryConcurrentResetAndStateChanges(t *testing.T) {
 		wait.Add(1)
 		go func(code string) {
 			defer wait.Done()
-			results <- NewService(f.store, f.protector, recoveryemailverification.NewFakeSender(), f.manager).Reset(context.Background(), token, code, code)
+			_, resetErr := NewService(f.store, f.protector, recoveryemailverification.NewFakeSender(), f.manager).Reset(context.Background(), token, code, code)
+			results <- resetErr
 		}(newCode)
 	}
 	wait.Wait()
@@ -174,7 +175,7 @@ func TestPostgresQueryCodeRecoveryConcurrentResetAndStateChanges(t *testing.T) {
 	if _, err := f.pool.Exec(context.Background(), `update users set status='disabled' where id=$1::uuid`, stateUserID); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewService(f.store, f.protector, recoveryemailverification.NewFakeSender(), f.manager).Reset(context.Background(), stateToken, "StateCode-333", "StateCode-333"); !errors.Is(err, ErrRejected) {
+	if _, err := NewService(f.store, f.protector, recoveryemailverification.NewFakeSender(), f.manager).Reset(context.Background(), stateToken, "StateCode-333", "StateCode-333"); !errors.Is(err, ErrRejected) {
 		t.Fatal("disabled user completed a reset")
 	}
 }
@@ -201,7 +202,7 @@ func TestPostgresQueryCodeRecoveryAuditFailureRollsBack(t *testing.T) {
 		_, _ = f.pool.Exec(context.Background(), fmt.Sprintf(`drop trigger if exists %s on account_security_audit_logs; drop function if exists %s()`, triggerName, functionName))
 	})
 	service := NewService(f.store, f.protector, recoveryemailverification.NewFakeSender(), f.manager)
-	if err := service.Reset(context.Background(), token, "RollbackCode-444", "RollbackCode-444"); err == nil {
+	if _, err := service.Reset(context.Background(), token, "RollbackCode-444", "RollbackCode-444"); err == nil {
 		t.Fatal("audit failure did not abort reset")
 	}
 	var storedHash string

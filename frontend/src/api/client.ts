@@ -89,6 +89,7 @@ export type ImportDetail = {
   goods_series_name?: string
   product_category?: string
   series_code?: string
+  group_name?: string
   display_name?: string
   character_name?: string
   category?: string
@@ -401,6 +402,7 @@ export type OrderItem = {
   character_name?: string
   category?: string
   series_code?: string
+  group_name?: string
   display_name?: string
   sku?: string
   quantity: number
@@ -441,6 +443,7 @@ export type OrderListItem = {
   project_name: string
   item_name: string
   series_code: string
+  group_name: string
   category: string
   character_name: string
   quantity: number
@@ -506,6 +509,7 @@ export type PaymentItemRow = {
   character_name?: string
   category?: string
   series_code?: string
+  group_name?: string
   display_name?: string
   sku?: string
   quantity: number
@@ -608,6 +612,7 @@ export type PaymentDetailItem = {
   character_name?: string
   category?: string
   series_code?: string
+  group_name?: string
   display_name?: string
   sku?: string
   quantity: number
@@ -715,6 +720,20 @@ export function createQueryCodeBindToken(userID: string): Promise<BindTokenRespo
   return postJSON<BindTokenResponse>(`/api/admin/users/${encodeURIComponent(userID)}/query-code-bind-token`, {})
 }
 
+export type BulkBindTokenPreview = {
+  eligible_count: number
+  existing_unused_count: number
+  max_batch_size: number
+  valid_days: number
+}
+
+// Counts what a bulk bind-code issue would affect, without issuing anything.
+// The caller shows these numbers for confirmation before the batch runs.
+export function fetchBulkBindTokenPreview(params: URLSearchParams): Promise<BulkBindTokenPreview> {
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  return getJSON<BulkBindTokenPreview>(`/api/admin/users/bind-token-batch-preview${suffix}`)
+}
+
 export type RecoveryEmailState = {
   has_recovery_email: boolean
   status?: 'pending' | 'verified' | 'disabled'
@@ -765,6 +784,7 @@ export type QueryOrderItem = {
   category?: string
   character_name?: string
   series_code?: string
+  group_name?: string
   display_name: string
   quantity: number
   unit_price: number
@@ -880,6 +900,7 @@ export type AdminUserDetailOrderItem = {
   character_name?: string
   category?: string
   series_code?: string
+  group_name?: string
   display_name?: string
   sku?: string
   quantity: number
@@ -1022,6 +1043,10 @@ export type UserPaymentSubmission = {
   submitted_at: string
   reviewed_at?: string
   reject_reason?: string
+  // Set when the server replayed an existing submission because the request
+  // carried an already-seen idempotency key: the retry landed, but no second
+  // record was created.
+  deduplicated?: boolean
 }
 
 export type UserPaymentSubmissionListResponse = { items: UserPaymentSubmission[] }
@@ -1031,9 +1056,11 @@ export function listUserPaymentSubmissions(): Promise<UserPaymentSubmissionListR
   return getJSON<UserPaymentSubmissionListResponse>('/api/query/payment-submissions')
 }
 
-export function submitPaymentSubmission(form: FormData): Promise<UserPaymentSubmissionCreateResponse> {
-  return postForm<UserPaymentSubmissionCreateResponse>('/api/query/payment-submissions', form)
-}
+// The proof upload deliberately has NO helper here. It goes through
+// src/api/upload.ts (XMLHttpRequest) because it needs upload progress, a
+// timeout and cancellation, none of which fetch can provide - and a 1.25 MB
+// proof takes ~10 s on a phone uplink, so silent waiting is not acceptable.
+// UserPaymentSubmissionCreateResponse below is the shape that endpoint returns.
 
 // One row of the admin proof table. Business fields only — the sha, byte size,
 // mime type, internal user id and linked payment id belong to the detail view's

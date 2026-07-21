@@ -61,15 +61,18 @@ func TestListAcceptsMultipleCNValues(t *testing.T) {
 	assertStrings(t, store.lastFilters.CN, "CN001", "CN002", "CN003")
 }
 
-// TestListKeepsSeriesCategoryRoleIndependent guards the rule that 谷子系列 /
-// 谷子种类 / 谷子角色 are three separate columns, each multi-valued, never
-// folded into one combined search term.
+// TestListKeepsSeriesCategoryRoleIndependent guards the rule that 系列 / 团名 /
+// 分类 / 谷子角色 are separate columns, each multi-valued, never folded into one
+// combined search term. 系列 comes from the template's 分类(系列号) row, 团名 from
+// the character header prefix ("25h miku" → "25h"); they must never share a
+// filter.
 func TestListKeepsSeriesCategoryRoleIndependent(t *testing.T) {
-	store, recorder := listRequest(t, "series=26感谢祭&series=25生日&category=立牌&category=挂件&role=miku&role=rin")
+	store, recorder := listRequest(t, "series=26感谢祭&series=25生日&group=25h&group=ln&category=立牌&category=挂件&role=miku&role=rin")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
 	assertStrings(t, store.lastFilters.Series, "26感谢祭", "25生日")
+	assertStrings(t, store.lastFilters.Group, "25h", "ln")
 	assertStrings(t, store.lastFilters.Category, "立牌", "挂件")
 	assertStrings(t, store.lastFilters.Role, "miku", "rin")
 	if store.lastFilters.Item != nil {

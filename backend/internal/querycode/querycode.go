@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 )
 
 var ErrInvalid = errors.New("invalid query code")
@@ -44,6 +45,21 @@ func GenerateBindToken() (string, error) {
 func HashBindToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// Normalize is the single canonical form for a user-supplied query code.
+// Every flow that hashes, stores, or compares a query code must run the raw
+// input through it first, so that "the value we wrote" and "the value we
+// later compare against" can never diverge.
+//
+// It trims leading and trailing whitespace only — mobile keyboards, paste,
+// and autofill routinely append a space, and a trailing space silently
+// locking a user out of a code they just set is a far worse failure than
+// tolerating it. It deliberately does NOT case-fold (query codes are
+// case-sensitive) and does NOT touch interior whitespace (that is part of
+// the secret).
+func Normalize(value string) string {
+	return strings.TrimSpace(value)
 }
 
 func Validate(value string) error {

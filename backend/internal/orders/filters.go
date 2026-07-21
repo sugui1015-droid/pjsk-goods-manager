@@ -49,6 +49,7 @@ type OrderFilters struct {
 	Project       []string
 	Item          []string
 	Series        []string
+	Group         []string
 	Category      []string
 	Role          []string
 	Status        []string
@@ -97,6 +98,7 @@ func FiltersFromQuery(query url.Values) (OrderFilters, error) {
 		Project:       valueSet(query, "project"),
 		Item:          valueSet(query, "item"),
 		Series:        valueSet(query, "series"),
+		Group:         valueSet(query, "group"),
 		Category:      valueSet(query, "category"),
 		Role:          valueSet(query, "role"),
 		Status:        valueSet(query, "status"),
@@ -312,6 +314,7 @@ var filterColumns = []column{
 	{name: "project", expr: "b.project_name"},
 	{name: "item", expr: "b.item_name"},
 	{name: "series", expr: "b.series_code"},
+	{name: "group", expr: "b.group_name"},
 	{name: "category", expr: "b.category"},
 	{name: "role", expr: "b.character_name"},
 	{name: "status", expr: "b.status"},
@@ -337,6 +340,8 @@ func (f OrderFilters) valuesFor(name string) []string {
 		return f.Item
 	case "series":
 		return f.Series
+	case "group":
+		return f.Group
 	case "category":
 		return f.Category
 	case "role":
@@ -398,6 +403,7 @@ base as (
 		p.name as project_name,
 		pr.name as item_name,
 		coalesce(pr.series_code, '') as series_code,
+		coalesce(pr.group_name, '') as group_name,
 		coalesce(pr.category, '') as category,
 		coalesce(pr.character_name, '') as character_name,
 		oi.quantity,
@@ -500,6 +506,7 @@ select
 	b.project_name,
 	b.item_name,
 	b.series_code,
+	b.group_name,
 	b.category,
 	b.character_name,
 	b.quantity::float8,

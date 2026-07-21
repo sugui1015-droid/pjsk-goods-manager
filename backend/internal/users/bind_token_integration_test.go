@@ -60,8 +60,8 @@ func TestPostgresBindTokenLifecycle(t *testing.T) {
 	if createdBy != adminID {
 		t.Fatalf("created_by = %s, want %s", createdBy, adminID)
 	}
-	if minutesToExpiry < 25 || minutesToExpiry > 35 {
-		t.Fatalf("expiry = %.1f minutes from now, want ~30", minutesToExpiry)
+	if minutesToExpiry < 23*60 || minutesToExpiry > 24*60 {
+		t.Fatalf("expiry = %.1f minutes from now, want ~1440 (24h)", minutesToExpiry)
 	}
 
 	detail, err := store.GetUserDetail(ctx, userID)

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,13 +31,13 @@ func TestInjectedResolverKeyDrivesLoginLimiter(t *testing.T) {
 	handler := NewHandler(stubStore{}, time.Hour, false)
 	handler.ConfigureClientIPResolver(func(*http.Request) string { return "injected-fixed-key" })
 
-	for i := 0; i < 5; i++ {
-		if code := doLoginFrom(t, handler, "10.0.0."+string(rune('1'+i))+":50000", ""); code != http.StatusUnauthorized {
+	for i := 0; i < newLoginLimiter().maxFailures; i++ {
+		if code := doLoginFrom(t, handler, "10.0.0."+strconv.Itoa(1+i)+":50000", ""); code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: status = %d, want 401", i, code)
 		}
 	}
 	if code := doLoginFrom(t, handler, "192.0.2.99:50000", ""); code != http.StatusTooManyRequests {
-		t.Fatalf("after 5 failures on the injected key, status = %d, want 429", code)
+		t.Fatalf("after maxFailures failures on the injected key, status = %d, want 429", code)
 	}
 }
 
@@ -45,7 +46,7 @@ func TestInjectedResolverKeyDrivesLoginLimiter(t *testing.T) {
 func TestSpoofedForwardedForCannotEscapeLoginBlock(t *testing.T) {
 	handler := NewHandler(stubStore{}, time.Hour, false)
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < newLoginLimiter().maxFailures; i++ {
 		if code := doLoginFrom(t, handler, "203.0.113.7:50000", ""); code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: status = %d, want 401", i, code)
 		}
@@ -102,7 +103,7 @@ func TestTrustedProxyResolverSeparatesClients(t *testing.T) {
 	handler := NewHandler(stubStore{}, time.Hour, false)
 	handler.ConfigureClientIPResolver(func(r *http.Request) string { return resolver.Resolve(r).Key() })
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < newLoginLimiter().maxFailures; i++ {
 		if code := doLoginFrom(t, handler, "127.0.0.1:50000", "203.0.113.10"); code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: status = %d, want 401", i, code)
 		}

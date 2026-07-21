@@ -17,6 +17,7 @@ type queryCodeRecoveryStub struct {
 	requestErr error
 	verifyErr  error
 	resetErr   error
+	resetCN    string
 	verified   querycoderecovery.VerifiedCode
 	requestCN  string
 	requestIP  string
@@ -32,9 +33,12 @@ func (s *queryCodeRecoveryStub) Verify(context.Context, string, string) (queryco
 	return s.verified, s.verifyErr
 }
 
-func (s *queryCodeRecoveryStub) Reset(context.Context, string, string, string) error {
+func (s *queryCodeRecoveryStub) Reset(context.Context, string, string, string) (string, error) {
 	s.resetCalls++
-	return s.resetErr
+	if s.resetErr != nil {
+		return "", s.resetErr
+	}
+	return s.resetCN, nil
 }
 
 func TestQueryCodeRecoveryRequestAlwaysUsesUnifiedPublicResponse(t *testing.T) {

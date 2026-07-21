@@ -22,7 +22,9 @@ const (
 type QueryCodeRecoveryService interface {
 	Request(context.Context, string, string) error
 	Verify(context.Context, string, string) (querycoderecovery.VerifiedCode, error)
-	Reset(context.Context, string, string, string) error
+	// Reset returns the CN of the account it reset, so the login-side block
+	// for that account can be lifted once the write has committed.
+	Reset(context.Context, string, string, string) (string, error)
 }
 
 type queryCodeRecoveryRequest struct {
@@ -116,8 +118,8 @@ func (h *Handler) ResetRecoveredQueryCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	token := strings.TrimSpace(request.ResetToken)
-	newQueryCode := strings.TrimSpace(request.NewQueryCode)
-	confirmQueryCode := strings.TrimSpace(request.ConfirmQueryCode)
+	newQueryCode := querycode.Normalize(request.NewQueryCode)
+	confirmQueryCode := querycode.Normalize(request.ConfirmQueryCode)
 	if !querycoderecovery.ValidToken(token) {
 		writeError(w, http.StatusBadRequest, "重置会话无效或已过期，请重新开始找回流程")
 		return
@@ -136,7 +138,7 @@ func (h *Handler) ResetRecoveredQueryCode(w http.ResponseWriter, r *http.Request
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
-	err := h.queryCodeRecovery.Reset(ctx, token, newQueryCode, confirmQueryCode)
+	resetCN, err := h.queryCodeRecovery.Reset(ctx, token, newQueryCode, confirmQueryCode)
 	if err != nil {
 		switch {
 		case errors.Is(err, querycoderecovery.ErrSameQueryCode):
@@ -152,6 +154,12 @@ func (h *Handler) ResetRecoveredQueryCode(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		}
 		return
+	}
+	// Reached only after the reset committed. The email round trip already
+	// proved identity, so any login block this IP+CN built up while guessing
+	// the forgotten code must not survive into the new one.
+	if key := limiterCNKey(resetCN); key != "" {
+		h.limiter.release(h.resolveClientIP(r), key, h.now())
 	}
 	h.clearSessionCookie(w)
 	writeJSON(w, http.StatusOK, queryCodeRecoveryResponse{Success: true, Message: "查询码已重置，请使用新查询码登录。"})

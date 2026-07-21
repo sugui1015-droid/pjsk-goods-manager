@@ -27,7 +27,8 @@ test('每个可筛选表头都有漏斗筛选入口，操作列没有', () => {
   for (const [label, column] of [
     ['CN', 'cn'],
     ['谷子名称', 'item'],
-    ['谷子系列', 'series'],
+    ['系列', 'series'],
+    ['团名', 'group'],
     ['谷子角色', 'role'],
     ['订单状态', 'status'],
     ['付款状态', 'payment_status'],
@@ -409,11 +410,14 @@ test('普通用户阶段 3 页面契约不变', () => {
 
 // ===== 阶段 4F-8：主表列精简 =====
 
-// 主表表头必须严格是这 13 列、且顺序完全一致。
+// 主表表头必须严格是这 14 列、且顺序完全一致。
+// 「系列」来自模板 B2「分类(系列号)」的值，「团名」来自角色列头前缀
+// （"25h miku" → "25h"）：两个独立字段，必须各占一列。
 const ADMIN_ORDER_COLUMNS = [
   'CN',
   '谷子名称',
-  '谷子系列',
+  '系列',
+  '团名',
   '谷子角色',
   '数量',
   '单价',
@@ -438,10 +442,10 @@ function adminOrderHeaderLabels() {
   })
 }
 
-test('订单主表严格为 13 列且顺序一致', () => {
+test('订单主表严格为 14 列且顺序一致', () => {
   const labels = adminOrderHeaderLabels()
   assert.deepEqual(labels, ADMIN_ORDER_COLUMNS)
-  assert.equal(labels.length, 13)
+  assert.equal(labels.length, 14)
   // 空表头/占位列会让列数对不上，这里一并排除。
   assert.ok(labels.every((label) => label.trim() !== ''), '不允许空表头占位列')
 })
@@ -458,7 +462,7 @@ test('主表不再包含用户名称、项目名称、谷子种类', () => {
   // 行的单元格数量与表头一致。
   const bodyRow = ordersTemplate.slice(ordersTemplate.indexOf(':key="item.item_id"'))
   const cells = [...bodyRow.slice(0, bodyRow.indexOf('</tr>')).matchAll(/<td\b/g)]
-  assert.equal(cells.length, 13)
+  assert.equal(cells.length, 14)
 })
 
 test('订单页不再请求项目名称与谷子种类的 facets', () => {
@@ -466,7 +470,7 @@ test('订单页不再请求项目名称与谷子种类的 facets', () => {
   // 也不会有对应的 facets 请求。
   assert.match(
     appSource,
-    /valueColumns: \['cn', 'item', 'series', 'role', 'status', 'payment_status'\]/,
+    /valueColumns: \['cn', 'item', 'series', 'group', 'role', 'status', 'payment_status'\]/,
   )
   assert.doesNotMatch(ordersTemplate, /column="project"/)
   assert.doesNotMatch(ordersTemplate, /column="category"/)
@@ -478,4 +482,20 @@ test('删列后重估表格宽度，未机械保留 1460px', () => {
   const css = read('src/style.css')
   assert.match(css, /\.order-table table \{ min-width: 1100px; \}/)
   assert.doesNotMatch(css, /min-width: 1460px/)
+})
+
+// ===== 系列 / 团名分列 =====
+
+// 「系列」和「团名」是两个来源不同的字段，页面上必须各自绑定各自的数据，
+// 不能共用同一个筛选状态或同一个单元格。
+test('系列与团名各自绑定独立字段与独立筛选', () => {
+  assert.match(ordersTemplate, /<ColumnValueFilter[^>]*orderFilterState\.values\.series[^>]*label="系列"[^>]*column="series"/)
+  assert.match(ordersTemplate, /<ColumnValueFilter[^>]*orderFilterState\.values\.group[^>]*label="团名"[^>]*column="group"/)
+
+  // 单元格：系列读 series_code，团名读 group_name，互不串列。
+  assert.match(ordersTemplate, /\{\{ item\.series_code \|\| '-' \}\}/)
+  assert.match(ordersTemplate, /\{\{ item\.group_name \|\| '-' \}\}/)
+
+  // 旧文案「谷子系列」已不再出现在订单页。
+  assert.ok(!ordersTemplate.includes('谷子系列'), '「谷子系列」应已改名为「团名」/「系列」')
 })

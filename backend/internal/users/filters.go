@@ -567,3 +567,39 @@ where ` + where + `
 order by b.created_at desc, b.cn_code
 limit ` + limit, args.values
 }
+
+// BuildBulkBindTokenQuery selects the users a bulk bind-code issue applies to:
+// the current filter result, narrowed to the only users a bind code can ever
+// be valid for — active, and with no query code set yet. Narrowing here rather
+// than in the caller means an admin cannot widen the batch past those two
+// conditions by crafting filter parameters.
+func BuildBulkBindTokenQuery(filters Filters, maxRows int) (string, []any) {
+	args := &argList{}
+	where := buildConditions(filters, "", args)
+	limit := args.add(maxRows)
+	return baseCTE + `
+select b.id::text as id, b.cn_code as cn_code, b.display_name as display_name
+from base b
+where ` + where + ` and b.status = 'active' and b.has_query_code = 'no'
+order by b.cn_code
+limit ` + limit, args.values
+}
+
+// BuildBulkBindTokenPreviewQuery counts the same batch without issuing
+// anything, so the admin can be shown how many users are affected — and how
+// many of them hold a still-valid older code that the batch would kill —
+// before any code is generated.
+func BuildBulkBindTokenPreviewQuery(filters Filters, maxRows int) (string, []any) {
+	inner, args := BuildBulkBindTokenQuery(filters, maxRows)
+	return `select
+		count(*)::int,
+		count(*) filter (where exists (
+			select 1
+			from user_query_code_bind_tokens t
+			where t.user_id = c.id::uuid
+				and t.used_at is null
+				and t.invalidated_at is null
+				and t.expires_at > now()
+		))::int
+	from (` + inner + `) c`, args
+}

@@ -54,8 +54,8 @@ func (h *Handler) BindCode(w http.ResponseWriter, r *http.Request) {
 	}
 	cn := normalizeCN(request.CN)
 	bindToken := strings.TrimSpace(request.BindToken)
-	newQueryCode := strings.TrimSpace(request.NewQueryCode)
-	confirmQueryCode := strings.TrimSpace(request.ConfirmQueryCode)
+	newQueryCode := querycode.Normalize(request.NewQueryCode)
+	confirmQueryCode := querycode.Normalize(request.ConfirmQueryCode)
 	if cn == "" || bindToken == "" || newQueryCode == "" || confirmQueryCode == "" {
 		writeError(w, http.StatusBadRequest, "请完整输入 CN、绑定码和新查询码")
 		return
@@ -97,6 +97,10 @@ func (h *Handler) BindCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.limiter.recordSuccess(ip, limiterKey)
+	// Only reached once BindQueryCode has committed — a valid one-time bind
+	// token is strong proof of identity, so any login block this IP+CN
+	// accumulated while guessing the old code is now stale and must go.
+	h.limiter.release(ip, limiterCNKey(cn), h.now())
 	writeJSON(w, http.StatusOK, bindCodeResponse{Message: "查询码设置成功，请使用新查询码登录。"})
 }
 

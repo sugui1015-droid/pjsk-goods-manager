@@ -3527,6 +3527,14 @@ table td small { display: block; font-size: var(--fs-hint); color: var(--color-h
 }
 .query-submission-amounts { margin: 0; }
 .query-submission-button { align-self: center; min-width: 180px; }
+.query-submission-cancel { align-self: center; min-width: 180px; margin-top: 0.5rem; }
+/* Upload feedback: a 1.25 MB proof takes ~10 s on a phone uplink, so the phase
+   text and bar are what stop users from assuming the page froze and re-clicking. */
+.submission-compression-note { margin-top: 0.5rem; font-size: 0.85rem; }
+.submission-progress { margin: 0.5rem 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.submission-progress-text { margin: 0; font-size: 0.9rem; color: var(--muted, #5b6b7f); }
+.submission-progress-track { height: 6px; border-radius: 999px; background: rgba(127, 143, 165, 0.25); overflow: hidden; }
+.submission-progress-bar { height: 100%; border-radius: 999px; background: var(--accent, #2f6f9f); transition: width 0.2s ease; }
 .query-submission-history { margin-top: 18px; }
 .query-submission-history h3 { text-align: center; }
 .submission-history-list {

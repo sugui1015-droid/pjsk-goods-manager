@@ -166,6 +166,7 @@ type OrderItem struct {
 	Category        string  `json:"category,omitempty"`
 	CharacterName   string  `json:"character_name,omitempty"`
 	SeriesCode      string  `json:"series_code,omitempty"`
+	GroupName       string  `json:"group_name,omitempty"`
 	DisplayName     string  `json:"display_name"`
 	Quantity        float64 `json:"quantity"`
 	UnitPrice       float64 `json:"unit_price"`
@@ -208,6 +209,17 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
+// ReleaseLoginLockForCN lifts the login-side rate-limit block for a CN on
+// every IP. It is the hook handed to the admin user handler for its
+// query-code reset, and must only be called after that reset has committed.
+// CNs are normalized here so the caller does not have to know how limiter
+// keys are built.
+func (h *Handler) ReleaseLoginLockForCN(cn string) {
+	if key := limiterCNKey(cn); key != "" {
+		h.limiter.releaseForCN(key)
+	}
+}
+
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, http.StatusText(http.StatusMethodNotAllowed))
@@ -220,13 +232,17 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cn := normalizeCN(request.CN)
-	if cn == "" || strings.TrimSpace(request.QueryCode) == "" {
+	// The same normalized value is used for the emptiness check and for the
+	// bcrypt comparison below. Checking one form and comparing another is
+	// exactly what previously let a trailing space reject a correct code.
+	queryCode := querycode.Normalize(request.QueryCode)
+	if cn == "" || queryCode == "" {
 		writeError(w, http.StatusBadRequest, "请输入 CN 和查询码")
 		return
 	}
 
 	ip := h.resolveClientIP(r)
-	if !h.limiter.allow(ip, cn, h.now()) {
+	if !h.limiter.allow(ip, limiterCNKey(cn), h.now()) {
 		writeError(w, http.StatusTooManyRequests, "尝试次数过多，请稍后再试")
 		return
 	}
@@ -244,14 +260,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if err == nil && user.QueryCodeHash != nil && *user.QueryCodeHash != "" {
 		passwordHash = []byte(*user.QueryCodeHash)
 	} else if err == nil {
-		h.limiter.recordFailure(ip, cn, h.now())
+		h.limiter.recordFailure(ip, limiterCNKey(cn), h.now())
 		writeError(w, http.StatusUnauthorized, "CN 或查询码不正确")
 		return
 	}
 
-	matches := bcrypt.CompareHashAndPassword(passwordHash, []byte(request.QueryCode)) == nil
+	matches := bcrypt.CompareHashAndPassword(passwordHash, []byte(queryCode)) == nil
 	if errors.Is(err, ErrNotFound) || user.Status != "active" || !matches {
-		h.limiter.recordFailure(ip, cn, h.now())
+		h.limiter.recordFailure(ip, limiterCNKey(cn), h.now())
 		writeError(w, http.StatusUnauthorized, "CN 或查询码不正确")
 		return
 	}
@@ -269,7 +285,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.limiter.recordSuccess(ip, cn)
+	h.limiter.recordSuccess(ip, limiterCNKey(cn))
 	h.setSessionCookie(w, token, expiresAt)
 	user.QueryCodeHash = nil
 	writeJSON(w, http.StatusOK, loginResponse{User: user})
@@ -341,9 +357,9 @@ func (h *Handler) ChangeCode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	oldQueryCode := strings.TrimSpace(request.OldQueryCode)
-	newQueryCode := strings.TrimSpace(request.NewQueryCode)
-	confirmQueryCode := strings.TrimSpace(request.ConfirmQueryCode)
+	oldQueryCode := querycode.Normalize(request.OldQueryCode)
+	newQueryCode := querycode.Normalize(request.NewQueryCode)
+	confirmQueryCode := querycode.Normalize(request.ConfirmQueryCode)
 	if oldQueryCode == "" {
 		writeError(w, http.StatusBadRequest, "请输入旧查询码")
 		return
@@ -393,6 +409,9 @@ func (h *Handler) ChangeCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.limiter.recordSuccess(ip, limiterKey)
+	// The write committed, so the user must be able to log in with the new
+	// code right away — clear the login-side block for this IP+CN too.
+	h.limiter.release(ip, limiterCNKey(user.CNCode), h.now())
 	h.clearSessionCookie(w)
 	writeJSON(w, http.StatusOK, changeCodeResponse{Message: "查询码已更新，请使用新查询码重新登录。"})
 }
@@ -630,6 +649,7 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			coalesce(product.category, ''),
 			coalesce(product.character_name, ''),
 			coalesce(product.series_code, ''),
+			coalesce(product.group_name, ''),
 			product.name,
 			oi.quantity::float8,
 			oi.unit_price::float8,
@@ -657,6 +677,7 @@ func (s *PostgresStore) listOrderItems(ctx context.Context, orderID string) ([]O
 			&item.Category,
 			&item.CharacterName,
 			&item.SeriesCode,
+			&item.GroupName,
 			&item.DisplayName,
 			&item.Quantity,
 			&item.UnitPrice,
@@ -785,6 +806,14 @@ func (s *PostgresStore) listPaymentItemsForUser(ctx context.Context, userID stri
 
 func normalizeCN(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+// limiterCNKey is the canonical CN form for rate-limit keys. The database
+// lookup matches CNs case-insensitively, so the limiter must too: otherwise
+// varying the case would both evade an active block and prevent a release
+// from finding the key it was meant to clear.
+func limiterCNKey(cn string) string {
+	return strings.ToLower(normalizeCN(cn))
 }
 
 func newSessionToken(random io.Reader) (string, string, error) {

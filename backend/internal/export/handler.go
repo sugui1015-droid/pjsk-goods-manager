@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"pjsk/backend/internal/admin"
 	"pjsk/backend/internal/logsafe"
 	"pjsk/backend/internal/orders"
 	"pjsk/backend/internal/payments"
@@ -24,6 +25,7 @@ const maxExportRows = 50000
 
 type usersStore interface {
 	ExportUsers(context.Context, users.Filters, int) ([]users.ListItem, error)
+	BulkCreateQueryCodeBindTokens(context.Context, users.Filters, string) (users.BulkBindTokenResult, error)
 }
 
 type paymentsStore interface {
@@ -161,6 +163,27 @@ func (h *Handler) loadUsers(w http.ResponseWriter, r *http.Request) ([]users.Lis
 		return nil, false
 	}
 
+	filters, ok := parseUserFilters(w, r)
+	if !ok {
+		return nil, false
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	items, err := h.users.ExportUsers(ctx, filters, maxExportRows)
+	if err != nil {
+		log.Printf("export users: %s", logsafe.Category(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return nil, false
+	}
+	return items, true
+}
+
+// parseUserFilters turns the request's query string into user list filters,
+// dropping only pagination. Both the plain user export and the bind-code batch
+// go through it, so "what the admin sees on screen" and "what the batch acts
+// on" cannot drift apart.
+func parseUserFilters(w http.ResponseWriter, r *http.Request) (users.Filters, bool) {
 	filterQuery := url.Values{}
 	for key, values := range r.URL.Query() {
 		switch key {
@@ -174,21 +197,106 @@ func (h *Handler) loadUsers(w http.ResponseWriter, r *http.Request) ([]users.Lis
 		var badRequest *users.BadRequestError
 		if errors.As(err, &badRequest) {
 			http.Error(w, badRequest.Message, http.StatusBadRequest)
-			return nil, false
+			return users.Filters{}, false
 		}
 		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return nil, false
+		return users.Filters{}, false
+	}
+	return filters, true
+}
+
+// BindTokensExcel issues a fresh bind code to every eligible user in the
+// current filter result and streams them back as a spreadsheet.
+//
+// This is the one export that mutates, which is why it is POST and why the
+// router puts it behind a fresh re-authentication. The plaintext codes exist
+// only in this response body: nothing is written to disk on the server, and
+// no code is logged — only the batch size is.
+func (h *Handler) BindTokensExcel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	account, ok := admin.CurrentAdmin(r.Context())
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	filters, ok := parseUserFilters(w, r)
+	if !ok {
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	items, err := h.users.ExportUsers(ctx, filters, maxExportRows)
-	if err != nil {
-		log.Printf("export users: %s", logsafe.Category(err))
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return nil, false
+	result, err := h.users.BulkCreateQueryCodeBindTokens(ctx, filters, account.ID)
+	if errors.Is(err, users.ErrBulkBindTokenTooMany) {
+		http.Error(w, "筛选结果超过单批上限，请缩小筛选范围后重试。", http.StatusUnprocessableEntity)
+		return
 	}
-	return items, true
+	if err != nil {
+		log.Printf("bulk bind tokens: %s", logsafe.Category(err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if result.Requested == 0 {
+		http.Error(w, "当前筛选结果中没有可生成绑定码的用户。", http.StatusUnprocessableEntity)
+		return
+	}
+	// Counts only — never a code. The skip count is logged too, so a shortfall
+	// is visible in the server log as well as in the download.
+	log.Printf(
+		"bulk bind tokens: admin=%s requested=%d issued=%d skipped=%d",
+		account.ID, result.Requested, len(result.Issued), len(result.Skipped),
+	)
+
+	// The batch outcome rides on the response as headers as well as in the
+	// file, so the caller can report "issued N of M, skipped K" without having
+	// to parse the spreadsheet it just downloaded.
+	w.Header().Set("X-Bind-Token-Requested", strconv.Itoa(result.Requested))
+	w.Header().Set("X-Bind-Token-Issued", strconv.Itoa(len(result.Issued)))
+	w.Header().Set("X-Bind-Token-Skipped", strconv.Itoa(len(result.Skipped)))
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition, X-Bind-Token-Requested, X-Bind-Token-Issued, X-Bind-Token-Skipped")
+
+	columns := []excelColumn{
+		{"CN", excelText, 14, 28, false},
+		{"显示名称", excelText, 14, 30, true},
+		{"结果", excelText, 10, 14, false},
+		{"绑定码", excelText, 14, 20, false},
+		{"过期时间", excelText, 20, 24, false},
+		{"备注", excelText, 18, 36, true},
+	}
+	// Skipped users are listed in the same sheet rather than omitted: a file
+	// with silently fewer rows than the confirmed preview is exactly the
+	// failure mode this column set exists to prevent.
+	rows := []excelRow{}
+	for _, item := range result.Issued {
+		note := ""
+		if item.ReplacedUnused {
+			note = "该用户此前未使用的绑定码已失效"
+		}
+		rows = append(rows, excelRow{
+			textCell(item.CNCode),
+			textCell(item.DisplayName),
+			textCell("已生成"),
+			textCell(item.BindToken),
+			textCell(formatDisplayTime(item.ExpiresAt)),
+			textCell(note),
+		})
+	}
+	for _, item := range result.Skipped {
+		rows = append(rows, excelRow{
+			textCell(item.CNCode),
+			textCell(item.DisplayName),
+			textCell("已跳过"),
+			textCell(""),
+			textCell(""),
+			textCell(item.Reason),
+		})
+	}
+	if err := writeExcel(w, "bind-tokens", columns, rows); err != nil {
+		log.Printf("export bind tokens xlsx: %s", logsafe.Category(err))
+	}
 }
 
 // loadPayments reuses the payment list's filter parser, so the same parameters

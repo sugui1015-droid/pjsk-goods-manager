@@ -84,6 +84,7 @@ type PaymentItemRow struct {
 	CharacterName   string  `json:"character_name,omitempty"`
 	Category        string  `json:"category,omitempty"`
 	SeriesCode      string  `json:"series_code,omitempty"`
+	GroupName       string  `json:"group_name,omitempty"`
 	DisplayName     string  `json:"display_name,omitempty"`
 	SKU             string  `json:"sku,omitempty"`
 	Quantity        float64 `json:"quantity"`
@@ -230,6 +231,7 @@ type PaymentDetailItem struct {
 	CharacterName   string  `json:"character_name,omitempty"`
 	Category        string  `json:"category,omitempty"`
 	SeriesCode      string  `json:"series_code,omitempty"`
+	GroupName       string  `json:"group_name,omitempty"`
 	DisplayName     string  `json:"display_name,omitempty"`
 	SKU             string  `json:"sku,omitempty"`
 	Quantity        float64 `json:"quantity"`
@@ -846,6 +848,7 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
 			coalesce(product.series_code, ''),
+			coalesce(product.group_name, ''),
 			product.name,
 			coalesce(product.sku, ''),
 			oi.quantity::float8,
@@ -880,7 +883,7 @@ func (s *PostgresStore) GetPaymentDetail(ctx context.Context, paymentID string) 
 	detail.Items = []PaymentDetailItem{}
 	for rows.Next() {
 		var item PaymentDetailItem
-		if err := rows.Scan(&item.ID, &item.OrderItemID, &item.OrderID, &item.OrderNo, &item.ProjectName, &item.ProductName, &item.ProductID, &item.CharacterName, &item.Category, &item.SeriesCode, &item.DisplayName, &item.SKU, &item.Quantity, &item.UnitPrice, &item.Amount, &item.PaidAmount, &item.RemainingAmount, &item.AppliedAmount, &item.PaymentStatus, &item.ImportFilename, &item.SourceSheet, &item.SourceRowKey); err != nil {
+		if err := rows.Scan(&item.ID, &item.OrderItemID, &item.OrderID, &item.OrderNo, &item.ProjectName, &item.ProductName, &item.ProductID, &item.CharacterName, &item.Category, &item.SeriesCode, &item.GroupName, &item.DisplayName, &item.SKU, &item.Quantity, &item.UnitPrice, &item.Amount, &item.PaidAmount, &item.RemainingAmount, &item.AppliedAmount, &item.PaymentStatus, &item.ImportFilename, &item.SourceSheet, &item.SourceRowKey); err != nil {
 			return PaymentDetailResponse{}, err
 		}
 		item.Amount = round2(item.Amount)
@@ -1050,6 +1053,7 @@ func listItemsForUserTx(ctx context.Context, q queryer, userID string) ([]Paymen
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
 			coalesce(product.series_code, ''),
+			coalesce(product.group_name, ''),
 			product.name,
 			coalesce(product.sku, ''),
 			oi.quantity::float8,
@@ -1095,6 +1099,7 @@ func listItemsForUserTx(ctx context.Context, q queryer, userID string) ([]Paymen
 			&item.CharacterName,
 			&item.Category,
 			&item.SeriesCode,
+			&item.GroupName,
 			&item.DisplayName,
 			&item.SKU,
 			&item.Quantity,

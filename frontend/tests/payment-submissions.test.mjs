@@ -37,10 +37,17 @@ const userPaymentTemplate = templateBlock(
 
 // ---- API 层 ----
 
+// 付款凭证上传已从 client.ts 的 fetch 通道移出：fetch 无法上报上传进度，
+// 而生产上 1.25 MB 要传 10.3 秒，静默等待正是用户重复提交的原因。
+// 上传改由 src/api/upload.ts 的 XHR 通道承担，这里确保旧函数不会被加回来。
+test('付款凭证上传不再走 client.ts 的 fetch 封装', () => {
+  assert.equal(clientSource.includes('export function submitPaymentSubmission'), false)
+  assert.match(appSource, /uploadFormWithProgress</)
+})
+
 test('client 暴露收肾记录的用户与管理员接口', () => {
   for (const fn of [
     'listUserPaymentSubmissions',
-    'submitPaymentSubmission',
     'listAdminPaymentSubmissions',
     'getAdminPaymentSubmissionFacets',
     'getAdminPaymentSubmissionDetail',

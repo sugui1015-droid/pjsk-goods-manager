@@ -164,7 +164,10 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	result, err := h.store.ConfirmImport(ctx, request.ImportBatchID, account.ID, request.AllowWarnings, request.Rules)
 	if err != nil {
+		var notConfirmable *ImportNotConfirmableError
 		switch {
+		case errors.As(err, &notConfirmable):
+			writeError(w, http.StatusConflict, fmt.Sprintf("该导入批次当前状态为「%s」，不能确认导入。请重新上传文件生成新的预览。", importStatusLabel(notConfirmable.Status)))
 		case errors.Is(err, ErrImportNotFound):
 			writeError(w, http.StatusNotFound, "找不到导入预览记录")
 		case errors.Is(err, ErrImportAlreadyConfirmed):
@@ -178,7 +181,7 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrInvalidImportRules):
 			writeError(w, http.StatusBadRequest, "导入调整规则不合法")
 		default:
-			log.Printf("confirm import: %s", logsafe.Category(err))
+			log.Printf("confirm import: %s", logsafe.Detail(err))
 			writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		}
 		return
@@ -620,10 +623,45 @@ var (
 	ErrImportNotConfirmed     = errors.New("import not confirmed")
 )
 
+// ImportNotConfirmableError says the batch exists but its current status is not
+// one that confirm can act on — most often 'reverted', when the preview page
+// still holds a batch that was already 撤销ed.
+//
+// It exists because this case used to be a bare fmt.Errorf: it matched none of
+// the sentinel cases in Confirm's switch, fell through to default, and returned
+// 500 with the log line "confirm import: internal error". It is a normal
+// business conflict, not a server fault.
+type ImportNotConfirmableError struct {
+	Status string
+}
+
+func (e *ImportNotConfirmableError) Error() string {
+	return fmt.Sprintf("import batch status %q cannot be confirmed", e.Status)
+}
+
+// importStatusLabels are the batch statuses the confirm flow can report back to
+// an admin. The status is our own enum, never user data, so it is safe to show.
+var importStatusLabels = map[string]string{
+	"previewed":  "已预览",
+	"processing": "处理中",
+	"confirmed":  "已确认",
+	"completed":  "已完成",
+	"partial":    "部分成功",
+	"reverted":   "已撤销",
+	"failed":     "失败",
+}
+
+func importStatusLabel(status string) string {
+	if label, ok := importStatusLabels[status]; ok {
+		return label
+	}
+	return status
+}
+
 func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string, adminID string, allowWarnings bool, rules ConfirmRules) (ConfirmResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("begin confirm transaction", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -641,13 +679,13 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 		return ConfirmResult{}, ErrImportNotFound
 	}
 	if err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("load preview payload", err)
 	}
 	if status == "confirmed" || status == "completed" || status == "partial" {
 		return ConfirmResult{}, ErrImportAlreadyConfirmed
 	}
 	if status != "previewed" {
-		return ConfirmResult{}, fmt.Errorf("import batch status %q cannot be confirmed", status)
+		return ConfirmResult{}, &ImportNotConfirmableError{Status: status}
 	}
 	if len(payload) == 0 {
 		return ConfirmResult{}, ErrImportNotFound
@@ -655,11 +693,11 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 
 	var preview Preview
 	if err := json.Unmarshal(payload, &preview); err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("decode preview payload", err)
 	}
 	preview, err = applyImportRules(preview, rules)
 	if err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("apply import rules", err)
 	}
 	if hasFatalIssues(preview.Errors) {
 		return ConfirmResult{}, ErrImportHasFatalErrors
@@ -681,12 +719,12 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 		set status = 'processing', started_at = coalesce(started_at, now())
 		where id = $1::uuid
 	`, importBatchID); err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("mark batch processing", err)
 	}
 
 	projectID, err := insertProject(ctx, tx, importBatchID, fileHash, originalFilename)
 	if err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("insert project", err)
 	}
 
 	userIDs := map[string]string{}
@@ -703,7 +741,7 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 			if !ok {
 				userID, err = upsertUser(ctx, tx, detail.NormalizedCN, detail.OriginalCN)
 				if err != nil {
-					return ConfirmResult{}, err
+					return ConfirmResult{}, logsafe.Stage("upsert user", err)
 				}
 				userIDs[detail.NormalizedCN] = userID
 			}
@@ -713,7 +751,7 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 			if !ok {
 				productID, err = upsertProduct(ctx, tx, projectID, productKey, batch, detail)
 				if err != nil {
-					return ConfirmResult{}, err
+					return ConfirmResult{}, logsafe.Stage("upsert product", err)
 				}
 				productIDs[productKey] = productID
 				productCount++
@@ -723,13 +761,13 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 			if !ok {
 				orderID, err = insertOrder(ctx, tx, importBatchID, projectID, userID, detail.NormalizedCN)
 				if err != nil {
-					return ConfirmResult{}, err
+					return ConfirmResult{}, logsafe.Stage("insert order", err)
 				}
 				orderIDs[userID] = orderID
 			}
 
 			if err := insertOrderItem(ctx, tx, importBatchID, orderID, productID, batch, detail); err != nil {
-				return ConfirmResult{}, err
+				return ConfirmResult{}, logsafe.Stage("insert order item", err)
 			}
 			orderItemCount++
 			totalQuantity += detail.Quantity
@@ -751,7 +789,7 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 				updated_at = now()
 			where id = $1::uuid
 		`, orderID); err != nil {
-			return ConfirmResult{}, err
+			return ConfirmResult{}, logsafe.Stage("recalculate order total", err)
 		}
 	}
 
@@ -772,7 +810,7 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 	}
 	resultPayload, err := json.Marshal(result)
 	if err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("encode confirm result", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -788,11 +826,11 @@ func (s *PostgresStore) ConfirmImport(ctx context.Context, importBatchID string,
 			warnings_accepted = $7
 		where id = $1::uuid
 	`, importBatchID, orderItemCount, confirmedAt, adminID, projectID, resultPayload, allowWarnings, len(preview.Errors)); err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("mark batch confirmed", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return ConfirmResult{}, err
+		return ConfirmResult{}, logsafe.Stage("commit import transaction", err)
 	}
 	return result, nil
 }
@@ -983,6 +1021,7 @@ func productKey(batch BatchPreview, detail DetailPreview) string {
 		productNameForDetail(batch, detail),
 		detail.ProductCategory,
 		detail.SeriesCode,
+		detail.GroupName,
 		detail.CharacterName,
 		detail.ColumnName,
 		detail.PriceType,
@@ -1019,17 +1058,18 @@ func upsertProduct(ctx context.Context, tx dbTx, projectID string, sku string, b
 	}
 	var productID string
 	err := tx.QueryRow(ctx, `
-		insert into products (project_id, sku, name, character_name, category, series_code, unit_price, status, sort_order)
-		values ($1::uuid, $2, $3, $4, $5, $6, $7, 'active', $8)
+		insert into products (project_id, sku, name, character_name, category, series_code, group_name, unit_price, status, sort_order)
+		values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, 'active', $9)
 		on conflict (project_id, sku) do update
 		set name = excluded.name,
 			character_name = excluded.character_name,
 			category = excluded.category,
 			series_code = excluded.series_code,
+			group_name = excluded.group_name,
 			unit_price = excluded.unit_price,
 			updated_at = now()
 		returning id::text
-	`, projectID, sku, productName, characterName, category, detail.SeriesCode, detail.UnitPrice, detail.ColumnIndex).Scan(&productID)
+	`, projectID, sku, productName, characterName, category, detail.SeriesCode, detail.GroupName, detail.UnitPrice, detail.ColumnIndex).Scan(&productID)
 	return productID, err
 }
 

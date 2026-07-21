@@ -160,6 +160,10 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.Facets)),
 	)
 	mux.Handle(
+		"/api/admin/users/bind-token-batch-preview",
+		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.BulkBindTokenPreview)),
+	)
+	mux.Handle(
 		"/api/admin/users/merge-preview",
 		adminHandler.RequireAuthentication(http.HandlerFunc(usersHandler.MergePreview)),
 	)
@@ -217,6 +221,12 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.UsersExcel)),
 	)
 	mux.Handle(
+		// The only export that mutates: it issues a live bind code per user in
+		// the filter result. Always requires a fresh re-authentication.
+		"/api/admin/export/bind-tokens.xlsx",
+		adminHandler.RequireAuthentication(adminHandler.RequireRecentReauth(http.HandlerFunc(exportHandler.BindTokensExcel))),
+	)
+	mux.Handle(
 		"/api/admin/export/payments.csv",
 		adminHandler.RequireAuthentication(http.HandlerFunc(exportHandler.Payments)),
 	)
@@ -240,6 +250,10 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	)
 	queryHandler.ConfigureClientIPResolver(resolveClientIP)
 	queryHandler.ConfigureRecoveryEmail(usersStore, recoveryEmailProtector)
+	// An admin resetting a user's query code must also clear that user's
+	// login-side block, otherwise the user still cannot log in with the code
+	// they were just given.
+	usersHandler.ConfigureLoginLockReleaser(queryHandler)
 	if verificationManager, err := recoveryemailverification.NewManager(cfg.RecoveryEmailVerificationHMACKey); err == nil && recoveryEmailProtector != nil {
 		var sender recoveryemailverification.Sender
 		switch cfg.RecoveryEmailSenderMode {

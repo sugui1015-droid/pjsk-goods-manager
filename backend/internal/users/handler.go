@@ -31,6 +31,26 @@ type Handler struct {
 	store                  Store
 	recoveryEmailStore     RecoveryEmailStore
 	recoveryEmailProtector RecoveryEmailProtector
+	loginLockReleaser      LoginLockReleaser
+}
+
+// LoginLockReleaser lifts the user-facing login rate-limit block for a CN.
+// The admin query-code reset lives in this package but the limiter lives in
+// the query package, so the router injects the hook rather than either
+// package importing the other.
+//
+// Unlike the user-driven flows, the admin's own IP says nothing about where
+// the user will log in from, so this clears the CN across IPs. That is safe
+// precisely because it is reachable only behind admin authentication and
+// only after the new query code has been written.
+type LoginLockReleaser interface {
+	ReleaseLoginLockForCN(cn string)
+}
+
+// ConfigureLoginLockReleaser is optional; when unset, an admin reset simply
+// leaves the block to expire on its own.
+func (h *Handler) ConfigureLoginLockReleaser(releaser LoginLockReleaser) {
+	h.loginLockReleaser = releaser
 }
 
 type Store interface {
@@ -40,6 +60,7 @@ type Store interface {
 	SetQueryCode(context.Context, string, string, bool) (ListItem, error)
 	SetQueryAccessStatus(context.Context, string, string) (ListItem, error)
 	CreateQueryCodeBindToken(context.Context, string, string) (BindTokenResponse, error)
+	PreviewBulkQueryCodeBindTokens(context.Context, Filters) (BulkBindTokenPreview, error)
 	PreviewMerge(context.Context, string, string) (MergePreviewResponse, error)
 	MergeUsers(context.Context, MergeRequest, string) (MergeResponse, error)
 }
@@ -118,6 +139,7 @@ type DetailOrderItem struct {
 	CharacterName   string  `json:"character_name,omitempty"`
 	Category        string  `json:"category,omitempty"`
 	SeriesCode      string  `json:"series_code,omitempty"`
+	GroupName       string  `json:"group_name,omitempty"`
 	DisplayName     string  `json:"display_name,omitempty"`
 	SKU             string  `json:"sku,omitempty"`
 	Quantity        float64 `json:"quantity"`
@@ -281,7 +303,7 @@ func (h *Handler) UpdateQueryCode(w http.ResponseWriter, r *http.Request, userID
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	queryCode := strings.TrimSpace(request.QueryCode)
+	queryCode := querycode.Normalize(request.QueryCode)
 	if err := validateQueryCode(queryCode); err != nil {
 		writeError(w, http.StatusBadRequest, "查询码格式不正确")
 		return
@@ -317,6 +339,11 @@ func (h *Handler) UpdateQueryCode(w http.ResponseWriter, r *http.Request, userID
 		log.Printf("update user query code: %s", logsafe.Category(err))
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+	// The write committed: whatever login failures the user racked up against
+	// the old code must not keep them out of the code the admin just set.
+	if h.loginLockReleaser != nil {
+		h.loginLockReleaser.ReleaseLoginLockForCN(user.CNCode)
 	}
 	writeJSON(w, http.StatusOK, map[string]ListItem{"user": user})
 }
@@ -772,6 +799,7 @@ func (s *PostgresStore) listOrderItemsForUserDetail(ctx context.Context, orderID
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
 			coalesce(product.series_code, ''),
+			coalesce(product.group_name, ''),
 			product.name,
 			coalesce(product.sku, ''),
 			oi.quantity::float8,
@@ -810,6 +838,7 @@ func (s *PostgresStore) listOrderItemsForUserDetail(ctx context.Context, orderID
 			&item.CharacterName,
 			&item.Category,
 			&item.SeriesCode,
+			&item.GroupName,
 			&item.DisplayName,
 			&item.SKU,
 			&item.Quantity,

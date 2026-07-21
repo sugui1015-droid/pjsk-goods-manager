@@ -46,6 +46,7 @@ var facetableColumns = map[string]bool{
 	"project":        true,
 	"item":           true,
 	"series":         true,
+	"group":          true,
 	"category":       true,
 	"role":           true,
 	"status":         true,

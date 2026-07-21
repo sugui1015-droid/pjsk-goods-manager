@@ -27,6 +27,10 @@ type stubStore struct {
 	bindTokenUserID  string
 	bindTokenAdminID string
 	bindTokenErr     error
+	bulkPreview      BulkBindTokenPreview
+	bulkPreviewErr   error
+
+	queryCodeHash string
 }
 
 func (s *stubStore) ListUsers(_ context.Context, filters Filters) (ListResponse, error) {
@@ -49,6 +53,7 @@ func (s *stubStore) SetQueryCode(_ context.Context, id string, hash string, rese
 		return ListItem{}, s.detailErr
 	}
 	s.detailID = id
+	s.queryCodeHash = hash
 	return ListItem{ID: id, CNCode: "succ", HasQueryCode: true, Status: "active"}, nil
 }
 
@@ -66,6 +71,13 @@ func (s *stubStore) CreateQueryCodeBindToken(_ context.Context, userID string, a
 		return BindTokenResponse{}, s.bindTokenErr
 	}
 	return BindTokenResponse{BindToken: "FAKE-TOKEN", ExpiresAt: "2026-07-13T15:00:00Z", Message: "绑定码仅显示一次，请安全交给用户。"}, nil
+}
+
+func (s *stubStore) PreviewBulkQueryCodeBindTokens(_ context.Context, _ Filters) (BulkBindTokenPreview, error) {
+	if s.bulkPreviewErr != nil {
+		return BulkBindTokenPreview{}, s.bulkPreviewErr
+	}
+	return s.bulkPreview, nil
 }
 
 func (s *stubStore) PreviewMerge(_ context.Context, _ string, _ string) (MergePreviewResponse, error) {

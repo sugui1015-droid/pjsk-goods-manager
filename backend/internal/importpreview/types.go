@@ -81,6 +81,7 @@ type DetailPreview struct {
 	GoodsSeriesName string  `json:"goods_series_name,omitempty"`
 	ProductCategory string  `json:"product_category,omitempty"`
 	SeriesCode      string  `json:"series_code,omitempty"`
+	GroupName       string  `json:"group_name,omitempty"`
 	DisplayName     string  `json:"display_name,omitempty"`
 	CharacterName   string  `json:"character_name,omitempty"`
 	Category        string  `json:"category,omitempty"`

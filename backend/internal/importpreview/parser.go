@@ -409,7 +409,8 @@ type itemColumn struct {
 	Col        int
 	Name       string
 	Category   string
-	SeriesName string
+	SeriesName string // 系列：标准模板取 B2「分类(系列号)」那一行的值
+	GroupName  string // 团名：角色列头的前缀，例如 "25h miku" 的 "25h"
 	Character  string
 	UnitPrice  float64
 }
@@ -678,11 +679,16 @@ func parseStandardImportSheet(currentSheet sheet, notices []Issue, sheetID strin
 		return BatchPreview{}, false
 	}
 	goodsSeriesName := bracketTitle(currentSheet.cellText(0, 0))
-	if goodsSeriesName == "" || goodsSeriesName == "\u8c37\u5b50\u7cfb\u5217\u540d" {
+	if isStandardTitlePlaceholder(goodsSeriesName) {
 		goodsSeriesName = cleanStandardTitle(currentSheet.cellText(0, 0))
 	}
-	if goodsSeriesName == "" || goodsSeriesName == "\u8c37\u5b50\u7cfb\u5217\u540d" {
+	if isStandardTitlePlaceholder(goodsSeriesName) {
 		goodsSeriesName = title
+	}
+	// title 本身也可能是从 A1 的【】里取的同一个占位词，最终兜底必须落到工作表名，
+	// 不能再回到占位词。
+	if isStandardTitlePlaceholder(goodsSeriesName) {
+		goodsSeriesName = cleanText(currentSheet.Name)
 	}
 	defaultProductCategory := cleanStandardCategory(currentSheet.cellText(1, 2))
 	batchName := goodsDisplayName(goodsSeriesName, defaultProductCategory)
@@ -715,11 +721,14 @@ func parseStandardImportSheet(currentSheet sheet, notices []Issue, sheetID strin
 			continue
 		}
 		itemColumns = append(itemColumns, itemColumn{
-			Col:        col,
-			Name:       itemName,
-			UnitPrice:  round4(*unitPrice),
-			Category:   categoryByColumn[col],
-			SeriesName: character.Variant,
+			Col:       col,
+			Name:      itemName,
+			UnitPrice: round4(*unitPrice),
+			Category:  categoryByColumn[col],
+			// 系列来自 B2「分类(系列号)」那一行；兼容策略：同一个值同时进
+			// category（分类）和 series_code（系列），页面上是两列。
+			SeriesName: categoryByColumn[col],
+			GroupName:  character.Variant,
 			Character:  character.Character,
 		})
 	}
@@ -805,6 +814,7 @@ func parseStandardImportSheet(currentSheet sheet, notices []Issue, sheetID strin
 				GoodsSeriesName: goodsSeriesName,
 				ProductCategory: item.Category,
 				SeriesCode:      item.SeriesName,
+				GroupName:       item.GroupName,
 				DisplayName:     goodsDisplayName(goodsSeriesName, item.Category),
 				CharacterName:   item.Character,
 				Category:        item.Category,
@@ -872,6 +882,16 @@ func cleanStandardTitle(value string) string {
 	}
 	text = strings.Trim(text, "\uff0c, \uff1a:")
 	return cleanText(text)
+}
+
+// isStandardTitlePlaceholder 判断标题是否仍是模板自带的占位文字（未被填表人替换）。
+func isStandardTitlePlaceholder(value string) bool {
+	switch cleanText(value) {
+	case "", "谷子系列名", "谷子名字":
+		return true
+	default:
+		return false
+	}
 }
 
 func cleanStandardCategory(value string) string {
@@ -1113,7 +1133,46 @@ func normalizeCN(value string) string {
 }
 
 func normalizeHeader(value string) string {
-	return strings.ToLower(strings.ReplaceAll(cleanText(value), " ", ""))
+	return strings.ToLower(strings.ReplaceAll(stripHeaderAnnotation(cleanText(value)), " ", ""))
+}
+
+// stripHeaderAnnotation 去掉表头末尾的括号备注，例如「分类(系列号)」→「分类」、
+// 「种类（角色名）」→「种类」。括号内文字只是给填表人看的中文说明，不是导出程序
+// 的原始字段，因此字段匹配时忽略；模板与预览展示仍使用完整原文。
+func stripHeaderAnnotation(value string) string {
+	text := strings.TrimSpace(value)
+	for {
+		if !strings.HasSuffix(text, ")") && !strings.HasSuffix(text, "）") {
+			return text
+		}
+		start := matchingOpenBracket(text)
+		if start <= 0 {
+			return text
+		}
+		outside := strings.TrimSpace(text[:start])
+		if outside == "" {
+			return text
+		}
+		text = outside
+	}
+}
+
+// matchingOpenBracket 返回与末尾右括号配对的左括号下标，允许括号嵌套；找不到时返回 -1。
+func matchingOpenBracket(text string) int {
+	depth := 0
+	runes := []rune(text)
+	for index := len(runes) - 1; index >= 0; index-- {
+		switch runes[index] {
+		case ')', '）':
+			depth++
+		case '(', '（':
+			depth--
+			if depth == 0 {
+				return len(string(runes[:index]))
+			}
+		}
+	}
+	return -1
 }
 
 var whitespacePattern = regexp.MustCompile(`\s+`)

@@ -70,3 +70,46 @@ func TestLoginLimiterCapsAttemptsPerIP(t *testing.T) {
 		t.Fatal("cap should reset in the next window")
 	}
 }
+
+// release must relieve — not reset — the per-IP attempt gate. A user who just
+// set a new query code has to get through immediately, but the gate must
+// still be there for the request after the grace slots are used up.
+func TestReleaseGrantsBoundedPerIPGrace(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+	const ip = "203.0.113.1"
+
+	for i := 0; i < limiter.maxAttempts; i++ {
+		limiter.allow(ip, "cn001", now)
+	}
+	if limiter.allow(ip, "cn001", now) {
+		t.Fatal("per-IP gate did not close after maxAttempts")
+	}
+
+	limiter.release(ip, "cn001", now)
+
+	for i := 0; i < releaseGraceAttempts; i++ {
+		if !limiter.allow(ip, "cn001", now) {
+			t.Fatalf("grace attempt %d was refused", i)
+		}
+	}
+	if limiter.allow(ip, "cn001", now) {
+		t.Fatal("per-IP gate was fully reset instead of granted bounded grace")
+	}
+}
+
+// release must not hand grace to an IP that never had a counter, nor leak
+// across IPs.
+func TestReleaseDoesNotAffectOtherIPs(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+
+	for i := 0; i < limiter.maxFailures; i++ {
+		limiter.recordFailure("198.51.100.9", "cn001", now)
+	}
+	limiter.release("203.0.113.1", "cn001", now)
+
+	if limiter.allow("198.51.100.9", "cn001", now) {
+		t.Fatal("release on one IP cleared another IP's block for the same CN")
+	}
+}

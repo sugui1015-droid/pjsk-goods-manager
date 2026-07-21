@@ -134,7 +134,7 @@ test('320px 页面级防横滚：表格仅容器内部滚动', () => {
 test('阶段 3～7 页面契约不回退', () => {
   // 订单页（4F）：明细行 + 同一套筛选参数入口。
   assert.match(appSource, /function orderFilterParams\(\)/)
-  assert.match(appSource, /valueColumns: \['cn', 'item', 'series', 'role', 'status', 'payment_status'\]/)
+  assert.match(appSource, /valueColumns: \['cn', 'item', 'series', 'group', 'role', 'status', 'payment_status'\]/)
   // 用户页（6）。
   assert.match(appSource, /function adminUserFilterParams\(\)/)
   assert.match(appSource, /valueColumns: \['cn', 'name', 'status', 'has_query_code', 'has_recovery_email'\]/)

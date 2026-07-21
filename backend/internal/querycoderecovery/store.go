@@ -41,7 +41,10 @@ type Store interface {
 	ConfirmSent(context.Context, PreparedSend) error
 	MarkDeliveryFailed(context.Context, string, string) error
 	VerifyCode(context.Context, string, string) (VerifiedCode, error)
-	ResetQueryCode(context.Context, string, string) error
+	// ResetQueryCode returns the CN of the account whose query code was
+	// reset, so callers can lift that account's login-side rate-limit block
+	// once the write has committed.
+	ResetQueryCode(context.Context, string, string) (string, error)
 }
 
 type PostgresStore struct {
@@ -464,10 +467,10 @@ func (s *PostgresStore) VerifyCode(ctx context.Context, cn string, code string) 
 	return result, nil
 }
 
-func (s *PostgresStore) ResetQueryCode(ctx context.Context, tokenHash string, newQueryCode string) error {
+func (s *PostgresStore) ResetQueryCode(ctx context.Context, tokenHash string, newQueryCode string) (string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -478,17 +481,17 @@ func (s *PostgresStore) ResetQueryCode(ctx context.Context, tokenHash string, ne
 		where token_hash=$1 and purpose=$2
 	`, tokenHash, Purpose).Scan(&sessionID, &userID, &emailID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrRejected
+		return "", ErrRejected
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	var userStatus, currentHash string
-	if err := tx.QueryRow(ctx, `select status,coalesce(query_code_hash,'') from users where id=$1::uuid for update`, userID).Scan(&userStatus, &currentHash); err != nil {
-		return err
+	var userStatus, currentHash, cnCode string
+	if err := tx.QueryRow(ctx, `select status,coalesce(query_code_hash,''),cn_code from users where id=$1::uuid for update`, userID).Scan(&userStatus, &currentHash, &cnCode); err != nil {
+		return "", err
 	}
 	if userStatus != "active" || currentHash == "" {
-		return ErrRejected
+		return "", ErrRejected
 	}
 	var currentEmailID, emailStatus string
 	err = tx.QueryRow(ctx, `
@@ -496,10 +499,10 @@ func (s *PostgresStore) ResetQueryCode(ctx context.Context, tokenHash string, ne
 		where user_id=$1::uuid and invalidated_at is null for update
 	`, userID).Scan(&currentEmailID, &emailStatus)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (currentEmailID != emailID || emailStatus != "verified")) {
-		return ErrRejected
+		return "", ErrRejected
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	var sessionStatus string
 	var expired bool
@@ -508,62 +511,65 @@ func (s *PostgresStore) ResetQueryCode(ctx context.Context, tokenHash string, ne
 		where id=$1::uuid and token_hash=$2 and user_id=$3::uuid and recovery_email_id=$4::uuid and purpose=$5
 		for update
 	`, sessionID, tokenHash, userID, emailID, Purpose).Scan(&sessionStatus, &expired); err != nil {
-		return err
+		return "", err
 	}
 	if sessionStatus != "active" || expired {
 		if sessionStatus == "active" && expired {
 			if _, err := tx.Exec(ctx, `update query_code_recovery_sessions set status='expired',invalidated_at=coalesce(invalidated_at,now()),updated_at=now() where id=$1::uuid`, sessionID); err != nil {
-				return err
+				return "", err
 			}
 			if err := tx.Commit(ctx); err != nil {
-				return err
+				return "", err
 			}
 		}
-		return ErrRejected
+		return "", ErrRejected
 	}
 	if bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(newQueryCode)) == nil {
-		return ErrSameQueryCode
+		return "", ErrSameQueryCode
 	}
 	newHash, err := bcrypt.GenerateFromPassword([]byte(newQueryCode), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
 		update users set query_code_hash=$2,query_code_updated_at=now(),updated_at=now() where id=$1::uuid
 	`, userID, string(newHash)); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `delete from query_sessions where user_id=$1::uuid`, userID); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
 		update query_code_recovery_codes
 		set status='invalidated',invalidated_at=coalesce(invalidated_at,now()),updated_at=now()
 		where user_id=$1::uuid and purpose=$2 and status in ('sending','active') and invalidated_at is null
 	`, userID, Purpose); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
 		update query_code_recovery_sessions
 		set status='invalidated',invalidated_at=coalesce(invalidated_at,now()),updated_at=now()
 		where user_id=$1::uuid and purpose=$2 and id<>$3::uuid and status='active' and invalidated_at is null
 	`, userID, Purpose, sessionID); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
 		update query_code_recovery_sessions set status='used',used_at=now(),updated_at=now() where id=$1::uuid
 	`, sessionID); err != nil {
-		return err
+		return "", err
 	}
 	metadata, err := json.Marshal(map[string]any{"operation": "query_code_recovery_completed", "query_sessions_invalidated": true, "reset_completed": true})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into account_security_audit_logs (actor_type,target_user_id,action,result,metadata)
 		values ('system',$1::uuid,'query_code_recovery_completed','success',$2::jsonb)
 	`, userID, metadata); err != nil {
-		return err
+		return "", err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return cnCode, nil
 }

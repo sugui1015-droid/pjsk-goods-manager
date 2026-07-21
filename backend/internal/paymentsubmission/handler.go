@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"pjsk/backend/internal/admin"
@@ -75,9 +76,24 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stage timings. Production could only see "status=0 after 188s", which
+	// says nothing about WHERE the time went. These four stages separate a slow
+	// client uplink (readBody dominates) from slow validation or a slow insert,
+	// so the next report is actionable without guessing.
+	started := time.Now()
+	var readBodyMS, validateMS, hashMS, insertMS int64
+	stage := "read_body"
+
 	// Bound the body before buffering anything: reject over 10 MiB up front.
 	r.Body = http.MaxBytesReader(w, r.Body, MaxImageBytes+1)
 	if err := r.ParseMultipartForm(MaxImageBytes + 1); err != nil {
+		// A client that walked away mid-body is not a bad request; classify it
+		// so the logs stop showing an unexplained status=0.
+		if category := clientAbortCategory(r.Context(), err); category != "" {
+			log.Printf("payment-submission upload aborted: stage=%s reason=%s elapsed_ms=%d",
+				stage, category, time.Since(started).Milliseconds())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "上传内容无效或超过大小限制")
 		return
 	}
@@ -102,20 +118,36 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 
 	data, err := readAllLimited(file, MaxImageBytes+1)
 	if err != nil {
+		if category := clientAbortCategory(r.Context(), err); category != "" {
+			log.Printf("payment-submission upload aborted: stage=%s reason=%s size=%d elapsed_ms=%d",
+				stage, category, len(data), time.Since(started).Milliseconds())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "图片读取失败或超过大小限制")
 		return
 	}
+	readBodyMS = time.Since(started).Milliseconds()
 
+	// Validation covers the MIME sniff, the structural decode and the SHA-256;
+	// they share one pass, so hash time is reported as part of it.
+	stage = "validate"
+	validateStarted := time.Now()
 	validated, err := paymentqr.ValidateImageWithLimit(data, MaxImageBytes)
+	validateMS = time.Since(validateStarted).Milliseconds()
+	hashMS = validateMS
 	if err != nil {
 		// Metadata only — never the bytes, never a filename that could be a path.
-		log.Printf("payment-submission upload rejected: method=%s size=%d reason=%s", method, len(data), err.Error())
+		log.Printf("payment-submission upload rejected: method=%s size=%d reason=%s read_body_ms=%d validate_ms=%d",
+			method, len(data), err.Error(), readBodyMS, validateMS)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	safeName := safeDisplayName(header.Filename, validated.MimeType)
+	requestID := r.FormValue("request_id")
 
+	stage = "insert"
+	insertStarted := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	submission, err := h.store.Create(ctx, CreateInput{
@@ -127,20 +159,29 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		SHA256:           validated.SHA256,
 		ByteSize:         validated.ByteSize,
 		OriginalFilename: safeName,
+		RequestID:        requestID,
 	})
+	insertMS = time.Since(insertStarted).Milliseconds()
 	if err != nil {
 		if errors.Is(err, ErrInvalidMethod) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		log.Printf("payment-submission create: method=%s size=%d sha256=%s result=error err=%s",
-			method, validated.ByteSize, validated.SHA256, logsafe.Category(err))
+		if category := clientAbortCategory(r.Context(), err); category != "" {
+			log.Printf("payment-submission upload aborted: stage=%s reason=%s size=%d read_body_ms=%d validate_ms=%d insert_ms=%d elapsed_ms=%d",
+				stage, category, validated.ByteSize, readBodyMS, validateMS, insertMS, time.Since(started).Milliseconds())
+			return
+		}
+		log.Printf("payment-submission create: method=%s size=%d sha256=%s result=error err=%s read_body_ms=%d validate_ms=%d insert_ms=%d",
+			method, validated.ByteSize, validated.SHA256, logsafe.Category(err), readBodyMS, validateMS, insertMS)
 		writeError(w, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
-	// Success audit line: metadata only.
-	log.Printf("payment-submission create: method=%s size=%d sha256=%s result=success",
-		method, validated.ByteSize, validated.SHA256)
+	// Success audit line: sizes, stage timings, status and the safe hash only —
+	// never image bytes, filenames as given, query codes, or session material.
+	log.Printf("payment-submission create: method=%s size=%d sha256=%s result=success deduplicated=%t read_body_ms=%d validate_ms=%d hash_ms=%d insert_ms=%d total_ms=%d",
+		method, validated.ByteSize, validated.SHA256, submission.Deduplicated,
+		readBodyMS, validateMS, hashMS, insertMS, time.Since(started).Milliseconds())
 
 	writeJSON(w, http.StatusCreated, map[string]any{"submission": submission})
 }
@@ -538,4 +579,39 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		log.Printf("encode payment-submission JSON response: %v", err)
 	}
+}
+
+// clientAbortCategory classifies an error as a client-side disconnect, or
+// returns "" when the failure is genuinely ours to report.
+//
+// Production only ever saw Caddy's status=0 with no explanation. These
+// categories distinguish "the phone gave up mid-upload" from "we rejected the
+// body" — the two look identical in an access log but mean opposite things.
+// Nothing is written to the response for an aborted request: the peer is gone,
+// and writing would only log a second, misleading error.
+func clientAbortCategory(ctx context.Context, err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return "client disconnected"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return "request body read canceled"
+	}
+	// http.MaxBytesReader's own error is a real 413-shaped rejection, not an
+	// abort, and must keep its 400 response.
+	var maxBytes *http.MaxBytesError
+	if errors.As(err, &maxBytes) {
+		return ""
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return "client disconnected"
+	}
+	if strings.Contains(err.Error(), "client disconnected") ||
+		strings.Contains(err.Error(), "connection reset by peer") ||
+		strings.Contains(err.Error(), "broken pipe") {
+		return "client disconnected"
+	}
+	return ""
 }

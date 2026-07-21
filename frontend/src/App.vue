@@ -1,5 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { compressImageFile } from './image/compress.ts'
+import {
+  DEFAULT_UPLOAD_TIMEOUT_MS,
+  UploadCanceledError,
+  UploadHttpError,
+  UploadTimeoutError,
+  uploadFormWithProgress,
+} from './api/upload.ts'
+import type { UploadHandle, UploadPhase } from './api/upload.ts'
 import {
   ApiError,
   adminReauth,
@@ -24,6 +33,7 @@ import {
   setReauthHandler,
   changeQueryCode,
   createQueryCodeBindToken,
+  fetchBulkBindTokenPreview,
   deleteAdminRecoveryEmail,
   getAdminRecoveryEmail,
   getQueryRecoveryEmail,
@@ -42,7 +52,6 @@ import {
   disablePaymentQR,
   getPaymentQRAvailability,
   listUserPaymentSubmissions,
-  submitPaymentSubmission,
   listAdminPaymentSubmissions,
   getAdminPaymentSubmissionFacets,
   getAdminPaymentSubmissionDetail,
@@ -52,6 +61,7 @@ import {
   type PaymentQRAdminStatus,
   type PaymentQRAvailability,
   type UserPaymentSubmission,
+  type UserPaymentSubmissionCreateResponse,
   type AdminPaymentSubmissionListItem,
   type AdminPaymentSubmissionDetailResponse,
   type PaymentSubmissionFacetResponse,
@@ -313,7 +323,7 @@ const orderDetail = ref<OrderDetailResponse | null>(null)
 // rely on them); this page simply never sends or faceting them.
 const orderFilterState = ref(
   createFilterState({
-    valueColumns: ['cn', 'item', 'series', 'role', 'status', 'payment_status'],
+    valueColumns: ['cn', 'item', 'series', 'group', 'role', 'status', 'payment_status'],
     rangeColumns: ['quantity', 'amount', 'paid', 'unpaid'],
     dateColumns: ['created'],
   }),
@@ -424,7 +434,31 @@ const submissionFile = ref<File | null>(null)
 const submissionPreviewURL = ref('')
 const submissionUploading = ref(false)
 const submissionUploadMessage = ref('')
+// Upload state machine. Production showed a 1.25 MB proof taking 10.3 s with no
+// feedback at all, plus attempts abandoned at 24 s and 188 s - so every phase
+// below is surfaced, the request is cancellable, and it always times out.
+const submissionPhase = ref<'idle' | UploadPhase>('idle')
+const submissionProgress = ref(0)
+const submissionOriginalBytes = ref(0)
+const submissionCompressedBytes = ref(0)
+const submissionCompressionNote = ref('')
+// One in-flight upload per page, tracked so a second one can never start and so
+// leaving or re-picking a file aborts the old request instead of orphaning it.
+let submissionUploadHandle: UploadHandle<UserPaymentSubmissionCreateResponse> | null = null
+// Generated when a file is chosen and reused for every retry of THAT file, so a
+// timeout followed by a retry cannot create a second 收肾记录.
+const submissionRequestID = ref('')
 const canSubmitProof = computed(() => submissionFile.value !== null && !submissionUploading.value)
+const submissionStatusText = computed(() => {
+  switch (submissionPhase.value) {
+    case 'processing': return '正在处理图片…'
+    case 'uploading': return `正在上传 ${submissionProgress.value}%`
+    case 'awaiting': return '正在等待服务器确认…'
+    case 'success': return '上传成功'
+    case 'canceled': return '已取消上传'
+    default: return ''
+  }
+})
 
 // Admin side: the WPS proof table. Value/range/date column keys double as the
 // API parameter names, exactly like the other admin tables.
@@ -1981,10 +2015,33 @@ function clearSubmissionSelection() {
   if (submissionPreviewURL.value) URL.revokeObjectURL(submissionPreviewURL.value)
   submissionFile.value = null
   submissionPreviewURL.value = ''
+  submissionOriginalBytes.value = 0
+  submissionCompressedBytes.value = 0
+  submissionCompressionNote.value = ''
+  submissionRequestID.value = ''
 }
 
-function onSubmissionFileChange(event: Event) {
+// Aborts any in-flight upload. Called before starting a new one, when the user
+// re-picks a file, and on unmount - an orphaned request would keep uploading in
+// the background and could land a second submission after the user moved on.
+function cancelSubmissionUpload(userInitiated: boolean) {
+  const handle = submissionUploadHandle
+  submissionUploadHandle = null
+  if (!handle) return
+  handle.cancel()
+  if (userInitiated) {
+    submissionPhase.value = 'canceled'
+    submissionUploadMessage.value = '已取消上传，未提交。'
+  }
+}
+
+async function onSubmissionFileChange(event: Event) {
+  // Re-picking a file while an upload is running must not leave two requests
+  // racing to create submissions.
+  cancelSubmissionUpload(false)
   submissionUploadMessage.value = ''
+  submissionPhase.value = 'idle'
+  submissionProgress.value = 0
   const input = event.target as HTMLInputElement
   const file = input.files?.[0] ?? null
   if (!file) {
@@ -2003,35 +2060,85 @@ function onSubmissionFileChange(event: Event) {
     clearSubmissionSelection()
     return
   }
+
+  // Compress before the user can submit: the upload is the slow part, and a
+  // phone screenshot is usually several times larger than it needs to be for
+  // the payment details to stay legible.
+  submissionPhase.value = 'processing'
+  const result = await compressImageFile(file)
+  submissionPhase.value = 'idle'
+
   if (submissionPreviewURL.value) URL.revokeObjectURL(submissionPreviewURL.value)
-  submissionFile.value = file
-  submissionPreviewURL.value = URL.createObjectURL(file)
+  submissionFile.value = result.file
+  submissionPreviewURL.value = URL.createObjectURL(result.file)
+  submissionOriginalBytes.value = result.originalBytes
+  submissionCompressedBytes.value = result.outputBytes
+  submissionRequestID.value = newIdempotencyKey()
+  submissionCompressionNote.value = result.compressed
+    ? `已压缩：${formatBytes(result.originalBytes)} → ${formatBytes(result.outputBytes)}（${result.width}×${result.height}）`
+    : `保持原图：${formatBytes(result.originalBytes)}`
 }
 
 async function submitUserProof() {
   const file = submissionFile.value
-  if (!file || submissionUploading.value) return
+  // This guard is the single gate on concurrency: one in-flight upload per page.
+  if (!file || submissionUploading.value || submissionUploadHandle) return
   submissionUploading.value = true
   submissionUploadMessage.value = ''
+  submissionProgress.value = 0
+  submissionPhase.value = 'uploading'
+
+  const form = new FormData()
+  form.append('file', file)
+  // The method comes from the user's current payment-center selection; the CN,
+  // user id and amounts are all resolved server-side from the session.
+  form.append('payment_method', queryQRMethod.value)
+  // Reused across retries of this file so the server can collapse duplicates.
+  form.append('request_id', submissionRequestID.value)
+
+  const handle = uploadFormWithProgress<UserPaymentSubmissionCreateResponse>({
+    url: apiUrl('/api/query/payment-submissions'),
+    form,
+    timeoutMs: DEFAULT_UPLOAD_TIMEOUT_MS,
+    onProgress: (percent) => { submissionProgress.value = percent },
+    onPhase: (phase) => { submissionPhase.value = phase },
+  })
+  submissionUploadHandle = handle
+
   try {
-    const form = new FormData()
-    form.append('file', file)
-    // The method comes from the user's current payment-center selection; the CN,
-    // user id and amounts are all resolved server-side from the session.
-    form.append('payment_method', queryQRMethod.value)
-    const response = await submitPaymentSubmission(form)
-    clearSubmissionSelection()
+    const response = await handle.promise
+    // Only a real server response counts as success - never the moment the
+    // last byte left the device.
+    submissionUploadHandle = null
+    submissionPhase.value = 'success'
     const input = document.getElementById('submission-file-input') as HTMLInputElement | null
     if (input) input.value = ''
-    submissionUploadMessage.value = `已交肾（待管理员核对）。本次应付 ${formatMoney(response.submission.payable_amount)}。`
+    const payable = formatMoney(response.submission.payable_amount)
+    submissionUploadMessage.value = response.submission.deduplicated
+      ? `该提交已记录，未重复创建。本次应付 ${payable}。`
+      : `已交肾（待管理员核对）。本次应付 ${payable}。`
+    clearSubmissionSelection()
     await loadUserSubmissions()
   } catch (error) {
-    if (error instanceof ApiError && error.status === 401) {
+    submissionUploadHandle = null
+    if (error instanceof UploadCanceledError) {
+      submissionPhase.value = 'canceled'
+      submissionUploadMessage.value = '已取消上传，未提交。'
+      return
+    }
+    submissionPhase.value = 'error'
+    if (error instanceof UploadTimeoutError) {
+      submissionUploadMessage.value = error.message
+      return
+    }
+    if (error instanceof UploadHttpError && error.status === 401) {
       submissionUploadMessage.value = '登录已过期，请重新登录后再提交。'
       return
     }
     submissionUploadMessage.value = error instanceof Error ? error.message : '提交失败，请重试。'
   } finally {
+    // Whatever happened - success, timeout, abort, network error - the button
+    // must come back. A permanently disabled button is what made people reload.
     submissionUploading.value = false
   }
 }
@@ -2444,7 +2551,15 @@ function resetAdminUserFilters() {
 
 // Accepts URLSearchParams so a caller can pass repeated multi-value filter
 // parameters, which a Record<string, string> cannot express.
-async function downloadExport(path: string, params: Record<string, string> | URLSearchParams) {
+// A batch export reports how many rows it actually produced. Only the bulk
+// bind-code endpoint sets these headers; every other export returns null.
+type ExportOutcome = { requested: number; issued: number; skipped: number }
+
+async function downloadExport(
+  path: string,
+  params: Record<string, string> | URLSearchParams,
+  method: 'GET' | 'POST' = 'GET',
+): Promise<ExportOutcome | null> {
   let searchParams: URLSearchParams
   if (params instanceof URLSearchParams) {
     searchParams = params
@@ -2455,17 +2570,29 @@ async function downloadExport(path: string, params: Record<string, string> | URL
     }
   }
   const suffix = searchParams.toString() ? `?${searchParams.toString()}` : ''
-  const response = await fetch(apiUrl(path + suffix), { credentials: 'include' })
+  const response = await fetch(apiUrl(path + suffix), { credentials: 'include', method })
   if (!response.ok) {
     if (response.status === 401) {
       admin.value = null
       authMessage.value = '登录已过期，请重新登录。'
       navigate('/admin')
-      return
+      return null
+    }
+    // The server explains 422 in Chinese (empty batch, batch too large); show
+    // that rather than a bare status code.
+    if (response.status === 422) {
+      window.alert((await response.text()).trim() || '导出失败')
+      return null
     }
     window.alert(`导出失败：HTTP ${response.status}`)
-    return
+    return null
   }
+  const requested = Number(response.headers.get('X-Bind-Token-Requested'))
+  const issued = Number(response.headers.get('X-Bind-Token-Issued'))
+  const skipped = Number(response.headers.get('X-Bind-Token-Skipped'))
+  const outcome: ExportOutcome | null = Number.isFinite(requested) && response.headers.has('X-Bind-Token-Requested')
+    ? { requested, issued, skipped }
+    : null
   const blob = await response.blob()
   const disposition = response.headers.get('Content-Disposition') ?? ''
   const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
@@ -2480,6 +2607,7 @@ async function downloadExport(path: string, params: Record<string, string> | URL
   link.click()
   link.remove()
   URL.revokeObjectURL(objectURL)
+  return outcome
 }
 
 // Exports carry the complete filter state and no pagination, so a download is
@@ -2490,6 +2618,62 @@ function exportAdminUsersExcel() {
 
 function exportAdminUsersCSV() {
   void downloadExport('/api/admin/export/users.csv', adminUserFilterParams())
+}
+
+// Bulk bind-code issue. Unlike every other export this one WRITES: it kills
+// each listed user's earlier unused code and issues a new one. So it runs
+// preview → explicit confirmation → re-authentication → download, and the
+// resulting file is the only place those codes ever appear.
+const bulkBindTokenBusy = ref(false)
+
+async function generateBulkBindTokens() {
+  if (bulkBindTokenBusy.value) return
+  bulkBindTokenBusy.value = true
+  try {
+    const params = adminUserFilterParams()
+    const preview = await fetchBulkBindTokenPreview(params)
+    if (preview.eligible_count === 0) {
+      window.alert('当前筛选结果中没有可生成绑定码的用户。\n只有「启用中」且尚未设置查询码的用户才能生成绑定码。')
+      return
+    }
+    if (preview.eligible_count > preview.max_batch_size) {
+      window.alert(
+        `当前筛选结果有 ${preview.eligible_count} 名可生成用户，超过单批上限 ${preview.max_batch_size}。\n请缩小筛选范围后分批生成。`,
+      )
+      return
+    }
+    const lines = [
+      `将为当前筛选结果中的 ${preview.eligible_count} 名用户生成绑定码。`,
+    ]
+    if (preview.existing_unused_count > 0) {
+      lines.push(`其中 ${preview.existing_unused_count} 名用户存在未使用的旧码，旧码将在生成后立即失效。`)
+    }
+    lines.push(
+      '',
+      `绑定码有效期 ${preview.valid_days} 天，明文只出现在这次下载的表格里，之后无法再次查看。`,
+      '该文件可以直接用于设置这些账号的查询码，请勿通过聊天工具或网盘转发。',
+      '',
+      '确认生成？',
+    )
+    if (!window.confirm(lines.join('\n'))) return
+    if (!(await ensureReauth())) return
+    const outcome = await downloadExport('/api/admin/export/bind-tokens.xlsx', params, 'POST')
+    await loadAdminUsers()
+    // Never let the batch come up short in silence: if the locked re-check
+    // dropped anyone, say so and point at the file, which lists each skipped
+    // user with a reason.
+    if (outcome && outcome.skipped > 0) {
+      window.alert(
+        `预览 ${preview.eligible_count} 人，实际生成 ${outcome.issued} 人，跳过 ${outcome.skipped} 人。\n` +
+          '跳过的用户在生成期间状态发生了变化（已自行设置查询码、被停用或已合并）。\n' +
+          '表格中「结果」列标为「已跳过」的行列出了每个人的具体原因。',
+      )
+    }
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '批量生成绑定码失败')
+  } finally {
+    bulkBindTokenBusy.value = false
+  }
 }
 
 // Exports carry the complete filter state and no pagination, so a download is
@@ -3124,7 +3308,9 @@ async function loginQuery() {
   try {
     const response = await postJSON<QueryLoginResponse>('/api/query/login', {
       cn: queryCN.value,
-      query_code: queryCode.value,
+      // Trimmed here purely as a convenience for mobile keyboards and paste;
+      // the backend normalizes independently and is the authority.
+      query_code: queryCode.value.trim(),
     })
     resetQueryRecoveryVerification()
     resetAnonymousQueryRecovery()
@@ -3331,30 +3517,42 @@ async function logoutQuery() {
   resetQueryRecoveryVerification()
   queryLoading.value = true
   queryMessage.value = ''
+  let failureMessage = ''
   try {
     await postJSON<void>('/api/query/logout', {})
-    queryUser.value = null
-    queryOrders.value = null
-    queryOrdersError.value = ''
-    queryCode.value = ''
-    queryOldCode.value = ''
-    queryNewCode.value = ''
-    queryConfirmCode.value = ''
-    querySecurityMessage.value = ''
-    queryRecoveryEmail.value = null
-    queryRecoveryEmailMessage.value = ''
-    queryQRAvailability.value = []
-    queryQRMethod.value = ''
-    queryQRError.value = ''
-    queryQRZoom.value = false
-    pendingQueryTarget.value = ''
-    queryMessage.value = '已退出查询。'
-    navigate('/query')
   } catch (error) {
-    queryMessage.value = error instanceof Error ? error.message : '退出失败'
-  } finally {
-    queryLoading.value = false
+    // A failed or slow logout call must NEVER leave the previous user's
+    // identity and orders on screen: the next person to log in on this device
+    // would see them. The server-side session is already unusable to us
+    // either way (401 simply means it was gone first), so local state is
+    // cleared unconditionally below and the error is only surfaced as text.
+    if (!(error instanceof ApiError && error.status === 401)) {
+      failureMessage = error instanceof Error ? error.message : '退出失败'
+    }
   }
+  queryUser.value = null
+  queryOrders.value = null
+  queryOrdersError.value = ''
+  queryCN.value = ''
+  queryCode.value = ''
+  queryOldCode.value = ''
+  queryNewCode.value = ''
+  queryConfirmCode.value = ''
+  querySecurityMessage.value = ''
+  queryRecoveryEmail.value = null
+  queryRecoveryEmailMessage.value = ''
+  queryQRAvailability.value = []
+  queryQRMethod.value = ''
+  queryQRError.value = ''
+  queryQRZoom.value = false
+  userSubmissions.value = []
+  userSubmissionsMessage.value = ''
+  clearSubmissionSelection()
+  submissionUploadMessage.value = ''
+  pendingQueryTarget.value = ''
+  queryMessage.value = failureMessage || '已退出查询。'
+  queryLoading.value = false
+  navigate('/query')
 }
 
 function resetAnonymousQueryRecovery(clearCN = true) {
@@ -4061,6 +4259,9 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  // Leaving the page must not leave an upload running against a component that
+  // no longer exists.
+  cancelSubmissionUpload(false)
   if (queryRecoveryClockTimer !== undefined) window.clearInterval(queryRecoveryClockTimer)
   if (submissionPreviewURL.value) URL.revokeObjectURL(submissionPreviewURL.value)
 })
@@ -4155,6 +4356,7 @@ onUnmounted(() => {
               <button class="primary-button" type="button" :disabled="!canUpload" @click="uploadPreview">{{ uploadLoading ? '解析中' : '上传并预览' }}</button>
               <a class="secondary-button template-download" href="/templates/pjsk-goods-import-template.xlsx" download>下载标准模板</a>
             </div>
+            <p class="muted">括号内为中文说明，括号外为原表字段。请保留原表结构并填写或粘贴数据，不要删除合并单元格或调整关键位置。</p>
             <p class="muted">文件大小限制 20MB；上传字段为 <code class="inline-code">file</code>。标准模板会识别为 <code class="inline-code">standard_import</code>。</p>
             <div v-if="selectedFile" class="file-line">{{ selectedFile.name }} / {{ formatBytes(selectedFile.size) }}</div>
             <div v-if="uploadMessage" class="inline-alert">{{ uploadMessage }}</div>
@@ -4758,7 +4960,9 @@ onUnmounted(() => {
               <button class="secondary-button" type="button" @click="exportAdminUsersExcel">导出 Excel</button>
               <button class="secondary-button ghost-button" type="button" @click="exportAdminUsersCSV">CSV</button>
               <button class="secondary-button" type="button" :disabled="adminUsersLoading" @click="loadAdminUsers">{{ adminUsersLoading ? '加载中' : '刷新' }}</button>
+              <button class="danger-button" type="button" :disabled="bulkBindTokenBusy" @click="generateBulkBindTokens">{{ bulkBindTokenBusy ? '生成中' : '批量生成绑定码' }}</button>
             </div>
+            <p class="muted">「批量生成绑定码」只对当前筛选结果中启用且未设置查询码的用户生效，并会使他们此前未使用的旧码立即失效。导出的表格含明文绑定码，等同于这些账号的临时钥匙，请勿转发。</p>
 
             <!-- Row 3: result scope and the single global reset. -->
             <div class="page-resultbar">
@@ -4885,7 +5089,7 @@ onUnmounted(() => {
                 </div>
                 <div v-if="queryAccountMessage" class="inline-alert">{{ queryAccountMessage }}</div>
                 <div v-if="adminUserDetail.user.status === 'active' && !adminUserDetail.user.has_query_code" class="bind-token-block">
-                  <div class="panel__header"><div><h3>首次绑定码</h3><p class="muted">线下核实身份后，为该用户生成一次性绑定码；用户在登录页“首次设置查询码”中使用。绑定码 30 分钟内有效，仅显示一次，重新生成会使旧码全部失效。</p></div></div>
+                  <div class="panel__header"><div><h3>首次绑定码</h3><p class="muted">线下核实身份后，为该用户生成一次性绑定码；用户在登录页“首次设置查询码”中使用。绑定码 24 小时内有效，仅显示一次，重新生成会使旧码全部失效。</p></div></div>
                   <div class="query-account-grid">
                     <button class="secondary-button" type="button" :disabled="bindTokenGenerating" @click="generateBindToken">{{ bindTokenGenerating ? '生成中' : '生成一次性绑定码' }}</button>
                     <span v-if="adminUserDetail.has_active_bind_token && !bindTokenResult" class="muted">已有未使用的绑定码（{{ formatDate(adminUserDetail.bind_token_expires_at) }} 过期）；重新生成将使其失效。</span>
@@ -5011,13 +5215,17 @@ onUnmounted(() => {
               <table>
                 <thead>
                   <tr>
-                    <!-- Exactly 13 columns. 用户名称 / 项目名称 / 谷子种类 were
+                    <!-- Exactly 14 columns. 系列（模板「分类(系列号)」的值）和团名
+                         （角色列头前缀，如 "25h miku" 的 "25h"）是两个独立字段，必须
+                         同时存在，不能合并成一列。
+                         用户名称 / 项目名称 / 谷子种类 were
                          removed outright rather than hidden: no empty <th>, no
                          placeholder cell, no CSS-hidden column. 单价 and 操作
                          carry no funnel. -->
                     <th><ColumnValueFilter v-model="orderFilterState.values.cn" label="CN" column="cn" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
                     <th><ColumnValueFilter v-model="orderFilterState.values.item" label="谷子名称" column="item" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
-                    <th><ColumnValueFilter v-model="orderFilterState.values.series" label="谷子系列" column="series" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnValueFilter v-model="orderFilterState.values.series" label="系列" column="series" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
+                    <th><ColumnValueFilter v-model="orderFilterState.values.group" label="团名" column="group" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
                     <th><ColumnValueFilter v-model="orderFilterState.values.role" label="谷子角色" column="role" :load-facets="loadOrderFacets" @update:model-value="applyOrderFilters" /></th>
                     <th class="numeric-column"><ColumnRangeFilter v-model="orderFilterState.ranges.quantity" label="数量" step="1" @update:model-value="applyOrderFilters" /></th>
                     <th class="numeric-column"><span class="column-header"><span class="column-header__label">单价</span></span></th>
@@ -5031,8 +5239,8 @@ onUnmounted(() => {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-if="ordersLoading"><td colspan="13">加载中…</td></tr>
-                  <tr v-else-if="orderItems.length === 0"><td colspan="13">没有符合当前筛选条件的谷子明细。</td></tr>
+                  <tr v-if="ordersLoading"><td colspan="14">加载中…</td></tr>
+                  <tr v-else-if="orderItems.length === 0"><td colspan="14">没有符合当前筛选条件的谷子明细。</td></tr>
                   <!-- One row per goods line. Rows are never merged with rowspan:
                        the same CN legitimately repeats, and merging would break
                        filtering, paging and the mobile layout. Consecutive rows
@@ -5041,6 +5249,7 @@ onUnmounted(() => {
                     <td><strong>{{ item.cn_code }}</strong></td>
                     <td><span class="cell-wrap">{{ item.item_name }}</span></td>
                     <td><span class="cell-wrap">{{ item.series_code || '-' }}</span></td>
+                    <td><span class="cell-wrap">{{ item.group_name || '-' }}</span></td>
                     <td><span class="cell-wrap">{{ item.character_name || '-' }}</span></td>
                     <td class="numeric-column">{{ item.quantity }}</td>
                     <td class="numeric-column">{{ formatMoney(item.unit_price) }}</td>
@@ -5640,12 +5849,13 @@ onUnmounted(() => {
               <div class="query-submission-upload">
                 <label class="file-field">
                   <span>选择付款截图（PNG / JPEG / WebP，≤10 MiB）</span>
-                  <input id="submission-file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="onSubmissionFileChange" />
+                  <input id="submission-file-input" type="file" accept="image/png,image/jpeg,image/webp" :disabled="submissionUploading" @change="onSubmissionFileChange" />
                 </label>
                 <div class="submission-preview-slot">
                   <img v-if="submissionPreviewURL" :src="submissionPreviewURL" alt="待提交付款截图预览" class="submission-preview-image" />
                   <p v-else class="qr-empty muted">尚未选择图片</p>
                 </div>
+                <p v-if="submissionCompressionNote" class="muted submission-compression-note">{{ submissionCompressionNote }}</p>
               </div>
               <div class="query-submission-meta">
                 <div class="query-amount-grid query-submission-amounts">
@@ -5655,7 +5865,14 @@ onUnmounted(() => {
                   <article class="metric-tile metric-tile--emphasis"><span>本次应付</span><strong>{{ formatMoney(queryPayableAmount) }}</strong></article>
                 </div>
                 <p v-if="submissionUploadMessage" class="inline-alert">{{ submissionUploadMessage }}</p>
+                <div v-if="submissionPhase === 'processing' || submissionUploading" class="submission-progress" role="status" aria-live="polite">
+                  <p class="submission-progress-text">{{ submissionStatusText }}</p>
+                  <div v-if="submissionPhase === 'uploading'" class="submission-progress-track">
+                    <div class="submission-progress-bar" :style="{ width: submissionProgress + '%' }"></div>
+                  </div>
+                </div>
                 <button class="primary-button query-submission-button" type="button" :disabled="!canSubmitProof || queryQRMethod === ''" @click="submitUserProof">{{ submissionUploading ? '提交中…' : '提交收肾记录' }}</button>
+                <button v-if="submissionUploading" class="secondary-button query-submission-cancel" type="button" @click="cancelSubmissionUpload(true)">取消上传</button>
                 <p v-if="queryQRMethod === ''" class="muted">请先在上方选择付款方式，再提交收肾记录。</p>
               </div>
             </div>

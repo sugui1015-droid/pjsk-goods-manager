@@ -225,6 +225,6 @@ test('阶段 4F/6 页面契约未被本阶段破坏', () => {
   // 共用组件与编码器改动后，订单页与用户页仍是同一套入口。
   assert.match(appSource, /function orderFilterParams\(\)\s*\{\s*\n\s*return buildFilterParams\(orderFilterState\.value, ORDER_RANGE_PARAMS, ORDER_DATE_PARAMS\)/)
   assert.match(appSource, /function adminUserFilterParams\(\)\s*\{\s*\n\s*return buildFilterParams\(adminUserFilterState\.value, ADMIN_USER_RANGE_PARAMS, ADMIN_USER_DATE_PARAMS\)/)
-  assert.match(appSource, /valueColumns: \['cn', 'item', 'series', 'role', 'status', 'payment_status'\]/)
+  assert.match(appSource, /valueColumns: \['cn', 'item', 'series', 'group', 'role', 'status', 'payment_status'\]/)
   assert.match(appSource, /valueColumns: \['cn', 'name', 'status', 'has_query_code', 'has_recovery_email'\]/)
 })

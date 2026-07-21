@@ -49,6 +49,7 @@ type OrderListItem struct {
 	ProjectName   string  `json:"project_name"`
 	ItemName      string  `json:"item_name"`
 	SeriesCode    string  `json:"series_code"`
+	GroupName     string  `json:"group_name"`
 	Category      string  `json:"category"`
 	CharacterName string  `json:"character_name"`
 	Quantity      float64 `json:"quantity"`
@@ -84,6 +85,7 @@ type OrderItem struct {
 	CharacterName   string  `json:"character_name,omitempty"`
 	Category        string  `json:"category,omitempty"`
 	SeriesCode      string  `json:"series_code,omitempty"`
+	GroupName       string  `json:"group_name,omitempty"`
 	DisplayName     string  `json:"display_name,omitempty"`
 	SKU             string  `json:"sku,omitempty"`
 	Quantity        float64 `json:"quantity"`
@@ -267,6 +269,7 @@ func (s *PostgresStore) ListOrders(ctx context.Context, filters OrderFilters) (O
 			&item.ProjectName,
 			&item.ItemName,
 			&item.SeriesCode,
+			&item.GroupName,
 			&item.Category,
 			&item.CharacterName,
 			&item.Quantity,
@@ -358,6 +361,7 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 			coalesce(product.character_name, ''),
 			coalesce(product.category, ''),
 			coalesce(product.series_code, ''),
+			coalesce(product.group_name, ''),
 			product.name,
 			coalesce(product.sku, ''),
 			oi.quantity::float8,
@@ -398,6 +402,7 @@ func (s *PostgresStore) GetOrder(ctx context.Context, orderID string) (OrderDeta
 			&item.CharacterName,
 			&item.Category,
 			&item.SeriesCode,
+			&item.GroupName,
 			&item.DisplayName,
 			&item.SKU,
 			&item.Quantity,

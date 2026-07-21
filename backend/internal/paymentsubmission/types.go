@@ -74,6 +74,11 @@ type UserSubmission struct {
 	SubmittedAt     string  `json:"submitted_at"`
 	ReviewedAt      string  `json:"reviewed_at,omitempty"`
 	RejectReason    string  `json:"reject_reason,omitempty"`
+	// Deduplicated reports that this response replays an existing submission
+	// because the request carried an already-seen idempotency key. It lets the
+	// client tell "your retry landed" apart from "a second proof was filed",
+	// and is never persisted.
+	Deduplicated bool `json:"deduplicated,omitempty"`
 }
 
 // AdminListItem is one row of the admin WPS list. It shows only business fields;
@@ -127,6 +132,10 @@ type CreateInput struct {
 	SHA256           string
 	ByteSize         int
 	OriginalFilename string
+	// RequestID is the client-generated idempotency key for this submission,
+	// reused across retries of the same upload. Empty means "no key" and
+	// disables deduplication for that request.
+	RequestID string
 }
 
 // ApproveInput is the admin's explicit allocation of the proof to unpaid order

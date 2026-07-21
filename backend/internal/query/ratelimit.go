@@ -17,7 +17,8 @@ const defaultMaxTrackedKeys = 10000
 //   - per client IP: at most maxAttempts login calls per attemptWindow,
 //     regardless of outcome;
 //   - per IP+CN: after maxFailures failed logins within failureWindow the
-//     pair is blocked for blockDuration; a successful login clears it.
+//     pair is blocked for blockDuration; a successful login clears it, as
+//     does any successful write of a new query code (see release).
 //
 // Keys are tracked in memory only, which is acceptable for a single-process
 // deployment. Entries expire lazily on access. Each map is additionally
@@ -50,20 +51,31 @@ type windowCounter struct {
 }
 
 type failureState struct {
+	// cn is stored alongside the composite map key so releaseForCN can match
+	// exactly rather than by string suffix — a CN containing the key
+	// separator must not be able to release another CN's block.
+	cn           string
 	windowStart  time.Time
 	count        int
 	blockedUntil time.Time
 	lastSeenAt   time.Time
 }
 
+// releaseGraceAttempts is how many per-IP attempt slots release guarantees
+// are available to the caller. Successfully writing a new query code proves
+// identity, so the user must be able to immediately log in with it — but the
+// per-IP gate stays in force otherwise, so this is a bounded exemption
+// rather than a reset of the counter.
+const releaseGraceAttempts = 3
+
 func newLoginLimiter() *loginLimiter {
 	return &loginLimiter{
 		attemptWindow:  time.Minute,
 		maxAttempts:    20,
 		attempts:       map[string]*windowCounter{},
-		failureWindow:  10 * time.Minute,
-		maxFailures:    5,
-		blockDuration:  10 * time.Minute,
+		failureWindow:  5 * time.Minute,
+		maxFailures:    10,
+		blockDuration:  5 * time.Minute,
 		failures:       map[string]*failureState{},
 		maxTrackedKeys: defaultMaxTrackedKeys,
 	}
@@ -128,7 +140,7 @@ func (l *loginLimiter) recordFailure(ip string, cn string, now time.Time) {
 			// The per-IP attempt limit still throttles this source.
 			return
 		}
-		state = &failureState{windowStart: now, lastSeenAt: now}
+		state = &failureState{cn: cn, windowStart: now, lastSeenAt: now}
 		l.failures[key] = state
 	} else if now.Sub(state.windowStart) >= l.failureWindow {
 		state.windowStart = now
@@ -148,6 +160,59 @@ func (l *loginLimiter) recordSuccess(ip string, cn string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.failures, failureKey(ip, cn))
+}
+
+// release lifts the login-side block for this IP+CN pair and guarantees the
+// caller a few per-IP attempt slots, so a user who has just proven identity
+// by writing a new query code can log in with it immediately.
+//
+// It must only ever be called AFTER the query-code write has committed:
+// knowing a CN must never by itself be enough to clear a block. It clears
+// exactly one IP+CN pair — other CNs from this IP, and this CN from other
+// IPs, are untouched.
+func (l *loginLimiter) release(ip string, cn string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	delete(l.failures, failureKey(ip, cn))
+
+	// Relieve, but do not reset, the per-IP gate: leave the counter high
+	// enough that abuse is still throttled, low enough that the next few
+	// logins get through.
+	counter := l.attempts[ip]
+	if counter == nil {
+		return
+	}
+	if now.Sub(counter.windowStart) >= l.attemptWindow {
+		counter.windowStart = now
+		counter.count = 0
+		return
+	}
+	if ceiling := l.maxAttempts - releaseGraceAttempts; counter.count > ceiling {
+		counter.count = ceiling
+		if counter.count < 0 {
+			counter.count = 0
+		}
+	}
+}
+
+// releaseForCN lifts the login-side block for a CN across every IP. It
+// exists for the admin-initiated query-code reset, where the admin's own IP
+// tells us nothing about where the user will log in from. It is reachable
+// only from an authenticated admin endpoint after the write has committed,
+// never from an anonymous one.
+//
+// Per-IP attempt counters are deliberately left alone here: we do not know
+// which IP to credit, and that gate is a rolling one-minute window that
+// clears itself.
+func (l *loginLimiter) releaseForCN(cn string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, state := range l.failures {
+		if state.cn == cn {
+			delete(l.failures, key)
+		}
+	}
 }
 
 func (l *loginLimiter) cleanupLocked(now time.Time) {

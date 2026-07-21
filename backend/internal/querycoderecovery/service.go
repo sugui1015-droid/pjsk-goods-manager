@@ -64,19 +64,21 @@ func (s *Service) Verify(ctx context.Context, cn string, code string) (VerifiedC
 	return s.store.VerifyCode(ctx, cn, code)
 }
 
-func (s *Service) Reset(ctx context.Context, token string, newQueryCode string, confirmQueryCode string) error {
+// Reset returns the CN of the account on success so the caller can clear
+// that account's login block; it returns an empty CN on every failure path.
+func (s *Service) Reset(ctx context.Context, token string, newQueryCode string, confirmQueryCode string) (string, error) {
 	if !s.Available() {
-		return ErrUnavailable
+		return "", ErrUnavailable
 	}
 	if !ValidToken(token) {
-		return ErrInvalidToken
+		return "", ErrInvalidToken
 	}
 	if newQueryCode == "" || newQueryCode != confirmQueryCode || querycode.Validate(newQueryCode) != nil {
-		return querycode.ErrInvalid
+		return "", querycode.ErrInvalid
 	}
 	tokenHash, err := s.manager.HashToken(token)
 	if err != nil {
-		return ErrInvalidToken
+		return "", ErrInvalidToken
 	}
 	return s.store.ResetQueryCode(ctx, tokenHash, newQueryCode)
 }

@@ -15,6 +15,7 @@ type serviceStoreStub struct {
 	verify     VerifiedCode
 	verifyErr  error
 	resetErr   error
+	resetCN    string
 	failedID   string
 	resetHash  string
 }
@@ -30,9 +31,12 @@ func (s *serviceStoreStub) MarkDeliveryFailed(_ context.Context, id string, _ st
 func (s *serviceStoreStub) VerifyCode(context.Context, string, string) (VerifiedCode, error) {
 	return s.verify, s.verifyErr
 }
-func (s *serviceStoreStub) ResetQueryCode(_ context.Context, tokenHash string, _ string) error {
+func (s *serviceStoreStub) ResetQueryCode(_ context.Context, tokenHash string, _ string) (string, error) {
 	s.resetHash = tokenHash
-	return s.resetErr
+	if s.resetErr != nil {
+		return "", s.resetErr
+	}
+	return s.resetCN, nil
 }
 
 type protectorStub struct {
@@ -86,10 +90,10 @@ func TestServiceVerifyAndResetTokenHashing(t *testing.T) {
 	if _, err := service.Verify(context.Background(), "CN", "123456"); err != nil {
 		t.Fatal("valid verification was rejected")
 	}
-	if err := service.Reset(context.Background(), token, "NewCode-123", "NewCode-123"); err != nil || store.resetHash == "" || store.resetHash == token {
+	if _, err := service.Reset(context.Background(), token, "NewCode-123", "NewCode-123"); err != nil || store.resetHash == "" || store.resetHash == token {
 		t.Fatal("reset token was not converted to a keyed storage hash")
 	}
-	if err := service.Reset(context.Background(), token, "NewCode-123", "OtherCode-123"); !errors.Is(err, ErrInvalidCode) && err == nil {
+	if _, err := service.Reset(context.Background(), token, "NewCode-123", "OtherCode-123"); !errors.Is(err, ErrInvalidCode) && err == nil {
 		t.Fatal("mismatched query-code confirmation was accepted")
 	}
 }
