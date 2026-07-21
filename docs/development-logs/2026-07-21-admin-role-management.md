@@ -61,3 +61,40 @@ release `4f2dda06b013` 切换、迁移 0023 完成后进入 R3-7 P1(苏归任命
 - 本轮前端修复待人工复验后走新提交/新 release(**仅换前端 bundle,不迁移**,0023 已在库)/R3-5 签收/R3-6 切换,再回到 P1。
 - **Caddy `/assets/*` 长期不可变缓存仍为后续独立阶段**(前端 release 部署验收后单独受控 reload 执行,不夹带在本次)。
 - **生产 P1 尚未执行**,测试用户 `production_write_test_20260721` 目前仍无管理员身份;owner=1、testadmin disabled/admin 不变。
+  - **【R3-7 事实更正,见下节】上一条"生产 P1 尚未执行"表述作废**:经生产只读核查,P1 实际已于 `2026-07-21 11:51:11 +08` 由 owner 浏览器操作成功提交。
+
+## R3-7 前端修复 release 发布与收尾(release `62ffa2c28d64`)
+
+R3-6 阻断发现的三处前端问题(身份显示 / 宽表滚动 / reauth 体感)已作为提交 `62ffa2c28d64…`(`fix: improve admin identity, table scrolling, and reauth flow`)修复,并按"仅换前端 bundle、不迁移"路径完成 R3-5 上传签收 → R3-6 切换 → R3-7 发布后验收。
+
+### 正式上线版本
+- release ID:`62ffa2c28d64`
+- full revision:`62ffa2c28d647d15765905e78d5432408c00ad4f`
+- backend SHA-256:`5052d70a0eb1fe0ea44c334171a4bc392980d67c9ae1810f1b6272c008d53ce7`(Linux x86-64 ELF;与上一 release `4f2dda06b013` 二进制差异仅 `vcs.revision`/`vcs.time`,`-trimpath`/`CGO_ENABLED=0`/`GOOS=linux`/`GOARCH=amd64` 全同,源码功能一致)
+- transfer bundle SHA-256:`3d0958f5baa0356956d56174866111266cf06e4476260a561e737f4802b9f0f3`
+- 前端 JS:`index-vCNHskDH.js`
+- 前端 CSS:`index-s-C2Kh49.css`
+- migrations:0001–0023,与 `4f2dda06b013` 逐字节一致,无 0024;库已 23/0023,本次发布**不产生新迁移**。
+
+### 发布过程事实
+- bundle 本地持久化路径:`D:\PJSK-Archive\transfer\pjsk-release-62ffa2c28d64.tar.gz`(顶层直接为 `bin/ frontend/ migrations/ REVISION MANIFEST.sha256`,无多余包裹层,32 文件,8,827,253 B)。
+- 云端上传路径:`/home/ubuntu/pjsk-release-62ffa2c28d64.tar.gz`。
+- staging:`/root/pjsk-upload-62ffa2c28d64-20260721T061808Z`(root:root 0700)。
+- staging 中转签收:**32 文件、MANIFEST 30/30 OK**、后端 SHA 与 ELF x86-64 核验通过、无 source map、migrations 23 含 0023、泄漏扫描净。
+- 安装到 `/opt/pjsk/releases/62ffa2c28d64`(镜像正式 release 权限:目录 755、`bin/pjsk-backend` 755、REVISION/MANIFEST/前端/迁移只读),目标目录独立复验 `RELEASE_INSTALL_PASS`。
+- 切换采用同目录临时软链 + `mv -T` 原子替换,**未先删 current、未停后端、未 reload Caddy、未执行迁移**;`current` 与 `current.next` **最终均指向 `/opt/pjsk/releases/62ffa2c28d64`**。
+- 发布后 R3-7 云端只读终态验收 `R3_7_POST_RELEASE_VERIFY_PASS`:current/current.next 均新 release;REVISION 全 SHA、files=32、MANIFEST 30/30、后端 SHA 匹配、前端 JS/CSS 由公网首页引用;PostgreSQL 18.4 / 5433 / `pjsk`,schema_migrations 23、max=`0023_admin_management.sql`、0023=1、prepared=0、idle-in-transaction=0;owner=1、testadmin=disabled/admin;pjsk-backend/caddy active、NRestarts=0;本地 `/health`、公网 `/health`、公网首页、`/assets/index-vCNHskDH.js`、`/assets/index-s-C2Kh49.css` 均 200。
+
+### 事实更正:P1 实际已完成
+- 经生产只读核查,P1 任命写入实际已于 **`2026-07-21 11:51:11 +08`** 由 owner 浏览器操作成功提交(在视觉阻断报告之前),属 owner 本人意外完成的合法写入,非漂移/外部写入。
+- 测试用户:`production_write_test_20260721`;对应管理员用户名:**`123`**;actor:`admin`(唯一"苏归");`admin_appointed` **result=success**,审计恰 1 条,target=`123`;`123` 为 `admin`/`active`,`must_change_password=true`,`revoked_at`/`revoked_by` 为空;owner 仍恰 1,linked_admins=1。
+- **此前"P1 未执行"表述作废。**
+- 本次 R3-7 **不执行 P2、不重置密码、不创建第二个管理员**;账号 `123` 保持 `active` + `must_change_password=true`,不删除/不撤销/不重建/不改名;后续 P2 复用该账号,不新建第二个。
+
+### 回滚策略
+- 上一正式 release `4f2dda06b013` 保留为**直接回滚点**(纯符号链接翻回、无数据库改动、秒级);其余旧 release `95036a07911b`/`98f8fe1e7eb6`/`14d339e56677` 暂全部保留。
+- 所有现有数据库 / Caddy / 迁移备份暂时保留;上传 bundle 与 staging 亦保留。
+- **本轮不做任何清理**;后续清理必须另开阶段并重新审批。
+
+### 人工验收
+本轮为**人工验收通过**(非自动化覆盖全部页面):公网页面可正常访问且显示正常;新版身份显示("身份：苏归/管理员　账号：…")正常;宽表上下双同步横向滚动正常;主动 reauth 修复正常;页面整体可用。
