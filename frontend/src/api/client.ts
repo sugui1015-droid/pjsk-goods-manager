@@ -18,6 +18,28 @@ export type Admin = {
   username: string
   display_name?: string
   role: string
+  // must_change_password is set for a system-generated temporary password
+  // (appointment or owner reset). While true the backend locks every admin
+  // capability except identity/logout/reauth/password-change.
+  must_change_password?: boolean
+}
+
+// roleDisplayName is the single source of truth for how a technical role value
+// is shown to people. The database and API keep the technical values
+// ('owner'/'admin'); the UI never renders those raw. Callers pass the surface
+// they are in: an admin context shows 'admin' as 「管理员」, while the customer
+// surface shows an account holder as 「用户」.
+export function roleDisplayName(role: string | null | undefined): string {
+  switch (role) {
+    case 'owner':
+      return '苏归'
+    case 'admin':
+      return '管理员'
+    case 'user':
+      return '用户'
+    default:
+      return '用户'
+  }
 }
 
 export type AuthResponse = {
@@ -1162,4 +1184,75 @@ export function adminRecoveryCodeReset(username: string, recoveryCode: string, n
     recovery_code: recoveryCode,
     new_password: newPassword,
   })
+}
+
+// ===== Owner-managed administrator accounts (系统所有者 = 苏归) =====
+//
+// Every call below hits an owner-only endpoint (RequireAuthentication +
+// RequireOwner). The mutations additionally require a fresh re-authentication;
+// the shared execute() wrapper transparently opens the reauth dialog and
+// retries once on reauth_required, so callers never handle that themselves.
+
+export type ManagedAdmin = {
+  id: string
+  username: string
+  display_name?: string
+  role: string
+  status: string
+  user_id?: string
+  user_cn?: string
+  must_change_password: boolean
+  created_at: string
+  last_login_at?: string
+  revoked_at?: string
+}
+
+export type ManagedAdminListResponse = {
+  admins: ManagedAdmin[]
+}
+
+// ManagedAdminResponse carries the row after a mutation. temp_password is
+// present exactly once — on appointment and on password reset — and is never
+// persisted anywhere by the client.
+export type ManagedAdminResponse = {
+  admin: ManagedAdmin
+  temp_password?: string
+}
+
+export type AppointAdminRequest = {
+  user_id: string
+  username: string
+  display_name?: string
+}
+
+export function listOwnerAdmins(): Promise<ManagedAdminListResponse> {
+  return getJSON<ManagedAdminListResponse>('/api/admin/owner/admins')
+}
+
+export function getOwnerAdmin(id: string): Promise<ManagedAdminResponse> {
+  return getJSON<ManagedAdminResponse>(`/api/admin/owner/admins/${encodeURIComponent(id)}`)
+}
+
+export function appointOwnerAdmin(request: AppointAdminRequest): Promise<ManagedAdminResponse> {
+  return postJSON<ManagedAdminResponse>('/api/admin/owner/admins', request)
+}
+
+export function enableOwnerAdmin(id: string, reason: string): Promise<ManagedAdminResponse> {
+  return postJSON<ManagedAdminResponse>(`/api/admin/owner/admins/${encodeURIComponent(id)}/enable`, { reason })
+}
+
+export function disableOwnerAdmin(id: string, reason: string): Promise<ManagedAdminResponse> {
+  return postJSON<ManagedAdminResponse>(`/api/admin/owner/admins/${encodeURIComponent(id)}/disable`, { reason })
+}
+
+export function revokeOwnerAdmin(id: string, reason: string): Promise<ManagedAdminResponse> {
+  return postJSON<ManagedAdminResponse>(`/api/admin/owner/admins/${encodeURIComponent(id)}/revoke`, { reason })
+}
+
+export function resetOwnerAdminPassword(id: string, reason: string): Promise<ManagedAdminResponse> {
+  return postJSON<ManagedAdminResponse>(`/api/admin/owner/admins/${encodeURIComponent(id)}/reset-password`, { reason })
+}
+
+export function getOwnerAdminAudit(id: string): Promise<{ events: AdminAuditEvent[] }> {
+  return getJSON<{ events: AdminAuditEvent[] }>(`/api/admin/owner/admins/${encodeURIComponent(id)}/audit`)
 }

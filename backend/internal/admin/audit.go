@@ -29,6 +29,11 @@ const (
 	AdminAuthEventRecoveryEmailResetFailed    AdminAuthEventType = "admin_recovery_email_reset_failed"
 	AdminAuthEventOwnerPromoted               AdminAuthEventType = "owner_promoted"
 	AdminAuthEventOwnerCLIPasswordReset       AdminAuthEventType = "owner_cli_password_reset"
+	AdminAuthEventAdminAppointed              AdminAuthEventType = "admin_appointed"
+	AdminAuthEventAdminRevoked                AdminAuthEventType = "admin_revoked"
+	AdminAuthEventAdminEnabled                AdminAuthEventType = "admin_enabled"
+	AdminAuthEventAdminDisabled               AdminAuthEventType = "admin_disabled"
+	AdminAuthEventAdminPasswordResetByOwner   AdminAuthEventType = "admin_password_reset_by_owner"
 
 	AdminAuthResultSuccess AdminAuthAuditResult = "success"
 	AdminAuthResultFailure AdminAuthAuditResult = "failure"
@@ -47,6 +52,10 @@ const (
 	AdminAuthReasonWeakPassword               AdminAuthReasonCode = "weak_password"
 	AdminAuthReasonNotOwner                   AdminAuthReasonCode = "not_owner"
 	AdminAuthReasonValidationFailed           AdminAuthReasonCode = "validation_failed"
+	AdminAuthReasonTargetIsOwner              AdminAuthReasonCode = "target_is_owner"
+	AdminAuthReasonUserNotFound               AdminAuthReasonCode = "user_not_found"
+	AdminAuthReasonUsernameTaken              AdminAuthReasonCode = "username_taken"
+	AdminAuthReasonUserAlreadyAdmin           AdminAuthReasonCode = "user_already_admin"
 )
 
 var ErrInvalidAdminAuthAuditEvent = errors.New("invalid admin auth audit event")
@@ -60,6 +69,12 @@ type AdminAuthAuditEvent struct {
 	Result             AdminAuthAuditResult
 	ReasonCode         AdminAuthReasonCode
 	UserAgentSummary   *string
+
+	// Management events (owner appoints/revokes/… an admin): AdminID above is
+	// the TARGET admin; ActorAdminID is the acting owner. ManagementReason is
+	// the operator-entered reason, sanitized and bounded, never secret.
+	ActorAdminID     *string
+	ManagementReason *string
 }
 
 func buildAdminAuthAuditEvent(
@@ -146,6 +161,9 @@ func validateAdminAuthAuditEvent(event AdminAuthAuditEvent) error {
 	if event.UserAgentSummary != nil && runeCount(*event.UserAgentSummary) > 256 {
 		return ErrInvalidAdminAuthAuditEvent
 	}
+	if event.ManagementReason != nil && runeCount(*event.ManagementReason) > 256 {
+		return ErrInvalidAdminAuthAuditEvent
+	}
 	return nil
 }
 
@@ -157,7 +175,10 @@ func validAdminAuthEventType(value AdminAuthEventType) bool {
 		AdminAuthEventRecoveryCodesGenerated,
 		AdminAuthEventRecoveryCodeResetSucceeded, AdminAuthEventRecoveryCodeResetFailed,
 		AdminAuthEventRecoveryEmailResetSucceeded, AdminAuthEventRecoveryEmailResetFailed,
-		AdminAuthEventOwnerPromoted, AdminAuthEventOwnerCLIPasswordReset:
+		AdminAuthEventOwnerPromoted, AdminAuthEventOwnerCLIPasswordReset,
+		AdminAuthEventAdminAppointed, AdminAuthEventAdminRevoked,
+		AdminAuthEventAdminEnabled, AdminAuthEventAdminDisabled,
+		AdminAuthEventAdminPasswordResetByOwner:
 		return true
 	default:
 		return false
@@ -173,7 +194,9 @@ func validAdminAuthReason(value AdminAuthReasonCode) bool {
 	case AdminAuthReasonNone, AdminAuthReasonInvalidCredentials, AdminAuthReasonAccountDisabled, AdminAuthReasonRateLimited, AdminAuthReasonDatabaseError, AdminAuthReasonAuditWriteError,
 		AdminAuthReasonInvalidRecoveryCode, AdminAuthReasonInvalidVerificationCode, AdminAuthReasonVerificationCodeExpired,
 		AdminAuthReasonRecoveryEmailNotConfigured, AdminAuthReasonEmailDeliveryDisabled,
-		AdminAuthReasonWeakPassword, AdminAuthReasonNotOwner, AdminAuthReasonValidationFailed:
+		AdminAuthReasonWeakPassword, AdminAuthReasonNotOwner, AdminAuthReasonValidationFailed,
+		AdminAuthReasonTargetIsOwner, AdminAuthReasonUserNotFound,
+		AdminAuthReasonUsernameTaken, AdminAuthReasonUserAlreadyAdmin:
 		return true
 	default:
 		return false

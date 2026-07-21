@@ -29,9 +29,31 @@ func (h *Handler) RequireAuthentication(next http.Handler) http.Handler {
 			return
 		}
 
+		if account.MustChangePassword && !passwordChangeExemptPath(r.URL.Path) {
+			writeError(w, http.StatusForbidden, passwordChangeRequiredMessage)
+			return
+		}
+
 		ctx := context.WithValue(r.Context(), contextKey{}, account)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// passwordChangeRequiredMessage is the machine-readable marker the frontend
+// matches to route a first-login admin into the forced password change flow.
+const passwordChangeRequiredMessage = "password_change_required"
+
+// passwordChangeExemptPath lists the only endpoints reachable while a
+// system-generated temporary password is still in place: identity, the
+// password change itself, reauth (the change flow may need it), and logout.
+// Every other admin capability stays locked until the password is rotated.
+func passwordChangeExemptPath(path string) bool {
+	switch path {
+	case "/api/admin/me", "/api/admin/logout", "/api/admin/reauth", "/api/admin/security/password":
+		return true
+	default:
+		return false
+	}
 }
 
 func CurrentAdmin(ctx context.Context) (Admin, bool) {

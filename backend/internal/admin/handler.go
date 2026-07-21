@@ -43,6 +43,9 @@ type Handler struct {
 	recoveryCodeHMACKey []byte
 	emailProtector      *recoveryemail.Protector
 	emailSender         RecoveryVerificationSender
+
+	// Owner admin-management storage, wired via ConfigureManagement.
+	management ManagementStore
 }
 
 // RecoveryVerificationSender delivers emailed verification codes. It is
@@ -65,10 +68,11 @@ type loginRequest struct {
 }
 
 type adminResponse struct {
-	ID          string  `json:"id"`
-	Username    string  `json:"username"`
-	DisplayName *string `json:"display_name,omitempty"`
-	Role        string  `json:"role"`
+	ID                 string  `json:"id"`
+	Username           string  `json:"username"`
+	DisplayName        *string `json:"display_name,omitempty"`
+	Role               string  `json:"role"`
+	MustChangePassword bool    `json:"must_change_password"`
 }
 
 type authenticationResponse struct {
@@ -308,10 +312,11 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter) {
 
 func responseFromAdmin(account Admin) adminResponse {
 	return adminResponse{
-		ID:          account.ID,
-		Username:    account.Username,
-		DisplayName: account.DisplayName,
-		Role:        account.Role,
+		ID:                 account.ID,
+		Username:           account.Username,
+		DisplayName:        account.DisplayName,
+		Role:               account.Role,
+		MustChangePassword: account.MustChangePassword,
 	}
 }
 

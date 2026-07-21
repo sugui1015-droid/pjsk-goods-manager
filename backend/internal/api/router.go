@@ -289,6 +289,27 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 		admin.AdminRecoveryEmailAAD,
 	)
 	adminHandler.ConfigureSecurity(adminStore, cfg.AdminRecoveryCodeHMACKey, adminRecoveryEmailProtector, adminEmailSender)
+	adminHandler.ConfigureManagement(adminStore)
+
+	// Owner-only admin management. Every route requires an authenticated
+	// owner; mutations (appoint/enable/disable/revoke/reset-password)
+	// additionally require a fresh re-authentication. The storage layer
+	// re-checks that the target is never the owner, so no frontend state can
+	// bypass the wall.
+	mux.Handle(
+		"/api/admin/owner/admins",
+		adminHandler.RequireAuthentication(adminHandler.RequireOwner(adminHandler.RequireRecentReauthWhen(
+			admin.MutatingMatch,
+			http.HandlerFunc(adminHandler.ManagementCollection),
+		))),
+	)
+	mux.Handle(
+		"/api/admin/owner/admins/",
+		adminHandler.RequireAuthentication(adminHandler.RequireOwner(adminHandler.RequireRecentReauthWhen(
+			admin.MutatingMatch,
+			http.HandlerFunc(adminHandler.ManagementItem),
+		))),
+	)
 
 	mux.HandleFunc("/api/query/login", queryHandler.Login)
 	mux.HandleFunc("/api/query/change-code", queryHandler.ChangeCode)

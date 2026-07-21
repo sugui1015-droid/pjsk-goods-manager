@@ -141,7 +141,7 @@ func (s *PostgresStore) UpdatePasswordKeepSession(
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	tag, err := tx.Exec(ctx, `
-		update admins set password_hash = $2, updated_at = now()
+		update admins set password_hash = $2, must_change_password = false, updated_at = now()
 		where id = $1::uuid
 	`, adminID, newHash)
 	if err != nil {
@@ -453,9 +453,9 @@ func (s *PostgresStore) CountOwners(ctx context.Context) (int, error) {
 func (s *PostgresStore) FindOwner(ctx context.Context) (Admin, error) {
 	var account Admin
 	err := s.pool.QueryRow(ctx, `
-		select id::text, username, password_hash, display_name, role, status
+		select id::text, username, password_hash, display_name, role, status, must_change_password
 		from admins where role = 'owner'
-	`).Scan(&account.ID, &account.Username, &account.PasswordHash, &account.DisplayName, &account.Role, &account.Status)
+	`).Scan(&account.ID, &account.Username, &account.PasswordHash, &account.DisplayName, &account.Role, &account.Status, &account.MustChangePassword)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Admin{}, ErrNotFound
 	}
@@ -540,16 +540,20 @@ type pgxExecutor interface {
 // caller's transaction, so state changes and their audit trail commit or
 // roll back together.
 func insertAuditEventTx(ctx context.Context, tx pgx.Tx, event AdminAuthAuditEvent) error {
-	var adminID any
+	var adminID, actorID any
 	if event.AdminID != nil {
 		adminID = *event.AdminID
+	}
+	if event.ActorAdminID != nil {
+		actorID = *event.ActorAdminID
 	}
 	_, err := tx.Exec(ctx, `
 		insert into admin_auth_audit_events (
 			event_type, occurred_at, admin_id, username_normalized,
-			client_ip, result, reason_code, user_agent_summary
-		) values ($1, $2, $3::uuid, $4, $5, $6, $7, $8)
-	`, event.EventType, event.OccurredAt, adminID, event.UsernameNormalized, event.ClientIP, event.Result, event.ReasonCode, event.UserAgentSummary)
+			client_ip, result, reason_code, user_agent_summary,
+			actor_admin_id, management_reason
+		) values ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9::uuid, $10)
+	`, event.EventType, event.OccurredAt, adminID, event.UsernameNormalized, event.ClientIP, event.Result, event.ReasonCode, event.UserAgentSummary, actorID, event.ManagementReason)
 	return err
 }
 

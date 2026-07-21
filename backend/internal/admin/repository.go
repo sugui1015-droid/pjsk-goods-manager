@@ -18,6 +18,10 @@ type Admin struct {
 	DisplayName  *string
 	Role         string
 	Status       string
+
+	// MustChangePassword forces the first-login password change after a
+	// system-generated temporary password (appointment or owner reset).
+	MustChangePassword bool
 }
 
 type Store interface {
@@ -39,7 +43,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 func (s *PostgresStore) FindByUsername(ctx context.Context, username string) (Admin, error) {
 	var account Admin
 	err := s.pool.QueryRow(ctx, `
-		select id::text, username, password_hash, display_name, role, status
+		select id::text, username, password_hash, display_name, role, status, must_change_password
 		from admins
 		where lower(btrim(username)) = lower($1)
 	`, username).Scan(
@@ -49,6 +53,7 @@ func (s *PostgresStore) FindByUsername(ctx context.Context, username string) (Ad
 		&account.DisplayName,
 		&account.Role,
 		&account.Status,
+		&account.MustChangePassword,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Admin{}, ErrNotFound
@@ -86,12 +91,7 @@ func (s *PostgresStore) CreateSessionWithAudit(
 	if err := validateAdminAuthAuditEvent(event); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into admin_auth_audit_events (
-			event_type, occurred_at, admin_id, username_normalized,
-			client_ip, result, reason_code, user_agent_summary
-		) values ($1, $2, $3::uuid, $4, $5, $6, $7, $8)
-	`, event.EventType, event.OccurredAt, adminID, event.UsernameNormalized, event.ClientIP, event.Result, event.ReasonCode, event.UserAgentSummary); err != nil {
+	if err := insertAuditEventTx(ctx, tx, event); err != nil {
 		return err
 	}
 
@@ -102,16 +102,20 @@ func (s *PostgresStore) RecordAdminAuthEvent(ctx context.Context, event AdminAut
 	if err := validateAdminAuthAuditEvent(event); err != nil {
 		return err
 	}
-	var adminID any
+	var adminID, actorID any
 	if event.AdminID != nil {
 		adminID = *event.AdminID
+	}
+	if event.ActorAdminID != nil {
+		actorID = *event.ActorAdminID
 	}
 	_, err := s.pool.Exec(ctx, `
 		insert into admin_auth_audit_events (
 			event_type, occurred_at, admin_id, username_normalized,
-			client_ip, result, reason_code, user_agent_summary
-		) values ($1, $2, $3::uuid, $4, $5, $6, $7, $8)
-	`, event.EventType, event.OccurredAt, adminID, event.UsernameNormalized, event.ClientIP, event.Result, event.ReasonCode, event.UserAgentSummary)
+			client_ip, result, reason_code, user_agent_summary,
+			actor_admin_id, management_reason
+		) values ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9::uuid, $10)
+	`, event.EventType, event.OccurredAt, adminID, event.UsernameNormalized, event.ClientIP, event.Result, event.ReasonCode, event.UserAgentSummary, actorID, event.ManagementReason)
 	return err
 }
 
@@ -124,7 +128,7 @@ func (s *PostgresStore) FindBySession(ctx context.Context, tokenHash string) (Ad
 			where token_hash = $1 and expires_at > now()
 			returning admin_id
 		)
-		select a.id::text, a.username, a.password_hash, a.display_name, a.role, a.status
+		select a.id::text, a.username, a.password_hash, a.display_name, a.role, a.status, a.must_change_password
 		from valid_session s
 		join admins a on a.id = s.admin_id
 		where a.status = 'active'
@@ -135,6 +139,7 @@ func (s *PostgresStore) FindBySession(ctx context.Context, tokenHash string) (Ad
 		&account.DisplayName,
 		&account.Role,
 		&account.Status,
+		&account.MustChangePassword,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Admin{}, ErrNotFound

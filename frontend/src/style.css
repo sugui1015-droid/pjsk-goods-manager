@@ -3645,7 +3645,23 @@ table td small { display: block; font-size: var(--fs-hint); color: var(--color-h
 }
 .recovery-codes__actions { display: flex; justify-content: center; gap: 12px; }
 
+/* The global re-authentication dialog can be triggered from inside any other
+   modal flow (e.g. appointing an admin), so it sits ABOVE the app modals
+   (z-index 60) and the forced-change gate is above that again — a reauth prompt
+   is never covered by the dialog that triggered it. */
 .reauth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 78;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(23, 34, 45, 0.45);
+  padding: 16px;
+}
+
+/* App modals (appoint confirmation, one-time temp password) sit below reauth. */
+.app-modal-overlay {
   position: fixed;
   inset: 0;
   z-index: 60;
@@ -3667,8 +3683,82 @@ table td small { display: block; font-size: var(--fs-hint); color: var(--color-h
 .reauth-dialog h3 { font-size: 18px; color: #274b6d; margin-bottom: 6px; }
 .reauth-dialog__actions { display: flex; justify-content: center; gap: 12px; margin-top: 8px; }
 
+/* 首次登录强制改密门禁：全屏遮罩上的居中改密卡片。 */
+.first-pwd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 82;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(23, 34, 45, 0.55);
+  padding: 16px;
+}
+.first-pwd-dialog {
+  width: 100%;
+  max-width: 440px;
+}
+.first-pwd-dialog h2 { color: #274b6d; margin-bottom: 6px; }
+.first-pwd-dialog__actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; }
+
+/* 一次性临时密码：等宽显示区，明显区别于普通文本。 */
+.temp-password-box {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: #f6f9fb;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+  text-align: center;
+}
+.temp-password-box code {
+  font-size: 18px;
+  letter-spacing: 2px;
+  word-break: break-all;
+}
+
+/* 角色/管理员身份徽标。 */
+.role-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.role-badge--owner { background: #e5effa; color: #1c4b7d; border: 1px solid #b8d4ec; }
+.role-badge--admin { background: #e7f6ec; color: #1f6b3a; border: 1px solid #b9e0c6; }
+.role-badge--disabled { background: #f1f3f5; color: #6b7480; border: 1px solid #d7dde2; }
+.role-badge--revoked { background: #fbecec; color: #a4373a; border: 1px solid #ecc2c2; }
+
+/* Action cells stay normal table cells (so the global vertical-align:middle and
+   uniform row height apply); the badge + buttons live in an inline-flex wrapper
+   that never wraps — wide rows scroll horizontally with the table instead of
+   growing taller, so every row keeps the same height regardless of admin state. */
+.cell-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.admin-legend { margin-top: 12px; line-height: 1.6; }
+
+/* Management table: give it a min width and keep login-name / display-name on a
+   single line so a value like "helper_demo" never breaks mid-token and inflates
+   the row; the table scrolls horizontally inside its own container instead. */
+.admin-manage-table table { min-width: 1120px; }
+.admin-name-cell {
+  white-space: nowrap;
+  min-width: 120px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @media (max-width: 560px) {
   .recovery-codes__list { grid-template-columns: minmax(0, 1fr); }
+  .first-pwd-dialog__actions { flex-direction: column-reverse; }
 }
 
 .entry-link {

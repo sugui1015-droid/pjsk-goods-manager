@@ -5,6 +5,14 @@ import {
   adminReauth,
   adminRecoveryCodeReset,
   apiUrl,
+  roleDisplayName,
+  listOwnerAdmins,
+  appointOwnerAdmin,
+  enableOwnerAdmin,
+  disableOwnerAdmin,
+  revokeOwnerAdmin,
+  resetOwnerAdminPassword,
+  getOwnerAdminAudit,
   bindQueryCode,
   changeAdminPassword,
   confirmAdminRecoveryEmailBind,
@@ -48,6 +56,7 @@ import {
   type AdminPaymentSubmissionDetailResponse,
   type PaymentSubmissionFacetResponse,
   type Admin,
+  type ManagedAdmin,
   type AdminUserDetailResponse,
   type AdminUserListItem,
   type AdminUserFacetResponse,
@@ -131,6 +140,7 @@ type RouteName =
   | 'admin-finance' | 'admin-payments' | 'admin-payment-detail' | 'admin-qr'
   | 'admin-submissions' | 'admin-submission-detail'
   | 'admin-security'
+  | 'admin-admins' | 'admin-admin-detail'
 type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
 type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
 type QuickFilterGroup = { key: TextFilterKey; label: string; options: string[] }
@@ -160,6 +170,7 @@ const routeOrderID = ref(orderIDFromPath(window.location.pathname))
 const routePaymentID = ref(paymentIDFromPath(window.location.pathname))
 const routeUserID = ref(userIDFromPath(window.location.pathname))
 const routeSubmissionID = ref(submissionIDFromPath(window.location.pathname))
+const routeAdminAdminID = ref(adminAdminIDFromPath(window.location.pathname))
 
 const adminUsers = ref<AdminUserListItem[]>([])
 const adminUsersSummary = ref<AdminUserListSummary | null>(null)
@@ -761,6 +772,8 @@ function routeFromPath(path: string): RouteName {
   if (path === '/admin/security') return 'admin-security'
   if (path === '/admin/finance/submissions') return 'admin-submissions'
   if (path.startsWith('/admin/finance/submissions/')) return 'admin-submission-detail'
+  if (path === '/admin/admins') return 'admin-admins'
+  if (path.startsWith('/admin/admins/')) return 'admin-admin-detail'
   return 'home'
 }
 
@@ -789,6 +802,11 @@ function submissionIDFromPath(path: string) {
   return decodeURIComponent(path.slice('/admin/finance/submissions/'.length).replace(/\/$/, ''))
 }
 
+function adminAdminIDFromPath(path: string) {
+  if (!path.startsWith('/admin/admins/')) return ''
+  return decodeURIComponent(path.slice('/admin/admins/'.length).replace(/\/$/, ''))
+}
+
 function applyRoute(path: string) {
   const canonical = canonicalPath(path)
   if (canonical !== path) window.history.replaceState(null, '', canonical)
@@ -798,6 +816,7 @@ function applyRoute(path: string) {
   routePaymentID.value = paymentIDFromPath(canonical)
   routeUserID.value = userIDFromPath(canonical)
   routeSubmissionID.value = submissionIDFromPath(canonical)
+  routeAdminAdminID.value = adminAdminIDFromPath(canonical)
 }
 
 function navigate(path: string) {
@@ -821,6 +840,17 @@ async function handleAdminRouteEntered() {
     navigate('/admin')
     return
   }
+  // A system temporary password locks every admin surface until it is changed.
+  // The backend enforces this with 403 password_change_required; the frontend
+  // must not fire the page's data loads (they would all fail) and instead lets
+  // the forced-change gate render. The gate survives refresh because
+  // /api/admin/me reports must_change_password.
+  if (mustChangePassword.value) return
+  // Owner-only pages: only fetch owner-only data once identity is confirmed as
+  // owner (ensureAdmin above already resolved admin.value). A non-owner landing
+  // here sees the in-template 「无权限」 notice and triggers no owner-only call.
+  if (routeName.value === 'admin-admins' && isOwner.value) await loadOwnerAdmins()
+  if (routeName.value === 'admin-admin-detail' && isOwner.value && routeAdminAdminID.value) await loadOwnerAdminDetail(routeAdminAdminID.value)
   if (routeName.value === 'admin-import-history') await loadHistory()
   if (routeName.value === 'admin-import-detail' && routeImportID.value) await loadDetail(routeImportID.value)
   if (routeName.value === 'admin-orders') await loadOrders()
@@ -915,6 +945,13 @@ async function login() {
     })
     admin.value = response.admin
     loginPassword.value = ''
+    // A system temporary password must be changed before anything else. Drop
+    // any remembered deep link and let the forced-change gate take over.
+    if (response.admin.must_change_password) {
+      pendingAdminTarget.value = ''
+      navigate('/admin')
+      return
+    }
     // Return to the originally requested admin page, or the admin default.
     const target = pendingAdminTarget.value || defaultAdminTarget
     pendingAdminTarget.value = ''
@@ -951,6 +988,300 @@ async function logout() {
 
 // ===== 账户安全（阶段 2H-2B）=====
 const isOwner = computed(() => admin.value?.role === 'owner')
+
+// ===== 分级权限（阶段 2H-R2）=====
+//
+// 角色显示统一走 roleDisplayName：owner→苏归、admin→管理员、用户语境→用户。
+// 技术值 owner/admin 只用于判断，从不直接展示。
+const currentRoleName = computed(() => roleDisplayName(admin.value?.role))
+
+// 首次登录强制改密门禁。标志来自 /api/admin/me（刷新后仍然生效），后端对
+// 除身份/退出/reauth/改密外的所有接口返回 403 password_change_required。
+const mustChangePassword = computed(() => Boolean(admin.value?.must_change_password))
+
+const firstPwdCurrent = ref('')
+const firstPwdNew = ref('')
+const firstPwdConfirm = ref('')
+const firstPwdLoading = ref(false)
+const firstPwdMessage = ref('')
+
+async function submitFirstPasswordChange() {
+  if (firstPwdLoading.value) return
+  firstPwdMessage.value = ''
+  if (firstPwdNew.value !== firstPwdConfirm.value) {
+    firstPwdMessage.value = '两次输入的新密码不一致'
+    return
+  }
+  firstPwdLoading.value = true
+  try {
+    // The temporary password lives only in this input for the duration of the
+    // request; it is never stored, logged, or echoed back on error.
+    await changeAdminPassword(firstPwdCurrent.value, firstPwdNew.value)
+    firstPwdCurrent.value = ''
+    firstPwdNew.value = ''
+    firstPwdConfirm.value = ''
+    // Re-fetch identity to confirm the flag cleared, then enter the center.
+    await ensureAdmin()
+    if (mustChangePassword.value) {
+      firstPwdMessage.value = '密码未更新，请重试。'
+      return
+    }
+    navigate('/admin')
+  } catch (error) {
+    firstPwdMessage.value = friendlyAdminError(error, '修改密码失败')
+  } finally {
+    firstPwdLoading.value = false
+  }
+}
+
+// ---- Owner 管理员管理 ----
+const ownerAdmins = ref<ManagedAdmin[]>([])
+const ownerAdminsLoading = ref(false)
+const ownerAdminsMessage = ref('')
+
+// user_id → 该用户当前关联的管理员账号，供用户列表渲染「设为管理员/管理员」状态。
+// 仅苏归能取到该列表，普通管理员拿到空表，因此任命入口对他们天然不出现。
+const ownerAdminsByUserId = computed(() => {
+  const map = new Map<string, ManagedAdmin>()
+  for (const entry of ownerAdmins.value) {
+    if (entry.user_id) map.set(entry.user_id, entry)
+  }
+  return map
+})
+
+async function loadOwnerAdmins() {
+  if (!isOwner.value) return
+  ownerAdminsLoading.value = true
+  ownerAdminsMessage.value = ''
+  try {
+    ownerAdmins.value = (await listOwnerAdmins()).admins
+  } catch (error) {
+    ownerAdmins.value = []
+    ownerAdminsMessage.value = friendlyAdminError(error, '加载管理员列表失败')
+  } finally {
+    ownerAdminsLoading.value = false
+  }
+}
+
+// The owner's own linked user (if any) must never show danger actions.
+const ownerLinkedUserId = computed(() => {
+  for (const entry of ownerAdmins.value) {
+    if (entry.role === 'owner' && entry.user_id) return entry.user_id
+  }
+  return ''
+})
+
+function managedAdminStatusLabel(status: string): string {
+  switch (status) {
+    case 'active':
+      return '正常'
+    case 'disabled':
+      return '已停用'
+    case 'revoked':
+      return '已撤销'
+    default:
+      return status
+  }
+}
+
+type UserAdminState = { label: string; status: string; admin?: ManagedAdmin }
+
+function userAdminState(user: AdminUserListItem): UserAdminState {
+  const linked = ownerAdminsByUserId.value.get(user.id)
+  if (!linked) return { label: '未关联', status: 'none' }
+  if (linked.role === 'owner') return { label: '苏归', status: 'owner', admin: linked }
+  switch (linked.status) {
+    case 'active':
+      return { label: '管理员', status: 'active', admin: linked }
+    case 'disabled':
+      return { label: '管理员（已停用）', status: 'disabled', admin: linked }
+    case 'revoked':
+      return { label: '管理员（已撤销）', status: 'revoked', admin: linked }
+    default:
+      return { label: '管理员', status: linked.status, admin: linked }
+  }
+}
+
+// ---- 任命弹窗（设为管理员） ----
+const appointVisible = ref(false)
+const appointUser = ref<AdminUserListItem | null>(null)
+const appointUsername = ref('')
+const appointBusy = ref(false)
+const appointMessage = ref('')
+const appointReappoint = ref(false)
+// The one-time temporary password lives only in this ref while the result
+// dialog is open; it is never written to storage, the URL, logs, or the DOM
+// beyond the dialog, and clears the moment the dialog closes.
+const tempPasswordValue = ref('')
+const tempPasswordFor = ref('')
+const tempPasswordCopied = ref(false)
+
+function openAppoint(user: AdminUserListItem, reappoint = false) {
+  appointUser.value = user
+  appointReappoint.value = reappoint
+  appointUsername.value = reappoint ? (ownerAdminsByUserId.value.get(user.id)?.username ?? '') : ''
+  appointMessage.value = ''
+  appointVisible.value = true
+}
+
+function cancelAppoint() {
+  appointVisible.value = false
+  appointUser.value = null
+  appointUsername.value = ''
+  appointMessage.value = ''
+}
+
+async function submitAppoint() {
+  if (appointBusy.value || !appointUser.value) return
+  appointMessage.value = ''
+  const username = appointUsername.value.trim().toLowerCase()
+  if (!appointReappoint.value && !/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(username)) {
+    appointMessage.value = '登录用户名需为 3-32 位的小写字母、数字或 _ . -'
+    return
+  }
+  appointBusy.value = true
+  try {
+    // Reappointment reuses the revoked account; the backend ignores the sent
+    // username and reactivates the original. A fresh appointment creates it.
+    const result = await appointOwnerAdmin({
+      user_id: appointUser.value.id,
+      username: appointReappoint.value ? (ownerAdminsByUserId.value.get(appointUser.value.id)?.username ?? username) : username,
+    })
+    appointVisible.value = false
+    showTempPassword(result)
+    await Promise.all([loadOwnerAdmins(), loadAdminUsers()])
+  } catch (error) {
+    appointMessage.value = friendlyAdminError(error, '任命失败')
+  } finally {
+    appointBusy.value = false
+  }
+}
+
+function showTempPassword(result: { admin: ManagedAdmin; temp_password?: string }) {
+  tempPasswordValue.value = result.temp_password ?? ''
+  tempPasswordFor.value = result.admin.username
+  tempPasswordCopied.value = false
+}
+
+async function copyTempPassword() {
+  try {
+    await navigator.clipboard.writeText(tempPasswordValue.value)
+    tempPasswordCopied.value = true
+  } catch {
+    tempPasswordCopied.value = false
+  }
+}
+
+function acknowledgeTempPassword() {
+  // Wipe the plaintext from memory; it can never be recovered from the client.
+  tempPasswordValue.value = ''
+  tempPasswordFor.value = ''
+  tempPasswordCopied.value = false
+}
+
+// ---- 管理员管理页操作（启停/撤销/重置） ----
+const ownerActionBusy = ref('')
+
+async function disableAdmin(entry: ManagedAdmin) {
+  const reason = window.prompt(`停用管理员「${entry.username}」后，其登录将被拒绝、现有会话立即失效，但管理员身份保留，可随时重新启用。\n请填写停用原因：`, '')
+  if (reason === null) return
+  await runAdminAction(entry.id, 'disable', () => disableOwnerAdmin(entry.id, reason.trim()))
+}
+
+async function enableAdmin(entry: ManagedAdmin) {
+  const reason = window.prompt(`重新启用管理员「${entry.username}」。\n请填写启用原因：`, '')
+  if (reason === null) return
+  await runAdminAction(entry.id, 'enable', () => enableOwnerAdmin(entry.id, reason.trim()))
+}
+
+async function revokeAdmin(entry: ManagedAdmin) {
+  const reason = window.prompt(`撤销「${entry.username}」的管理员权限：管理员身份被收回、现有会话立即失效。其对应的普通用户账号、订单、付款与查询码不受影响，仍可正常登录用户端。\n请填写撤销原因：`, '')
+  if (reason === null) return
+  await runAdminAction(entry.id, 'revoke', () => revokeOwnerAdmin(entry.id, reason.trim()))
+}
+
+async function resetAdminPassword(entry: ManagedAdmin) {
+  const reason = window.prompt(`重置「${entry.username}」的登录密码：系统将生成一次性临时密码（只显示一次），其现有会话立即失效，首次登录须改密。\n请填写重置原因：`, '')
+  if (reason === null) return
+  ownerActionBusy.value = entry.id
+  try {
+    const result = await resetOwnerAdminPassword(entry.id, reason.trim())
+    showTempPassword(result)
+    await loadOwnerAdmins()
+  } catch (error) {
+    ownerAdminsMessage.value = friendlyAdminError(error, '重置密码失败')
+  } finally {
+    ownerActionBusy.value = ''
+  }
+}
+
+async function runAdminAction(id: string, kind: string, action: () => Promise<unknown>) {
+  ownerActionBusy.value = id
+  ownerAdminsMessage.value = ''
+  try {
+    await action()
+    ownerAdminsMessage.value = ({
+      disable: '已停用，该管理员的现有会话已全部失效。',
+      enable: '已启用。',
+      revoke: '已撤销管理员权限，该管理员的现有会话已全部失效；其普通用户身份不受影响。',
+    } as Record<string, string>)[kind] ?? '操作成功。'
+    await loadOwnerAdmins()
+  } catch (error) {
+    ownerAdminsMessage.value = friendlyAdminError(error, '操作失败')
+  } finally {
+    ownerActionBusy.value = ''
+  }
+}
+
+// ---- 管理员详情：相关安全审计 ----
+const ownerAdminDetail = ref<ManagedAdmin | null>(null)
+const ownerAdminAudit = ref<AdminAuditEvent[]>([])
+const ownerAdminDetailLoading = ref(false)
+const ownerAdminDetailMessage = ref('')
+
+async function loadOwnerAdminDetail(id: string) {
+  // Never call the owner-only audit endpoint for a non-owner (avoids a
+  // spurious 403 on account switch or a plain admin deep-linking here).
+  if (!isOwner.value) return
+  ownerAdminDetailLoading.value = true
+  ownerAdminDetailMessage.value = ''
+  try {
+    if (ownerAdmins.value.length === 0) await loadOwnerAdmins()
+    ownerAdminDetail.value = ownerAdmins.value.find((entry) => entry.id === id) ?? null
+    ownerAdminAudit.value = (await getOwnerAdminAudit(id)).events
+  } catch (error) {
+    ownerAdminAudit.value = []
+    ownerAdminDetailMessage.value = friendlyAdminError(error, '加载管理员审计失败')
+  } finally {
+    ownerAdminDetailLoading.value = false
+  }
+}
+
+// friendlyAdminError maps the backend's status/message into a safe Chinese
+// message. It never surfaces raw server error text or stack traces.
+function friendlyAdminError(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    if (error.message === 'reauth_required') return '需要重新验证身份后再操作。'
+    switch (error.status) {
+      case 401:
+        return '登录已失效，请重新登录。'
+      case 403:
+        return '没有权限执行该操作。'
+      case 404:
+        return '目标不存在或已变更，请刷新后重试。'
+      case 409:
+        return error.message || '状态冲突，请刷新后重试。'
+      case 400:
+      case 422:
+        return error.message || '提交的信息有误，请检查后重试。'
+      case 500:
+        return '服务器内部错误，请稍后重试。'
+    }
+    // Business messages from the backend are already safe Chinese text.
+    return error.message || fallback
+  }
+  return fallback
+}
 
 const pwdCurrent = ref('')
 const pwdNew = ref('')
@@ -1106,6 +1437,11 @@ const auditEventLabels: Record<string, string> = {
   admin_recovery_email_reset_failed: '邮箱找回失败',
   owner_promoted: '升级为系统所有者',
   owner_cli_password_reset: '服务器紧急重置密码',
+  admin_appointed: '任命管理员',
+  admin_revoked: '撤销管理员',
+  admin_enabled: '启用管理员',
+  admin_disabled: '停用管理员',
+  admin_password_reset_by_owner: '重置管理员密码',
 }
 
 function auditEventLabel(eventType: string) {
@@ -2040,6 +2376,9 @@ async function loadAdminUsers() {
     adminUserPageSize.value = response.page_size
     adminUserTotal.value = response.total
     adminUserTotalPages.value = response.total_pages
+    // Only 苏归 gets the admin linkage map that powers the per-row 「设为管理员/
+    // 管理员」 state; for a plain admin this is a no-op and the column stays empty.
+    if (isOwner.value) await loadOwnerAdmins()
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
@@ -3687,6 +4026,27 @@ onUnmounted(() => {
 
 <template>
   <div class="app-shell">
+    <!-- 首次登录强制改密门禁：只要管理员持临时密码（must_change_password），
+         无论访问哪个管理页面，都只呈现这个改密视图；改密成功前不能进入任何
+         其它管理功能。刷新后仍生效（/api/admin/me 返回该标志）。 -->
+    <div v-if="admin && mustChangePassword && isAdminSurface" class="first-pwd-overlay" role="dialog" aria-modal="true" aria-label="首次登录修改密码">
+      <div class="first-pwd-dialog panel">
+        <h2>首次登录：请修改密码</h2>
+        <p class="muted">当前登录使用的是系统一次性临时密码。为了账号安全，必须先设置新密码，完成后才能进入{{ currentRoleName }}的管理功能。</p>
+        <form class="entry-form security-form" @submit.prevent="submitFirstPasswordChange">
+          <input class="visually-hidden" type="text" name="username" :value="admin?.username ?? ''" autocomplete="username" readonly tabindex="-1" aria-hidden="true" />
+          <label><span>临时密码</span><input v-model="firstPwdCurrent" type="password" autocomplete="current-password" required placeholder="输入收到的临时密码" /></label>
+          <label><span>新密码</span><input v-model="firstPwdNew" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="至少 10 位，建议由密码管理器生成" /></label>
+          <label><span>确认新密码</span><input v-model="firstPwdConfirm" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="再次输入新密码" /></label>
+          <div class="first-pwd-dialog__actions">
+            <button class="secondary-button" type="button" @click="logout">退出登录</button>
+            <button class="primary-button" type="submit" :disabled="firstPwdLoading">{{ firstPwdLoading ? '提交中' : '设置新密码并进入' }}</button>
+          </div>
+        </form>
+        <div v-if="firstPwdMessage" class="inline-alert">{{ firstPwdMessage }}</div>
+      </div>
+    </div>
+
     <main v-if="isAdminRoute" class="workspace admin-surface">
       <PortalStatusBar
         :identity="admin ? (admin.display_name ?? admin.username) : undefined"
@@ -4402,12 +4762,14 @@ onUnmounted(() => {
                     <th class="numeric-column"><ColumnRangeFilter v-model="adminUserFilterState.ranges.unpaid" label="未付金额" @update:model-value="applyAdminUserFilters" /></th>
                     <th><ColumnDateFilter v-model="adminUserFilterState.dates.last_login" label="最后登录时间" allow-blank blank-label="从未登录" @update:model-value="applyAdminUserFilters" /></th>
                     <th><ColumnDateFilter v-model="adminUserFilterState.dates.created" label="创建时间" @update:model-value="applyAdminUserFilters" /></th>
+                    <!-- 管理员身份列仅苏归可见。 -->
+                    <th v-if="isOwner"><span class="column-header"><span class="column-header__label">管理员身份</span></span></th>
                     <th><span class="column-header"><span class="column-header__label">查看详情</span></span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-if="adminUsersLoading"><td colspan="12">加载中…</td></tr>
-                  <tr v-else-if="adminUsers.length === 0"><td colspan="12">没有符合当前筛选条件的用户。</td></tr>
+                  <tr v-if="adminUsersLoading"><td :colspan="isOwner ? 13 : 12">加载中…</td></tr>
+                  <tr v-else-if="adminUsers.length === 0"><td :colspan="isOwner ? 13 : 12">没有符合当前筛选条件的用户。</td></tr>
                   <!-- user.id keys the row and drives the detail link; it is
                        never rendered as a column. -->
                   <tr v-for="user in adminUsers" v-else :key="user.id">
@@ -4422,6 +4784,26 @@ onUnmounted(() => {
                     <td class="numeric-column" :class="{ danger: user.remaining_amount > 0 }">{{ formatMoney(user.remaining_amount) }}</td>
                     <td>{{ user.last_login_at ? formatDate(user.last_login_at) : '从未登录' }}</td>
                     <td>{{ formatDate(user.created_at) }}</td>
+                    <!-- 管理员身份 + 任命/复聘入口（仅苏归）。对苏归本人关联的用户
+                         不显示任何任命/危险操作，避免自我操作。 -->
+                    <td v-if="isOwner">
+                      <span class="cell-actions">
+                        <template v-if="user.id === ownerLinkedUserId">
+                          <span class="role-badge role-badge--owner">苏归</span>
+                        </template>
+                        <template v-else-if="userAdminState(user).status === 'none'">
+                          <button class="secondary-button" type="button" @click="openAppoint(user)">设为管理员</button>
+                        </template>
+                        <template v-else-if="userAdminState(user).status === 'revoked'">
+                          <span class="role-badge role-badge--revoked">管理员（已撤销）</span>
+                          <button class="secondary-button ghost-button" type="button" @click="openAppoint(user, true)">重新任命</button>
+                        </template>
+                        <template v-else>
+                          <span class="role-badge" :class="userAdminState(user).status === 'disabled' ? 'role-badge--disabled' : 'role-badge--admin'">{{ userAdminState(user).label }}</span>
+                          <button class="secondary-button ghost-button" type="button" @click="navigate('/admin/admins/' + (userAdminState(user).admin?.id ?? ''))">查看</button>
+                        </template>
+                      </span>
+                    </td>
                     <td><button class="secondary-button" type="button" @click="navigate('/admin/users/' + user.id)">详情</button></td>
                   </tr>
                 </tbody>
@@ -4896,6 +5278,98 @@ onUnmounted(() => {
             </tbody></table></div>
           </section>
         </template>
+
+        <template v-else-if="routeName === 'admin-admins'">
+          <section v-if="!isOwner" class="panel">
+            <div class="page-heading"><h2>管理员管理</h2></div>
+            <div class="inline-alert">仅「苏归」可进入管理员管理。当前账号没有该权限。</div>
+          </section>
+          <template v-else>
+            <section class="panel">
+              <div class="page-heading">
+                <h2>管理员管理</h2>
+                <p>任命、启用、停用、撤销与重置管理员。以上写操作均需二次身份验证（10 分钟内有效），并会立即使目标管理员的现有会话失效。</p>
+                <p class="muted">当前身份：{{ currentRoleName }}。系统始终只有一个苏归，且只能通过服务器命令行转移，本页不提供任何升级或转移入口。</p>
+              </div>
+              <div class="page-actions">
+                <button class="secondary-button" type="button" :disabled="ownerAdminsLoading" @click="loadOwnerAdmins">{{ ownerAdminsLoading ? '加载中' : '刷新' }}</button>
+              </div>
+              <div v-if="ownerAdminsMessage" class="inline-alert">{{ ownerAdminsMessage }}</div>
+              <div class="table-scroll history-table admin-manage-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>登录用户名</th><th>显示名称</th><th>关联用户 CN</th><th>角色</th><th>状态</th><th>首次改密</th><th>创建时间</th><th>最近登录</th><th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-if="ownerAdminsLoading"><td colspan="9">加载中…</td></tr>
+                    <tr v-else-if="ownerAdmins.length === 0"><td colspan="9">暂无管理员。</td></tr>
+                    <tr v-for="entry in ownerAdmins" v-else :key="entry.id">
+                      <td class="admin-name-cell"><strong>{{ entry.username }}</strong></td>
+                      <td class="admin-name-cell">{{ entry.display_name || '-' }}</td>
+                      <td>{{ entry.user_cn || '-' }}</td>
+                      <td>
+                        <span class="role-badge" :class="entry.role === 'owner' ? 'role-badge--owner' : 'role-badge--admin'">{{ roleDisplayName(entry.role) }}</span>
+                      </td>
+                      <td><span class="status-chip" :data-state="entry.status">{{ managedAdminStatusLabel(entry.status) }}</span></td>
+                      <td>{{ entry.must_change_password ? '需要' : '—' }}</td>
+                      <td>{{ formatDate(entry.created_at) }}</td>
+                      <td>{{ entry.last_login_at ? formatDate(entry.last_login_at) : '从未登录' }}</td>
+                      <td>
+                        <span class="cell-actions">
+                          <!-- 对苏归本人：不显示任何危险操作。 -->
+                          <template v-if="entry.role === 'owner'">
+                            <span class="muted">唯一苏归</span>
+                          </template>
+                          <template v-else>
+                            <button class="secondary-button ghost-button" type="button" @click="navigate('/admin/admins/' + entry.id)">查看</button>
+                            <button v-if="entry.status === 'active'" class="secondary-button" type="button" :disabled="ownerActionBusy === entry.id" @click="disableAdmin(entry)">停用</button>
+                            <button v-else-if="entry.status === 'disabled'" class="secondary-button" type="button" :disabled="ownerActionBusy === entry.id" @click="enableAdmin(entry)">启用</button>
+                            <button v-if="entry.status !== 'revoked'" class="secondary-button" type="button" :disabled="ownerActionBusy === entry.id" @click="resetAdminPassword(entry)">重置密码</button>
+                            <button v-if="entry.status !== 'revoked'" class="danger-button" type="button" :disabled="ownerActionBusy === entry.id" @click="revokeAdmin(entry)">撤销</button>
+                          </template>
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="muted admin-legend">停用：保留管理员身份，可随时重新启用。撤销：收回管理员权限，但其普通用户账号、订单、付款与查询码不受影响，且可作为普通用户继续登录；已撤销的用户重新任命时会复用原管理员账号并签发新临时密码，不会创建第二个账号。</p>
+            </section>
+          </template>
+        </template>
+
+        <template v-else-if="routeName === 'admin-admin-detail'">
+          <section v-if="!isOwner" class="panel">
+            <div class="page-heading"><h2>管理员详情</h2></div>
+            <div class="inline-alert">仅「苏归」可查看管理员详情。</div>
+          </section>
+          <template v-else>
+            <section class="panel">
+              <div class="page-actions">
+                <button class="secondary-button ghost-button" type="button" @click="navigate('/admin/admins')">← 返回管理员列表</button>
+              </div>
+              <div v-if="ownerAdminDetailMessage" class="inline-alert">{{ ownerAdminDetailMessage }}</div>
+              <div v-if="ownerAdminDetail" class="page-heading">
+                <h2>{{ ownerAdminDetail.username }}</h2>
+                <p class="muted">
+                  角色：{{ roleDisplayName(ownerAdminDetail.role) }} ·
+                  状态：{{ managedAdminStatusLabel(ownerAdminDetail.status) }} ·
+                  关联用户 CN：{{ ownerAdminDetail.user_cn || '-' }} ·
+                  {{ ownerAdminDetail.must_change_password ? '待首次改密' : '已完成改密' }}
+                </p>
+              </div>
+            </section>
+            <section class="panel security-panel" aria-label="管理员相关安全审计">
+              <div class="panel__header"><div><h2>相关安全事件</h2><p class="muted">该管理员被任命、启停、撤销、重置及其本人登录等最近记录。</p></div></div>
+              <div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>来源 IP</th><th>结果</th></tr></thead><tbody>
+                <tr v-for="(event, index) in ownerAdminAudit" :key="index"><td>{{ formatDate(event.occurred_at) }}</td><td>{{ auditEventLabel(event.event_type) }}</td><td>{{ event.client_ip }}</td><td>{{ event.result === 'success' ? '成功' : '失败' }}</td></tr>
+                <tr v-if="ownerAdminAudit.length === 0"><td colspan="4" class="muted">{{ ownerAdminDetailLoading ? '加载中…' : '暂无记录' }}</td></tr>
+              </tbody></table></div>
+            </section>
+          </template>
+        </template>
       </template>
 
       <div v-if="reauthVisible" class="reauth-overlay" role="dialog" aria-modal="true" aria-label="身份重验证">
@@ -4911,6 +5385,45 @@ onUnmounted(() => {
             </div>
           </form>
           <div v-if="reauthMessage" class="inline-alert">{{ reauthMessage }}</div>
+        </div>
+      </div>
+
+      <!-- 任命确认弹窗（设为管理员）。仅苏归可见入口；提交时若无最近 reauth，
+           api/client 会弹出身份重验证再重试本请求——此时本弹窗以 !reauthVisible
+           暂时隐藏，让 reauth 独占前台；reauth 取消后本弹窗带原用户名重新出现，
+           reauth 成功则任命完成、本弹窗关闭、只留临时密码弹窗。reauth 弹窗 z-index
+           高于本弹窗，二者即使同时存在也不会互相遮挡。 -->
+      <div v-if="appointVisible && appointUser && !reauthVisible" class="app-modal-overlay" role="dialog" aria-modal="true" aria-label="设为管理员">
+        <div class="reauth-dialog">
+          <h3>{{ appointReappoint ? '重新任命为管理员' : '设为管理员' }}</h3>
+          <p class="muted">
+            目标用户 CN：<strong>{{ appointUser.cn_code }}</strong><br />
+            显示名称：{{ appointUser.display_name || '-' }}
+          </p>
+          <p v-if="appointReappoint" class="muted">该用户曾被撤销管理员，将复用其原管理员账号 <strong>{{ ownerAdminsByUserId.get(appointUser.id)?.username }}</strong> 并签发新的一次性临时密码，不会新建账号。</p>
+          <form class="entry-form" @submit.prevent="submitAppoint">
+            <label v-if="!appointReappoint"><span>管理员登录用户名</span><input v-model="appointUsername" type="text" autocomplete="off" required placeholder="3-32 位小写字母、数字或 _ . -" /></label>
+            <p class="muted">初始密码由系统随机生成，成功后只显示一次，苏归不能自行设定；该管理员首次登录必须改密。</p>
+            <div class="reauth-dialog__actions">
+              <button class="secondary-button" type="button" @click="cancelAppoint">取消</button>
+              <button class="primary-button" type="submit" :disabled="appointBusy">{{ appointBusy ? '提交中' : (appointReappoint ? '确认重新任命' : '确认任命') }}</button>
+            </div>
+          </form>
+          <div v-if="appointMessage" class="inline-alert">{{ appointMessage }}</div>
+        </div>
+      </div>
+
+      <!-- 一次性临时密码展示弹窗。明文只在本弹窗出现一次，仅存于内存 ref；
+           关闭后即从内存抹除，前端无法再次取回。 -->
+      <div v-if="tempPasswordValue" class="app-modal-overlay" role="dialog" aria-modal="true" aria-label="一次性临时密码">
+        <div class="reauth-dialog">
+          <h3>临时密码（只显示一次）</h3>
+          <p class="muted">已为管理员 <strong>{{ tempPasswordFor }}</strong> 生成一次性临时密码。请通过安全渠道转交本人；关闭后无法再次查看。该管理员首次登录必须修改密码。</p>
+          <div class="temp-password-box"><code>{{ tempPasswordValue }}</code></div>
+          <div class="reauth-dialog__actions">
+            <button class="secondary-button" type="button" @click="copyTempPassword">{{ tempPasswordCopied ? '已复制' : '复制临时密码' }}</button>
+            <button class="primary-button" type="button" @click="acknowledgeTempPassword">我已安全保存</button>
+          </div>
         </div>
       </div>
     </main>
@@ -5345,6 +5858,8 @@ onUnmounted(() => {
               <ModuleCard title="用户与账号" description="用户管理、查询码与恢复邮箱状态" accent="neutral" cta="进入模块" @enter="navigate('/admin/users')" />
               <ModuleCard title="收付款管理" description="付款记录、撤销、未付明细与收款二维码" accent="green" cta="进入模块" @enter="navigate('/admin/finance')" />
               <ModuleCard title="账户安全" description="修改密码、恢复码、恢复邮箱与安全审计" accent="neutral" cta="进入模块" @enter="navigate('/admin/security')" />
+              <!-- 管理员管理入口仅苏归可见；普通管理员既看不到此卡片，后端也会 403。 -->
+              <ModuleCard v-if="isOwner" title="管理员管理" description="任命、启停、撤销与重置管理员，查看管理员审计" accent="blue" cta="进入模块" @enter="navigate('/admin/admins')" />
             </div>
           </section>
         </template>

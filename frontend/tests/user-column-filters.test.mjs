@@ -22,7 +22,8 @@ const usersTemplate = (() => {
   return appSource.slice(start, end)
 })()
 
-// 用户主表的 12 列，顺序必须完全一致。
+// 用户主表的列，顺序必须完全一致。「管理员身份」列仅苏归可见（v-if="isOwner"），
+// 在源码里始终存在，位于「创建时间」与「查看详情」之间。
 const USER_COLUMNS = [
   'CN',
   '用户名称',
@@ -35,6 +36,7 @@ const USER_COLUMNS = [
   '未付金额',
   '最后登录时间',
   '创建时间',
+  '管理员身份',
   '查看详情',
 ]
 
@@ -58,15 +60,15 @@ test('旧的顶部筛选表单已从用户页移除', () => {
   assert.doesNotMatch(appSource, /const adminUserFilters = ref\(\{ cn: '', status: '' \}\)/)
 })
 
-test('用户主表严格为 12 列且顺序一致', () => {
+test('用户主表列顺序一致（含苏归专属「管理员身份」列）', () => {
   const labels = userHeaderLabels()
   assert.deepEqual(labels, USER_COLUMNS)
   assert.ok(labels.every((label) => label.trim() !== ''), '不允许空表头占位列')
 
-  // 行的单元格数与表头一致。
+  // 行的单元格数与表头一致（含 v-if="isOwner" 的管理员身份单元格）。
   const bodyRow = usersTemplate.slice(usersTemplate.indexOf(':key="user.id"'))
   const cells = [...bodyRow.slice(0, bodyRow.indexOf('</tr>')).matchAll(/<td\b/g)]
-  assert.equal(cells.length, 12)
+  assert.equal(cells.length, 13)
 })
 
 test('值筛选列接入 WPS 漏斗组件', () => {

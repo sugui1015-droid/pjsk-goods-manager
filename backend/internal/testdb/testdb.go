@@ -116,6 +116,39 @@ func New(t testing.TB, label string) *pgxpool.Pool {
 	return pool
 }
 
+// NewWithDSN is New plus the isolated database's connection string, for the
+// rare test that must hand the same throwaway database to a separate process
+// (for example the old-release backward-compatibility test, which starts a
+// previously-built binary against it). The DSN carries no password — the child
+// resolves credentials from the pgpass file exactly like the test pool does.
+func NewWithDSN(t testing.TB, label string) (*pgxpool.Pool, string) {
+	t.Helper()
+	SkipUnlessEnabled(t)
+
+	dbName := uniqueName(t, label)
+	createDatabase(t, dbName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	dsn := testDatabaseDSN(t, dbName)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open pool for %s: %v", dbName, err)
+	}
+	t.Cleanup(pool.Close)
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("ping %s: %v", dbName, err)
+	}
+	assertConnectedDatabase(t, ctx, pool, dbName)
+
+	fsys, dir := migrationsFS(t)
+	if err := database.RunMigrations(ctx, pool, fsys, dir); err != nil {
+		t.Fatalf("run migrations on %s: %v", dbName, err)
+	}
+	return pool, dsn
+}
+
 // uniqueName builds a name that satisfies NamePattern. label is sanitized, not
 // trusted.
 func uniqueName(t testing.TB, label string) string {
