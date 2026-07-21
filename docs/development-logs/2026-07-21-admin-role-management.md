@@ -37,3 +37,27 @@
 ## R3 发布计划
 
 先提交(`feat: add owner-managed administrator roles`,含 R1/R2 + 兼容性测试 + 本日志)→ 按新 commit SHA 制作 release(Linux x86-64 后端 + 前端 dist + 迁移 0001–0023 + REVISION + MANIFEST)→ 等人工确认后推送 → 云端只读门禁 → 上传签收新 release → 短维护窗口切换 current 并迁移 0023(终态 23/0023)→ 复用测试用户 `production_write_test_20260721` 走 P1–P6 受控验收(任命→临时密码登录→强制改密→停用→启用→重置→撤销→复聘)。不启用 HSTS、不改 Caddy、不开放真实客户;旧 release 与全部备份保留。
+
+## R3-6 后续:P1 阻断与前端修复(身份显示 / 表格滚动 / reauth 体感)
+
+release `4f2dda06b013` 切换、迁移 0023 完成后进入 R3-7 P1(苏归任命测试管理员),**被 owner 在生产浏览器阻断**,发现三处问题,P1 暂停、未产生任何管理员写入。均为前端问题,**不涉及后端/迁移**。
+
+### 问题与准确根因
+1. **顶部身份区显示"admin"而非"苏归"**。根因:身份区绑定 `admin.display_name ?? admin.username`;生产 owner 账号 `display_name = NULL`、`username = admin`、`role = owner`,故回落到登录用户名 "admin",`roleDisplayName` 从未接入身份区(此前只在管理页表格用到)。非缓存/Service Worker 问题(无 SW;新 bundle 本身即此绑定)。
+2. **所有宽表横向滚动条只在表格底部**,行多时须滚到最底才能左右移动,右侧"管理员身份/详情"操作列难以触达。
+3. **进入页面与 reauth 弹出偏慢**:实测后端处理亚毫秒~十几毫秒(reauth 80ms 为 bcrypt,设计如此)、静态 JS gzip 后约 89KB/0.34s;真正体感来源是 reauth 旧流程先发写请求等 403 才弹窗(1 个 WAN 往返)、用户页接口串行、静态资源缺 `Cache-Control immutable`。
+
+### 修复(前端 only,未改后端/迁移)
+- **身份与账号分离**:新增 computed `adminIdentityLabel = 身份：${roleDisplayName(role)}　账号：${username}`,两处 `PortalStatusBar :identity` 改绑之。角色身份只依赖 `roleDisplayName(role)`,与 `display_name` 无关 → owner 恒"苏归"、admin 恒"管理员",`display_name=NULL` 仍正确;不显示裸 owner;用户端 `CN：…` 不变。
+- **统一双同步滚动条**:新增指令 `v-synced-scroll`(`src/directives/syncedScroll.ts`)——容器上方注入顶部轨道,顶/底 scrollLeft 用 compare-before-set 双向同步(不循环不抖动),`ResizeObserver` 跟随表格 `scrollWidth` 并在无溢出时隐藏顶部条,卸载时清理监听与注入节点。挂到全部 20 个 `.table-scroll`,窄表无溢出自动隐藏。
+- **reauth 主动弹出 + 安全并行加载**:新增 `ensureReauth()`,写操作点击后在客户端 9 分钟新鲜窗口外**本地即时打开 reauth**(不等网络),取消则零写入并保留输入,成功记时间戳并执行原操作一次;保留 `execute()` 的服务端 403 兜底(校验强度不变)。用户页 `users` 与 `owner-admins` 由串行改 `Promise.all` 并行(身份已由 ensureAdmin 确认为 owner;普通管理员不请求 owner-only)。
+
+### 验证
+- 前端 **247/247 测试通过**(新增 15 条覆盖身份 display_name=NULL→苏归、admin→管理员、账号/角色分离、双滚动条双向同步、无溢出隐藏、Resize 同步、卸载清理、全宽表统一组件、reauth 本地即时/成功一次/取消不写入/403 兜底、并行加载、普通管理员不请求 owner-only);`vue-tsc`、`pnpm build`(无 source map、dist 泄漏扫描净)通过;后端回归(gofmt/vet/test/DB 集成/迁移隔离/旧-release 兼容性)全绿。
+- **隔离 dev 栈(不连冻结 pjsk/云端)浏览器人工验收 10 项全通过**:owner(display_name=NULL)显示"身份：苏归 账号：admin";普通管理员显示"身份：管理员 账号：helper_demo"且看不到"管理员管理";顶部同步滚动条正常、拖动可达最右操作列、行列对齐;点击"确认任命"reauth 立即出现且不被遮挡;reauth 成功只任命一次、临时密码只显示一次(后端日志证 `reauth`→单次 `owner/admins` 无 403);管理中心卡片布局正常;无新增阻断视觉问题。验收后 dev 库/环境/日志/二进制全部删除。
+- 安全:隔离 dev 截图中曾出现一次性临时密码,仅为**已销毁隔离环境**材料,**不得复用**;已确认其未进入源码、日志、Git、开发文档或构建产物。生产 P1 禁止截图或回传临时密码。
+
+### 待办
+- 本轮前端修复待人工复验后走新提交/新 release(**仅换前端 bundle,不迁移**,0023 已在库)/R3-5 签收/R3-6 切换,再回到 P1。
+- **Caddy `/assets/*` 长期不可变缓存仍为后续独立阶段**(前端 release 部署验收后单独受控 reload 执行,不夹带在本次)。
+- **生产 P1 尚未执行**,测试用户 `production_write_test_20260721` 目前仍无管理员身份;owner=1、testadmin disabled/admin 不变。

@@ -128,6 +128,7 @@ import {
   createFilterState,
 } from './filters/columnFilters'
 import { localDevelopmentFrontendOrigins } from './developmentOrigins'
+import { vSyncedScroll } from './directives/syncedScroll'
 const maxExcelSize = 20 * 1024 * 1024
 const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
@@ -995,6 +996,17 @@ const isOwner = computed(() => admin.value?.role === 'owner')
 // 技术值 owner/admin 只用于判断，从不直接展示。
 const currentRoleName = computed(() => roleDisplayName(admin.value?.role))
 
+// The admin identity bar shows the ROLE identity (via roleDisplayName) plus the
+// login account name — never the bare login username as if it were the role,
+// and never the raw technical role value. owner always reads 苏归, admin always
+// 管理员, correct even when display_name is NULL (production owner: display_name
+// NULL / username admin / role owner must still show 苏归).
+const adminIdentityLabel = computed(() => {
+  const account = admin.value
+  if (!account) return undefined
+  return `身份：${roleDisplayName(account.role)}　账号：${account.username}`
+})
+
 // 首次登录强制改密门禁。标志来自 /api/admin/me（刷新后仍然生效），后端对
 // 除身份/退出/reauth/改密外的所有接口返回 403 password_change_required。
 const mustChangePassword = computed(() => Boolean(admin.value?.must_change_password))
@@ -1141,6 +1153,11 @@ async function submitAppoint() {
   }
   appointBusy.value = true
   try {
+    // Open reauth up front (local, instant) when the client token is stale; a
+    // cancel here means no appointment request is ever sent. On success the
+    // appoint request goes out already re-authenticated, so it does not have to
+    // round-trip a 403 first.
+    if (!(await ensureReauth())) return
     // Reappointment reuses the revoked account; the backend ignores the sent
     // username and reactivates the original. A fresh appointment creates it.
     const result = await appointOwnerAdmin({
@@ -1205,6 +1222,8 @@ async function resetAdminPassword(entry: ManagedAdmin) {
   if (reason === null) return
   ownerActionBusy.value = entry.id
   try {
+    // reauth opens locally up front; cancel here writes nothing.
+    if (!(await ensureReauth())) return
     const result = await resetOwnerAdminPassword(entry.id, reason.trim())
     showTempPassword(result)
     await loadOwnerAdmins()
@@ -1219,6 +1238,8 @@ async function runAdminAction(id: string, kind: string, action: () => Promise<un
   ownerActionBusy.value = id
   ownerAdminsMessage.value = ''
   try {
+    // reauth opens locally up front; a cancel means no write request is sent.
+    if (!(await ensureReauth())) return
     await action()
     ownerAdminsMessage.value = ({
       disable: '已停用，该管理员的现有会话已全部失效。',
@@ -1483,13 +1504,21 @@ async function submitAdminRecovery() {
   }
 }
 
-// 全局身份重验证弹窗：高风险接口返回 reauth_required 时由 api/client 调起，
-// 验证成功后自动重试原请求。
+// 全局身份重验证弹窗。两条触发路径：
+//  1) 前置(推荐)：高风险写操作点击后先本地立即打开本弹窗（ensureReauth），
+//     再执行受保护操作——不必先发写请求等 403，弹窗打开是纯本地状态变化。
+//  2) 兜底(保留)：若前端判断 token 仍新鲜但服务端已过期，写请求返回 403
+//     reauth_required 时由 api/client 的 execute() 再次调起本弹窗并重试一次。
 const reauthVisible = ref(false)
 const reauthPassword = ref('')
 const reauthBusy = ref(false)
 const reauthMessage = ref('')
 let reauthResolver: ((ok: boolean) => void) | null = null
+
+// 客户端 reauth 新鲜窗口：略短于服务端 10 分钟，以便在服务端 403 之前就本地
+// 续验，减少兜底 403 的发生（服务端校验强度不变）。
+const CLIENT_REAUTH_WINDOW_MS = 9 * 60 * 1000
+const lastReauthAt = ref(0)
 
 function openReauthDialog(): Promise<boolean> {
   if (reauthResolver) return Promise.resolve(false)
@@ -1501,12 +1530,22 @@ function openReauthDialog(): Promise<boolean> {
   })
 }
 
+// ensureReauth 是前置流程入口：token 仍在客户端新鲜窗口内则立即放行（true），
+// 否则本地立即打开 reauth 弹窗并等待结果。弹窗打开不依赖任何网络响应。
+function ensureReauth(): Promise<boolean> {
+  if (lastReauthAt.value > 0 && Date.now() - lastReauthAt.value < CLIENT_REAUTH_WINDOW_MS) {
+    return Promise.resolve(true)
+  }
+  return openReauthDialog()
+}
+
 async function submitReauth() {
   if (reauthBusy.value || !reauthPassword.value) return
   reauthBusy.value = true
   reauthMessage.value = ''
   try {
     await adminReauth(reauthPassword.value)
+    lastReauthAt.value = Date.now()
     reauthVisible.value = false
     reauthPassword.value = ''
     const resolve = reauthResolver
@@ -2369,16 +2408,19 @@ async function loadAdminUsers() {
     const params = adminUserFilterParams()
     params.set('page', String(adminUserPage.value))
     params.set('page_size', String(adminUserPageSize.value))
-    const response = await getJSON<AdminUserListResponse>(`/api/admin/users?${params.toString()}`)
+    // The user list and the owner admin-linkage map are independent, so 苏归
+    // loads them in parallel rather than serially (identity was already
+    // confirmed as owner by ensureAdmin before this ran; a plain admin skips
+    // the owner-only call entirely). loadOwnerAdmins handles its own errors.
+    const usersPromise = getJSON<AdminUserListResponse>(`/api/admin/users?${params.toString()}`)
+    const ownerAdminsPromise = isOwner.value ? loadOwnerAdmins() : Promise.resolve()
+    const [response] = await Promise.all([usersPromise, ownerAdminsPromise])
     adminUsers.value = response.items ?? []
     adminUsersSummary.value = response.summary ?? null
     adminUserPage.value = response.page
     adminUserPageSize.value = response.page_size
     adminUserTotal.value = response.total
     adminUserTotalPages.value = response.total_pages
-    // Only 苏归 gets the admin linkage map that powers the per-row 「设为管理员/
-    // 管理员」 state; for a plain admin this is a no-op and the column stays empty.
-    if (isOwner.value) await loadOwnerAdmins()
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       admin.value = null
@@ -4049,7 +4091,7 @@ onUnmounted(() => {
 
     <main v-if="isAdminRoute" class="workspace admin-surface">
       <PortalStatusBar
-        :identity="admin ? (admin.display_name ?? admin.username) : undefined"
+        :identity="adminIdentityLabel"
         :online="isBackendOnline"
         :online-text="isBackendOnline ? '后端在线' : '本地前端模式'"
         :show-refresh="true"
@@ -4202,7 +4244,7 @@ onUnmounted(() => {
             </div>
             <div v-if="bulkMessage" class="inline-alert">{{ bulkMessage }}</div>
 
-            <div class="table-scroll compact-table">
+            <div v-synced-scroll class="table-scroll compact-table">
               <table>
                 <thead><tr><th>是否导入</th><th>Sheet</th><th>大标题</th><th>模板</th><th>批次</th><th>金额差额</th></tr></thead>
                 <tbody>
@@ -4277,7 +4319,7 @@ onUnmounted(() => {
                 </button>
                 <div class="batch-metrics"><span>CN {{ batch.cn_count }}</span><span>种类 {{ batch.item_type_count }}</span><span>总件数 {{ batch.total_quantity }}</span><span>表格 {{ formatMoney(batch.table_amount) }}</span><span>程序 {{ formatMoney(batch.calculated_amount) }}</span><span :class="{ danger: Math.abs(batch.difference) > 0.01 }">差额 {{ formatMoney(batch.difference) }}</span><span>价格 {{ priceTypeLabel(batch) }}</span></div>
                 <div v-if="isExpanded(batch.id)" class="batch-detail">
-                                    <div class="table-scroll detail-table"><table><thead><tr><th>选择</th><th>导入</th><th>原始 CN</th><th>谷子名称</th><th>角色/种类</th><th>分类修正</th><th>数量</th><th>价格</th><th>小计</th><th>来源</th></tr></thead><tbody><tr v-if="detailsForBatch(batch).length === 0"><td colspan="10">当前筛选下无订单项明细。</td></tr><tr v-for="detail in detailsForBatch(batch)" :key="detail.id || `${batch.id}-${detail.row_number}-${detail.column_name}-${detail.original_cn}`" :class="{ muted: isDetailExcluded(batch, detail) }"><td><input type="checkbox" :checked="isDetailSelected(detail.id)" @change="setDetailSelected(detail.id, ($event.target as HTMLInputElement).checked)" /></td><td><input type="checkbox" :disabled="!isBatchIncluded(batch)" :checked="isBatchIncluded(batch) && !isCNExcluded(batch, detail)" @change="setCNExcluded(batch, detail, !($event.target as HTMLInputElement).checked)" /></td><td><strong>{{ detail.original_cn }}</strong><small v-if="isCNExcluded(batch, detail)">已排除该范围内 CN</small><small v-if="excludedDetailIds.has(detail.id)">已排除此明细</small><button class="secondary-button tiny-button" type="button" @click="setDetailExcluded(detail.id, !excludedDetailIds.has(detail.id))">{{ excludedDetailIds.has(detail.id) ? '取消明细排除' : '只排除此明细' }}</button></td><td>{{ detail.display_name || detail.sheet_title || '-' }}</td><td>{{ detail.item_name }}</td><td><div class="category-editor"><select :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" :value="detailCategory(detail)" @change="setDetailCategory(detail, ($event.target as HTMLSelectElement).value)"><option value="">保持原分类</option><option v-for="preset in categoryPresets" :key="preset" :value="preset">{{ preset }}</option></select><div class="custom-category"><input v-model="customCategoryInputs[detail.id]" :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" maxlength="40" placeholder="自定义制品" /><button class="secondary-button" type="button" :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" @click="applyCustomCategory(detail)">应用</button></div><small>{{ detailCategory(detail) || detail.product_category || detail.category || '默认分类' }}</small></div></td><td>{{ detail.quantity }}</td><td>{{ formatMoney(detail.unit_price) }}</td><td>{{ formatMoney(detail.amount) }}</td><td>{{ detail.sheet_name }}!{{ detail.column_name }}{{ detail.row_number }}</td></tr></tbody></table></div>
+                                    <div v-synced-scroll class="table-scroll detail-table"><table><thead><tr><th>选择</th><th>导入</th><th>原始 CN</th><th>谷子名称</th><th>角色/种类</th><th>分类修正</th><th>数量</th><th>价格</th><th>小计</th><th>来源</th></tr></thead><tbody><tr v-if="detailsForBatch(batch).length === 0"><td colspan="10">当前筛选下无订单项明细。</td></tr><tr v-for="detail in detailsForBatch(batch)" :key="detail.id || `${batch.id}-${detail.row_number}-${detail.column_name}-${detail.original_cn}`" :class="{ muted: isDetailExcluded(batch, detail) }"><td><input type="checkbox" :checked="isDetailSelected(detail.id)" @change="setDetailSelected(detail.id, ($event.target as HTMLInputElement).checked)" /></td><td><input type="checkbox" :disabled="!isBatchIncluded(batch)" :checked="isBatchIncluded(batch) && !isCNExcluded(batch, detail)" @change="setCNExcluded(batch, detail, !($event.target as HTMLInputElement).checked)" /></td><td><strong>{{ detail.original_cn }}</strong><small v-if="isCNExcluded(batch, detail)">已排除该范围内 CN</small><small v-if="excludedDetailIds.has(detail.id)">已排除此明细</small><button class="secondary-button tiny-button" type="button" @click="setDetailExcluded(detail.id, !excludedDetailIds.has(detail.id))">{{ excludedDetailIds.has(detail.id) ? '取消明细排除' : '只排除此明细' }}</button></td><td>{{ detail.display_name || detail.sheet_title || '-' }}</td><td>{{ detail.item_name }}</td><td><div class="category-editor"><select :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" :value="detailCategory(detail)" @change="setDetailCategory(detail, ($event.target as HTMLSelectElement).value)"><option value="">保持原分类</option><option v-for="preset in categoryPresets" :key="preset" :value="preset">{{ preset }}</option></select><div class="custom-category"><input v-model="customCategoryInputs[detail.id]" :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" maxlength="40" placeholder="自定义制品" /><button class="secondary-button" type="button" :disabled="!isBatchIncluded(batch) || isCNExcluded(batch, detail)" @click="applyCustomCategory(detail)">应用</button></div><small>{{ detailCategory(detail) || detail.product_category || detail.category || '默认分类' }}</small></div></td><td>{{ detail.quantity }}</td><td>{{ formatMoney(detail.unit_price) }}</td><td>{{ formatMoney(detail.amount) }}</td><td>{{ detail.sheet_name }}!{{ detail.column_name }}{{ detail.row_number }}</td></tr></tbody></table></div>
                 </div>
               </article>
             </div>
@@ -4362,7 +4404,7 @@ onUnmounted(() => {
                   <button class="secondary-button" type="button" :disabled="!cnPaymentFiltersActive" @click="clearCnPaymentItemFilters">清空筛选</button>
                 </div>
                 <p class="muted list-filter-note">筛选只影响下方明细的显示，不影响已勾选项与合计；已勾选但被筛选隐藏的明细仍会计入本次付款。</p>
-                <div class="table-scroll detail-table payment-table"><table><thead><tr><th>选择</th><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th title="填写本次付款分摊到该明细的金额，不能超过剩余应付金额">本次分摊金额</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="12">暂无待付款明细。</td></tr><tr v-else-if="filteredCnPaymentItems.length === 0"><td colspan="12">没有符合当前筛选条件的明细。</td></tr><tr v-for="item in filteredCnPaymentItems" :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td><span class="cell-clip" :title="item.project_name">{{ item.project_name }}</span></td><td><span class="cell-clip" :title="item.display_name || item.product_name">{{ item.display_name || item.product_name }}</span></td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
+                <div v-synced-scroll class="table-scroll detail-table payment-table"><table><thead><tr><th>选择</th><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th title="填写本次付款分摊到该明细的金额，不能超过剩余应付金额">本次分摊金额</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="cnPayment.items.length === 0"><td colspan="12">暂无待付款明细。</td></tr><tr v-else-if="filteredCnPaymentItems.length === 0"><td colspan="12">没有符合当前筛选条件的明细。</td></tr><tr v-for="item in filteredCnPaymentItems" :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td><span class="cell-clip" :title="item.project_name">{{ item.project_name }}</span></td><td><span class="cell-clip" :title="item.display_name || item.product_name">{{ item.display_name || item.product_name }}</span></td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
               </template>
             </section>
             <!-- Row 2: actions. -->
@@ -4392,7 +4434,7 @@ onUnmounted(() => {
 
             <div v-if="paymentRecordsMessage" class="inline-alert">{{ paymentRecordsMessage }}</div>
 
-            <div class="table-scroll history-table payment-records-table">
+            <div v-synced-scroll class="table-scroll history-table payment-records-table">
               <table>
                 <thead>
                   <tr>
@@ -4471,7 +4513,7 @@ onUnmounted(() => {
               </section>
               <section class="panel nested-panel">
                 <div class="panel__header"><h2>关联付款明细</h2><span>共 {{ paymentDetail.payment.items.length }} 条明细</span></div>
-                <div class="table-scroll detail-table"><table><thead><tr><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>数量</th><th>单价</th><th>小计</th><th>已付</th><th>剩余</th><th>本次分摊金额</th><th>当前付款状态</th><th>来源</th></tr></thead><tbody><tr v-if="paymentDetail.payment.items.length === 0"><td colspan="13">无关联明细。</td></tr><tr v-for="item in paymentDetail.payment.items" :key="item.id"><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}</td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ item.quantity }}</td><td>{{ formatMoney(item.unit_price) }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td>{{ formatMoney(item.applied_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
+                <div v-synced-scroll class="table-scroll detail-table"><table><thead><tr><th>订单号</th><th>项目名</th><th>谷子名称</th><th>角色</th><th>分类</th><th>数量</th><th>单价</th><th>小计</th><th>已付</th><th>剩余</th><th>本次分摊金额</th><th>当前付款状态</th><th>来源</th></tr></thead><tbody><tr v-if="paymentDetail.payment.items.length === 0"><td colspan="13">无关联明细。</td></tr><tr v-for="item in paymentDetail.payment.items" :key="item.id"><td>{{ item.order_no }}</td><td>{{ item.project_name }}</td><td>{{ item.display_name || item.product_name }}</td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ item.quantity }}</td><td>{{ formatMoney(item.unit_price) }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td>{{ formatMoney(item.applied_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
               </section>
               <section v-if="paymentDetailTechnicalIdentifiers(paymentDetail).length > 0" class="panel nested-panel technical-section">
                 <details>
@@ -4513,7 +4555,7 @@ onUnmounted(() => {
 
             <div v-if="paymentSubmissionsMessage" class="inline-alert">{{ paymentSubmissionsMessage }}</div>
 
-            <div class="table-scroll history-table submission-records-table">
+            <div v-synced-scroll class="table-scroll history-table submission-records-table">
               <table>
                 <thead>
                   <tr>
@@ -4604,7 +4646,7 @@ onUnmounted(() => {
                       <button class="secondary-button ghost-button" type="button" :disabled="selectedPaymentItems.length === 0" @click="clearAllCnPaymentItemSelection">取消全选</button>
                       <span class="muted">已选 {{ selectedPaymentItems.length }} / {{ selectableCnPaymentItems.length }} 条</span>
                     </div>
-                    <div class="table-scroll detail-table"><table><thead><tr><th>选择</th><th>订单号</th><th>谷子名称</th><th>角色</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th>本次分摊金额</th></tr></thead><tbody>
+                    <div v-synced-scroll class="table-scroll detail-table"><table><thead><tr><th>选择</th><th>订单号</th><th>谷子名称</th><th>角色</th><th>原始应付</th><th>已付</th><th>剩余应付</th><th>本次分摊金额</th></tr></thead><tbody>
                       <tr v-if="cnPayment.items.length === 0"><td colspan="8">该 CN 暂无待付款明细。</td></tr>
                       <tr v-for="item in cnPayment.items" v-else :key="item.id"><td><input type="checkbox" :disabled="item.remaining_amount <= 0" :checked="selectedPaymentItemIds.has(item.id)" @change="setPaymentItemSelected(item, ($event.target as HTMLInputElement).checked)" /></td><td>{{ item.order_no }}</td><td><span class="cell-wrap">{{ item.display_name || item.product_name }}</span></td><td>{{ item.character_name || '-' }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td>{{ formatMoney(item.remaining_amount) }}</td><td><input class="amount-input" v-model="paymentAmounts[item.id]" :disabled="!selectedPaymentItemIds.has(item.id)" type="number" min="0.01" step="0.01" :max="item.remaining_amount" :class="{ invalid: paymentAmountInvalid(item) }" /></td></tr>
                     </tbody></table></div>
@@ -4747,7 +4789,7 @@ onUnmounted(() => {
               <article class="metric-tile"><span>剩余待付总额</span><strong>{{ formatMoney(adminUsersSummary.remaining_amount) }}</strong></article>
             </div>
 
-            <div class="table-scroll history-table user-table">
+            <div v-synced-scroll class="table-scroll history-table user-table">
               <table>
                 <thead>
                   <tr>
@@ -4905,19 +4947,19 @@ onUnmounted(() => {
               </section>
               <section v-if="adminUserDetail.merges.length > 0" class="panel nested-panel">
                 <div class="panel__header"><h2>CN 合并历史</h2><span>{{ adminUserDetail.merges.length }} 条</span></div>
-                <div class="table-scroll history-table"><table><thead><tr><th>方向</th><th>相关 CN</th><th>原因</th><th>操作管理员</th><th>时间</th></tr></thead><tbody><tr v-for="entry in adminUserDetail.merges" :key="entry.id"><td>{{ entry.direction === 'merged_into' ? '本 CN 被合并到' : '接收合并自' }}</td><td>{{ entry.other_cn }}</td><td>{{ entry.reason }}</td><td>{{ entry.merged_by || '-' }}</td><td>{{ formatDate(entry.merged_at) }}</td></tr></tbody></table></div>
+                <div v-synced-scroll class="table-scroll history-table"><table><thead><tr><th>方向</th><th>相关 CN</th><th>原因</th><th>操作管理员</th><th>时间</th></tr></thead><tbody><tr v-for="entry in adminUserDetail.merges" :key="entry.id"><td>{{ entry.direction === 'merged_into' ? '本 CN 被合并到' : '接收合并自' }}</td><td>{{ entry.other_cn }}</td><td>{{ entry.reason }}</td><td>{{ entry.merged_by || '-' }}</td><td>{{ formatDate(entry.merged_at) }}</td></tr></tbody></table></div>
               </section>
               <section class="panel nested-panel">
                 <div class="panel__header"><h2>订单及明细</h2><span>{{ adminUserDetail.orders.length }} 单</span></div>
                 <p v-if="adminUserDetail.orders.length === 0" class="muted">暂无订单。</p>
                 <article v-for="order in adminUserDetail.orders" :key="order.id" class="user-order-card">
                   <div class="panel__header compact-header"><div><h3>{{ order.order_no }}</h3><p class="muted">{{ order.project_name }} / {{ statusLabel(order.status) }} / {{ formatDate(order.created_at) }}</p></div><div class="query-order-total"><strong>{{ formatMoney(order.total_amount) }}</strong><span>已付 {{ formatMoney(order.paid_amount) }} / 剩余 {{ formatMoney(order.remaining_amount) }}</span></div><button class="secondary-button" type="button" @click="navigate('/admin/orders/' + order.id)">订单详情</button></div>
-                  <div class="table-scroll detail-table"><table><thead><tr><th>谷子名称</th><th>角色</th><th>分类</th><th>数量</th><th>单价</th><th>小计</th><th>已付</th><th>剩余</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="order.items.length === 0"><td colspan="10">无明细。</td></tr><tr v-for="item in order.items" :key="item.id"><td>{{ item.display_name || item.product_name }}</td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ item.quantity }}</td><td>{{ formatMoney(item.unit_price) }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
+                  <div v-synced-scroll class="table-scroll detail-table"><table><thead><tr><th>谷子名称</th><th>角色</th><th>分类</th><th>数量</th><th>单价</th><th>小计</th><th>已付</th><th>剩余</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-if="order.items.length === 0"><td colspan="10">无明细。</td></tr><tr v-for="item in order.items" :key="item.id"><td>{{ item.display_name || item.product_name }}</td><td>{{ item.character_name || '-' }}</td><td>{{ item.category || '-' }}</td><td>{{ item.quantity }}</td><td>{{ formatMoney(item.unit_price) }}</td><td>{{ formatMoney(item.amount) }}</td><td>{{ formatMoney(item.paid_amount) }}</td><td :class="{ danger: item.remaining_amount > 0 }">{{ formatMoney(item.remaining_amount) }}</td><td>{{ queryPaymentStatusLabel(item.payment_status) }}</td><td>{{ item.import_filename || '-' }}</td></tr></tbody></table></div>
                 </article>
               </section>
               <section class="panel nested-panel">
                 <div class="panel__header"><h2>付款记录</h2><span>{{ adminUserDetail.payments.length }} 笔</span></div>
-                <div class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th class="col-emphasis">实付金额</th><th>交肾状态</th><th>本金</th><th>手续费</th><th>付款方式</th><th>操作管理员</th><th>撤销信息</th><th></th></tr></thead><tbody><tr v-if="adminUserDetail.payments.length === 0"><td colspan="9">暂无付款记录。</td></tr><tr v-for="payment in adminUserDetail.payments" :key="payment.id" :class="{ 'voided-row': payment.status === 'voided' }"><td>{{ formatDate(payment.paid_at) }}</td><td class="col-emphasis">{{ formatMoney(payment.total_amount) }}</td><td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td><td>{{ formatMoney(payment.principal_amount) }}</td><td>{{ formatMoney(payment.fee_amount) }}</td><td>{{ paymentMethodLabel(payment.payment_method || '') }}</td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.voided_at ? `${payment.voided_by || '-'} / ${payment.void_reason || '-'}` : '-' }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
+                <div v-synced-scroll class="table-scroll history-table"><table><thead><tr><th>付款时间</th><th class="col-emphasis">实付金额</th><th>交肾状态</th><th>本金</th><th>手续费</th><th>付款方式</th><th>操作管理员</th><th>撤销信息</th><th></th></tr></thead><tbody><tr v-if="adminUserDetail.payments.length === 0"><td colspan="9">暂无付款记录。</td></tr><tr v-for="payment in adminUserDetail.payments" :key="payment.id" :class="{ 'voided-row': payment.status === 'voided' }"><td>{{ formatDate(payment.paid_at) }}</td><td class="col-emphasis">{{ formatMoney(payment.total_amount) }}</td><td><span class="status-chip" :data-state="payment.status">{{ paymentStatusLabel(payment.status) }}</span></td><td>{{ formatMoney(payment.principal_amount) }}</td><td>{{ formatMoney(payment.fee_amount) }}</td><td>{{ paymentMethodLabel(payment.payment_method || '') }}</td><td>{{ payment.created_by || '-' }}</td><td>{{ payment.voided_at ? `${payment.voided_by || '-'} / ${payment.void_reason || '-'}` : '-' }}</td><td><button class="secondary-button" type="button" @click="navigate('/admin/payments/' + payment.id)">详情</button></td></tr></tbody></table></div>
               </section>
               <section v-if="adminUserTechnicalIdentifiers(adminUserDetail).length > 0" class="panel nested-panel technical-section">
                 <details>
@@ -4965,7 +5007,7 @@ onUnmounted(() => {
             </div>
 
             <div v-if="ordersMessage" class="inline-alert">{{ ordersMessage }}</div>
-            <div class="table-scroll history-table order-table">
+            <div v-synced-scroll class="table-scroll history-table order-table">
               <table>
                 <thead>
                   <tr>
@@ -5048,7 +5090,7 @@ onUnmounted(() => {
 
               <section class="panel nested-panel">
                 <div class="panel__header"><h2>谷子明细</h2><span>共 {{ orderDetail.order.items.length }} 条明细</span></div>
-                <div class="table-scroll detail-table">
+                <div v-synced-scroll class="table-scroll detail-table">
                   <table>
                     <thead>
                       <tr>
@@ -5128,7 +5170,7 @@ onUnmounted(() => {
 
             <div v-if="historyMessage" class="inline-alert">{{ historyMessage }}</div>
 
-            <div class="table-scroll history-table import-history-table">
+            <div v-synced-scroll class="table-scroll history-table import-history-table">
               <table>
                 <thead>
                   <tr>
@@ -5207,7 +5249,7 @@ onUnmounted(() => {
 
               <section v-if="importDetail.preview" class="panel nested-panel">
                 <div class="panel__header"><h2>解析摘要</h2><span>{{ detailTemplateCounts.map((item) => `${item.name} ${item.count}`).join(' / ') }}</span></div>
-                <div class="table-scroll compact-table"><table><thead><tr><th>工作表</th><th>模板</th><th>批次</th><th>表格金额</th><th>程序金额</th><th>差额</th></tr></thead><tbody><tr v-for="sheet in importDetail.preview.sheets" :key="sheet.name"><td>{{ sheet.name }}</td><td>{{ sheet.template_type }}</td><td>{{ sheet.batch_count }}</td><td>{{ formatMoney(sheet.table_amount) }}</td><td>{{ formatMoney(sheet.calculated_amount) }}</td><td :class="{ danger: Math.abs(sheet.difference) > 0.01 }">{{ formatMoney(sheet.difference) }}</td></tr></tbody></table></div>
+                <div v-synced-scroll class="table-scroll compact-table"><table><thead><tr><th>工作表</th><th>模板</th><th>批次</th><th>表格金额</th><th>程序金额</th><th>差额</th></tr></thead><tbody><tr v-for="sheet in importDetail.preview.sheets" :key="sheet.name"><td>{{ sheet.name }}</td><td>{{ sheet.template_type }}</td><td>{{ sheet.batch_count }}</td><td>{{ formatMoney(sheet.table_amount) }}</td><td>{{ formatMoney(sheet.calculated_amount) }}</td><td :class="{ danger: Math.abs(sheet.difference) > 0.01 }">{{ formatMoney(sheet.difference) }}</td></tr></tbody></table></div>
               </section>
 
               <section v-if="importDetail.preview" class="panel nested-panel">
@@ -5272,7 +5314,7 @@ onUnmounted(() => {
 
           <section class="panel security-panel" aria-label="安全审计摘要">
             <div class="panel__header"><div><h2>最近安全事件</h2><p class="muted">本账号最近 20 条登录与安全操作记录。</p></div></div>
-            <div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>来源 IP</th><th>结果</th></tr></thead><tbody>
+            <div v-synced-scroll class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>来源 IP</th><th>结果</th></tr></thead><tbody>
               <tr v-for="(event, index) in securityAuditEvents" :key="index"><td>{{ formatDate(event.occurred_at) }}</td><td>{{ auditEventLabel(event.event_type) }}</td><td>{{ event.client_ip }}</td><td>{{ event.result === 'success' ? '成功' : '失败' }}</td></tr>
               <tr v-if="securityAuditEvents.length === 0"><td colspan="4" class="muted">暂无记录</td></tr>
             </tbody></table></div>
@@ -5295,7 +5337,7 @@ onUnmounted(() => {
                 <button class="secondary-button" type="button" :disabled="ownerAdminsLoading" @click="loadOwnerAdmins">{{ ownerAdminsLoading ? '加载中' : '刷新' }}</button>
               </div>
               <div v-if="ownerAdminsMessage" class="inline-alert">{{ ownerAdminsMessage }}</div>
-              <div class="table-scroll history-table admin-manage-table">
+              <div v-synced-scroll class="table-scroll history-table admin-manage-table">
                 <table>
                   <thead>
                     <tr>
@@ -5363,7 +5405,7 @@ onUnmounted(() => {
             </section>
             <section class="panel security-panel" aria-label="管理员相关安全审计">
               <div class="panel__header"><div><h2>相关安全事件</h2><p class="muted">该管理员被任命、启停、撤销、重置及其本人登录等最近记录。</p></div></div>
-              <div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>来源 IP</th><th>结果</th></tr></thead><tbody>
+              <div v-synced-scroll class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>来源 IP</th><th>结果</th></tr></thead><tbody>
                 <tr v-for="(event, index) in ownerAdminAudit" :key="index"><td>{{ formatDate(event.occurred_at) }}</td><td>{{ auditEventLabel(event.event_type) }}</td><td>{{ event.client_ip }}</td><td>{{ event.result === 'success' ? '成功' : '失败' }}</td></tr>
                 <tr v-if="ownerAdminAudit.length === 0"><td colspan="4" class="muted">{{ ownerAdminDetailLoading ? '加载中…' : '暂无记录' }}</td></tr>
               </tbody></table></div>
@@ -5732,7 +5774,7 @@ onUnmounted(() => {
               <h2>订单 {{ orderIndex + 1 }}</h2>
               <span class="muted">{{ order.items.length }} 项谷子明细</span>
             </div>
-            <div class="table-scroll detail-table query-order-desktop-table">
+            <div v-synced-scroll class="table-scroll detail-table query-order-desktop-table">
               <table>
                 <thead>
                   <tr><th>谷子名称</th><th>角色</th><th>谷子种类</th><th>系列</th><th>数量</th><th>总金额</th><th>已付金额</th><th>未付金额</th><th>付款状态</th></tr>
@@ -5806,7 +5848,7 @@ onUnmounted(() => {
                       <td colspan="7">
                         <details class="query-payment-items">
                           <summary><span class="closed-label">▶ 查看关联明细（共 {{ payment.items.length }} 条）</span><span class="open-label">▼ 收起关联明细</span></summary>
-                          <div class="table-scroll detail-table">
+                          <div v-synced-scroll class="table-scroll detail-table">
                             <table>
                               <thead>
                                 <tr><th>谷子名称</th><th>角色</th><th>分类</th><th>数量</th><th>单价</th><th>小计</th><th>本次付款金额</th><th>当前付款状态</th></tr>
@@ -5838,7 +5880,7 @@ onUnmounted(() => {
       <template v-else-if="routeName === 'admin'">
         <template v-if="admin">
           <PortalStatusBar
-            :identity="admin.display_name ?? admin.username"
+            :identity="adminIdentityLabel"
             :online="isBackendOnline"
             :online-text="isBackendOnline ? '后端在线' : '本地前端模式'"
             :show-refresh="true"

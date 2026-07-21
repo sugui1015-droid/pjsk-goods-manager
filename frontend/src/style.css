@@ -470,6 +470,20 @@ h2 {
   border-radius: 8px;
 }
 
+/* Synchronized top scrollbar injected by v-synced-scroll. It mirrors the
+   table's width via an inner spacer and shares scrollLeft with the table's own
+   bottom scrollbar, so wide tables can be scrolled horizontally without first
+   scrolling to the bottom. Hidden by the directive when there is no overflow. */
+.table-scroll-topbar {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  margin-bottom: 4px;
+}
+.table-scroll-topbar__spacer {
+  height: 1px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
