@@ -12,6 +12,7 @@ import (
 	"pjsk/backend/internal/clientip"
 	"pjsk/backend/internal/config"
 	"pjsk/backend/internal/export"
+	"pjsk/backend/internal/feedback"
 	"pjsk/backend/internal/importpreview"
 	"pjsk/backend/internal/orders"
 	"pjsk/backend/internal/paymentqr"
@@ -336,6 +337,23 @@ func NewRouter(cfg config.Config, dbPool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("/api/query/recovery/reset", queryHandler.ResetRecoveredQueryCode)
 	mux.HandleFunc("/api/query/orders", queryHandler.Orders)
 	mux.HandleFunc("/api/query/logout", queryHandler.Logout)
+
+	// Plain-text product feedback. The user identity is injected exclusively
+	// from the query session; admin list and status changes require an admin
+	// session. This package is intentionally independent from payment flows.
+	feedbackHandler := feedback.NewHandler(feedback.NewPostgresStore(dbPool))
+	mux.Handle(
+		"/api/query/feedbacks",
+		queryHandler.RequireSessionUser(http.HandlerFunc(feedbackHandler.UserCollection)),
+	)
+	mux.Handle(
+		"/api/admin/feedbacks",
+		adminHandler.RequireAuthentication(http.HandlerFunc(feedbackHandler.AdminCollection)),
+	)
+	mux.Handle(
+		"/api/admin/feedbacks/",
+		adminHandler.RequireAuthentication(http.HandlerFunc(feedbackHandler.AdminItem)),
+	)
 
 	// Payment collection QR codes. Admin routes manage the codes (auth: admin
 	// session); user routes read the currently enabled code (auth: query

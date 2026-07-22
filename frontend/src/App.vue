@@ -57,6 +57,9 @@ import {
   getAdminPaymentSubmissionDetail,
   rejectPaymentSubmission,
   approvePaymentSubmission,
+  createFeedback,
+  listAdminFeedbacks,
+  updateAdminFeedbackStatus,
   type PaymentQRMethod,
   type PaymentQRAdminStatus,
   type PaymentQRAvailability,
@@ -65,6 +68,8 @@ import {
   type AdminPaymentSubmissionListItem,
   type AdminPaymentSubmissionDetailResponse,
   type PaymentSubmissionFacetResponse,
+  type FeedbackItem,
+  type FeedbackStatus,
   type Admin,
   type ManagedAdmin,
   type AdminUserDetailResponse,
@@ -145,13 +150,14 @@ const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克�
 
 type RouteName =
   | 'home'
-  | 'query' | 'query-orders' | 'query-payment' | 'query-payments' | 'query-security'
+  | 'query' | 'query-orders' | 'query-payment' | 'query-payments' | 'query-security' | 'query-feedback'
   | 'admin' | 'admin-data' | 'admin-import' | 'admin-import-history' | 'admin-import-detail'
   | 'admin-orders' | 'admin-order-detail'
   | 'admin-users' | 'admin-user-detail'
   | 'admin-finance' | 'admin-payments' | 'admin-payment-detail' | 'admin-qr'
   | 'admin-submissions' | 'admin-submission-detail'
   | 'admin-security'
+  | 'admin-feedbacks'
   | 'admin-admins' | 'admin-admin-detail'
 type IssueFilter = 'all' | 'row_error' | 'fatal_error' | 'warning' | 'notice'
 type TextFilterKey = 'sheet' | 'sheetTitle' | 'batch' | 'cn' | 'category' | 'role' | 'itemName' | 'source'
@@ -188,6 +194,24 @@ const adminUsers = ref<AdminUserListItem[]>([])
 const adminUsersSummary = ref<AdminUserListSummary | null>(null)
 const adminUsersLoading = ref(false)
 const adminUsersMessage = ref('')
+
+// Lightweight feedback MVP. User state contains only the current draft;
+// history is deliberately not loaded or shown. Admin state is a simple
+// status-filtered, paginated list with in-row expansion.
+const feedbackContent = ref('')
+const feedbackSubmitting = ref(false)
+const feedbackMessage = ref('')
+const feedbackCharacterCount = computed(() => [...feedbackContent.value].length)
+const adminFeedbacks = ref<FeedbackItem[]>([])
+const adminFeedbacksLoading = ref(false)
+const adminFeedbacksMessage = ref('')
+const adminFeedbackStatus = ref<'' | FeedbackStatus>('')
+const adminFeedbackPage = ref(1)
+const adminFeedbackPageSize = ref(25)
+const adminFeedbackTotal = ref(0)
+const adminFeedbackTotalPages = ref(0)
+const expandedFeedbackIDs = ref<Set<string>>(new Set())
+const updatingFeedbackIDs = ref<Set<string>>(new Set())
 
 // User table filters live entirely in the column headers — there is no
 // top-of-page filter form. The value-column keys double as the API's parameter
@@ -685,9 +709,10 @@ const adminModule = computed(() => {
   if (r === 'admin-users' || r === 'admin-user-detail') return 'users'
   if (r === 'admin-finance' || r === 'admin-payments' || r === 'admin-payment-detail' || r === 'admin-qr' || r === 'admin-submissions' || r === 'admin-submission-detail') return 'finance'
   if (r === 'admin-security') return 'security'
+  if (r === 'admin-feedbacks') return 'feedbacks'
   return ''
 })
-const adminModuleTitle = computed(() => (({ data: '数据导入中心', orders: '订单管理', users: '用户与账号', finance: '收付款管理', security: '账户安全' }) as Record<string, string>)[adminModule.value] ?? '')
+const adminModuleTitle = computed(() => (({ data: '数据导入中心', orders: '订单管理', users: '用户与账号', finance: '收付款管理', security: '账户安全', feedbacks: '意见反馈' }) as Record<string, string>)[adminModule.value] ?? '')
 // The user module the current route belongs to, and its display name.
 const userModule = computed(() => {
   const r = routeName.value
@@ -695,9 +720,10 @@ const userModule = computed(() => {
   if (r === 'query-payment') return 'payment'
   if (r === 'query-payments') return 'payments'
   if (r === 'query-security') return 'security'
+  if (r === 'query-feedback') return 'feedback'
   return ''
 })
-const userModuleTitle = computed(() => (({ orders: '我的订单', payment: '付款中心', payments: '付款记录', security: '账户安全' }) as Record<string, string>)[userModule.value] ?? '')
+const userModuleTitle = computed(() => (({ orders: '我的订单', payment: '付款中心', payments: '付款记录', security: '账户安全', feedback: '意见反馈' }) as Record<string, string>)[userModule.value] ?? '')
 const canUpload = computed(() => selectedFile.value !== null && !uploadLoading.value)
 const fatalIssueCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level === 'fatal_error').length)
 const rowErrorCount = computed(() => (preview.value?.errors ?? []).filter((item) => item.level !== 'fatal_error').length)
@@ -794,6 +820,7 @@ function routeFromPath(path: string): RouteName {
   if (path === '/query/payment') return 'query-payment'
   if (path === '/query/payments') return 'query-payments'
   if (path === '/query/security') return 'query-security'
+  if (path === '/query/feedback') return 'query-feedback'
   if (path === '/admin') return 'admin'
   if (path === '/admin/data') return 'admin-data'
   if (path === '/admin/data/import') return 'admin-import'
@@ -808,6 +835,7 @@ function routeFromPath(path: string): RouteName {
   if (path.startsWith('/admin/finance/payments/')) return 'admin-payment-detail'
   if (path === '/admin/finance/qr-codes') return 'admin-qr'
   if (path === '/admin/security') return 'admin-security'
+  if (path === '/admin/feedbacks') return 'admin-feedbacks'
   if (path === '/admin/finance/submissions') return 'admin-submissions'
   if (path.startsWith('/admin/finance/submissions/')) return 'admin-submission-detail'
   if (path === '/admin/admins') return 'admin-admins'
@@ -901,6 +929,7 @@ async function handleAdminRouteEntered() {
   if (routeName.value === 'admin-submissions') await loadPaymentSubmissions()
   if (routeName.value === 'admin-submission-detail' && routeSubmissionID.value) await loadSubmissionDetail(routeSubmissionID.value)
   if (routeName.value === 'admin-security') await loadAdminSecurity()
+  if (routeName.value === 'admin-feedbacks') await loadAdminFeedbacks()
 }
 
 async function handleAdminPortalEntered() {
@@ -3322,6 +3351,119 @@ function resetOrderFilters() {
   applyOrderFilters()
 }
 
+async function submitFeedback() {
+  if (feedbackSubmitting.value) return
+  const content = feedbackContent.value.trim()
+  const length = [...content].length
+  if (length === 0) {
+    feedbackMessage.value = '请输入反馈内容。'
+    return
+  }
+  if (length > 1000) {
+    feedbackMessage.value = '反馈内容不能超过 1000 字。'
+    return
+  }
+  feedbackSubmitting.value = true
+  feedbackMessage.value = ''
+  try {
+    await createFeedback(content)
+    feedbackContent.value = ''
+    feedbackMessage.value = '提交成功，感谢你的反馈。'
+  } catch (error) {
+    if (clearExpiredQuerySession(error)) return
+    feedbackMessage.value = error instanceof Error ? error.message : '反馈提交失败，请稍后重试。'
+  } finally {
+    feedbackSubmitting.value = false
+  }
+}
+
+async function loadAdminFeedbacks() {
+  adminFeedbacksLoading.value = true
+  adminFeedbacksMessage.value = ''
+  const params = new URLSearchParams({
+    page: String(adminFeedbackPage.value),
+    page_size: String(adminFeedbackPageSize.value),
+  })
+  if (adminFeedbackStatus.value) params.set('status', adminFeedbackStatus.value)
+  try {
+    const response = await listAdminFeedbacks(params)
+    adminFeedbacks.value = response.items
+    adminFeedbackPage.value = response.page
+    adminFeedbackPageSize.value = response.page_size
+    adminFeedbackTotal.value = response.total
+    adminFeedbackTotalPages.value = response.total_pages
+    expandedFeedbackIDs.value = new Set()
+  } catch (error) {
+    adminFeedbacks.value = []
+    adminFeedbackTotal.value = 0
+    adminFeedbackTotalPages.value = 0
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    adminFeedbacksMessage.value = error instanceof Error ? error.message : '反馈列表加载失败。'
+  } finally {
+    adminFeedbacksLoading.value = false
+  }
+}
+
+function applyAdminFeedbackStatusFilter() {
+  adminFeedbackPage.value = 1
+  void loadAdminFeedbacks()
+}
+
+function changeAdminFeedbackPageSize() {
+  adminFeedbackPage.value = 1
+  void loadAdminFeedbacks()
+}
+
+function goToAdminFeedbackPage(page: number) {
+  if (page < 1 || page > adminFeedbackTotalPages.value || page === adminFeedbackPage.value) return
+  adminFeedbackPage.value = page
+  void loadAdminFeedbacks()
+}
+
+function feedbackStatusLabel(status: FeedbackStatus) {
+  return status === 'processed' ? '已处理' : '新反馈'
+}
+
+function feedbackExcerpt(content: string) {
+  const chars = [...content]
+  return chars.length > 60 ? `${chars.slice(0, 60).join('')}…` : content
+}
+
+function toggleFeedbackContent(id: string) {
+  const next = new Set(expandedFeedbackIDs.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedFeedbackIDs.value = next
+}
+
+async function changeFeedbackStatus(item: FeedbackItem, status: FeedbackStatus) {
+  if (item.status === status || updatingFeedbackIDs.value.has(item.id)) return
+  updatingFeedbackIDs.value = new Set(updatingFeedbackIDs.value).add(item.id)
+  adminFeedbacksMessage.value = ''
+  try {
+    const response = await updateAdminFeedbackStatus(item.id, status)
+    adminFeedbacks.value = adminFeedbacks.value.map((current) => current.id === item.id ? response.feedback : current)
+    if (adminFeedbackStatus.value && status !== adminFeedbackStatus.value) {
+      await loadAdminFeedbacks()
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      admin.value = null
+      authMessage.value = '登录已过期，请重新登录。'
+      return
+    }
+    adminFeedbacksMessage.value = error instanceof Error ? error.message : '反馈状态更新失败。'
+  } finally {
+    const next = new Set(updatingFeedbackIDs.value)
+    next.delete(item.id)
+    updatingFeedbackIDs.value = next
+  }
+}
+
 
 async function loginQuery() {
   queryLoading.value = true
@@ -3569,6 +3711,8 @@ async function logoutQuery() {
   queryQRZoom.value = false
   userSubmissions.value = []
   userSubmissionsMessage.value = ''
+  feedbackContent.value = ''
+  feedbackMessage.value = ''
   lastPaymentViewedAt.value = ''
   clearSubmissionSelection()
   submissionUploadMessage.value = ''
@@ -5499,6 +5643,67 @@ onUnmounted(() => {
           </section>
         </template>
 
+        <template v-else-if="routeName === 'admin-feedbacks'">
+          <section class="panel">
+            <div class="page-heading">
+              <h2>意见反馈</h2>
+              <p>查看用户提交的使用问题和功能建议。</p>
+            </div>
+            <div class="page-actions feedback-admin-actions">
+              <label>
+                <span>状态</span>
+                <select v-model="adminFeedbackStatus" :disabled="adminFeedbacksLoading" @change="applyAdminFeedbackStatusFilter">
+                  <option value="">全部</option>
+                  <option value="new">新反馈</option>
+                  <option value="processed">已处理</option>
+                </select>
+              </label>
+              <button class="secondary-button" type="button" :disabled="adminFeedbacksLoading" @click="loadAdminFeedbacks">{{ adminFeedbacksLoading ? '加载中' : '刷新' }}</button>
+            </div>
+            <div class="page-resultbar">
+              <span class="filter-result-count">结果：共 {{ adminFeedbackTotal }} 条反馈</span>
+              <span class="muted">第 {{ adminFeedbackPage }} / {{ Math.max(adminFeedbackTotalPages, 1) }} 页</span>
+              <label class="page-size-control">
+                <span>每页</span>
+                <select v-model.number="adminFeedbackPageSize" :disabled="adminFeedbacksLoading" @change="changeAdminFeedbackPageSize">
+                  <option :value="25">25 条</option>
+                  <option :value="50">50 条</option>
+                  <option :value="100">100 条</option>
+                  <option :value="200">200 条</option>
+                </select>
+              </label>
+            </div>
+            <div v-if="adminFeedbacksMessage" class="inline-alert">{{ adminFeedbacksMessage }}</div>
+            <div v-synced-scroll class="table-scroll history-table feedback-table">
+              <table>
+                <thead><tr><th>状态</th><th>用户</th><th>时间</th><th>内容摘要</th><th>查看内容</th><th>状态修改</th></tr></thead>
+                <tbody>
+                  <tr v-if="adminFeedbacksLoading"><td colspan="6">加载中…</td></tr>
+                  <tr v-else-if="adminFeedbacks.length === 0"><td colspan="6">没有符合当前筛选条件的反馈。</td></tr>
+                  <template v-for="item in adminFeedbacks" v-else :key="item.id">
+                    <tr>
+                      <td><span class="status-chip" :data-state="item.status">{{ feedbackStatusLabel(item.status) }}</span></td>
+                      <td><strong>{{ item.cn_code }}</strong><small>{{ item.display_name || '-' }}</small></td>
+                      <td>{{ formatDate(item.created_at) }}</td>
+                      <td><span class="feedback-excerpt">{{ feedbackExcerpt(item.content) }}</span></td>
+                      <td><button class="secondary-button" type="button" @click="toggleFeedbackContent(item.id)">{{ expandedFeedbackIDs.has(item.id) ? '收起' : '查看' }}</button></td>
+                      <td><button class="secondary-button" type="button" :disabled="updatingFeedbackIDs.has(item.id)" @click="changeFeedbackStatus(item, item.status === 'new' ? 'processed' : 'new')">{{ updatingFeedbackIDs.has(item.id) ? '更新中' : (item.status === 'new' ? '标记已处理' : '恢复为新反馈') }}</button></td>
+                    </tr>
+                    <tr v-if="expandedFeedbackIDs.has(item.id)" class="feedback-content-row">
+                      <td colspan="6"><p class="feedback-full-content">{{ item.content }}</p></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="adminFeedbackTotalPages > 1" class="pagination">
+              <button class="secondary-button" type="button" :disabled="adminFeedbacksLoading || adminFeedbackPage <= 1" @click="goToAdminFeedbackPage(adminFeedbackPage - 1)">上一页</button>
+              <span class="muted">第 {{ adminFeedbackPage }} / {{ adminFeedbackTotalPages }} 页</span>
+              <button class="secondary-button" type="button" :disabled="adminFeedbacksLoading || adminFeedbackPage >= adminFeedbackTotalPages" @click="goToAdminFeedbackPage(adminFeedbackPage + 1)">下一页</button>
+            </div>
+          </section>
+        </template>
+
         <template v-else-if="routeName === 'admin-security'">
           <section class="panel security-panel" aria-label="修改密码">
             <div class="panel__header"><div><h2>修改密码</h2><p class="muted">修改成功后，其他设备上的登录会全部退出。建议使用密码管理器生成并保存新密码。</p></div></div>
@@ -5799,11 +6004,40 @@ onUnmounted(() => {
             <ModuleCard title="账户安全" description="修改查询码、找回邮箱验证" reserve-meta accent="neutral" cta="账户设置" @enter="navigate('/query/security')" />
           </div>
         </section>
+        <div class="feedback-entry">
+          <span>使用中遇到问题或有建议？</span>
+          <button class="link-button" type="button" @click="navigate('/query/feedback')">提交意见反馈</button>
+        </div>
       </template>
 
       <template v-else-if="isUserRoute">
         <PortalStatusBar :identity="queryUser ? ('CN：' + queryUser.cn_code) : undefined" back-label="← 返回用户中心" @back="navigate('/query')" @logout="logoutQuery" />
         <div class="module-header"><h2 class="module-header__title">{{ userModuleTitle }}</h2></div>
+
+        <section v-if="routeName === 'query-feedback'" class="panel feedback-form-panel">
+          <div class="page-heading">
+            <h2>意见反馈</h2>
+            <p>如果使用过程中遇到问题，或者有功能建议，可以提交反馈。</p>
+          </div>
+          <form class="feedback-form" @submit.prevent="submitFeedback">
+            <label for="feedback-content">反馈内容</label>
+            <textarea
+              id="feedback-content"
+              v-model="feedbackContent"
+              maxlength="1000"
+              rows="8"
+              required
+              placeholder="请描述遇到的问题或建议"
+            ></textarea>
+            <div class="feedback-form__footer">
+              <span class="muted">{{ feedbackCharacterCount }} / 1000 字</span>
+              <button class="primary-button" type="submit" :disabled="feedbackSubmitting || feedbackContent.trim().length === 0">
+                {{ feedbackSubmitting ? '提交中' : '提交反馈' }}
+              </button>
+            </div>
+          </form>
+          <div v-if="feedbackMessage" class="inline-alert">{{ feedbackMessage }}</div>
+        </section>
 
         <template v-if="routeName === 'query-payment'">
           <section class="panel query-pay-panel" aria-label="付款">
@@ -6147,6 +6381,7 @@ onUnmounted(() => {
               <ModuleCard title="用户与账号" description="用户管理、查询码与恢复邮箱状态" accent="neutral" cta="进入模块" @enter="navigate('/admin/users')" />
               <ModuleCard title="收付款管理" description="付款记录、撤销、未付明细与收款二维码" accent="green" cta="进入模块" @enter="navigate('/admin/finance')" />
               <ModuleCard title="账户安全" description="修改密码、恢复码、恢复邮箱与安全审计" accent="neutral" cta="进入模块" @enter="navigate('/admin/security')" />
+              <ModuleCard title="意见反馈" description="查看用户提交的使用问题和功能建议" accent="neutral" cta="查看反馈" @enter="navigate('/admin/feedbacks')" />
               <!-- 管理员管理入口仅苏归可见；普通管理员既看不到此卡片，后端也会 403。 -->
               <ModuleCard v-if="isOwner" title="管理员管理" description="任命、启停、撤销与重置管理员，查看管理员审计" accent="blue" cta="进入模块" @enter="navigate('/admin/admins')" />
             </div>

@@ -641,6 +641,42 @@ export type QueryUser = {
   display_name?: string
 }
 
+export type FeedbackStatus = 'new' | 'processed'
+
+export type FeedbackItem = {
+  id: string
+  cn_code?: string
+  display_name?: string
+  content: string
+  status: FeedbackStatus
+  created_at: string
+}
+
+export type FeedbackCreateResponse = {
+  feedback: FeedbackItem
+}
+
+export type FeedbackListResponse = {
+  items: FeedbackItem[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+export function createFeedback(content: string): Promise<FeedbackCreateResponse> {
+  return postJSON<FeedbackCreateResponse>('/api/query/feedbacks', { content })
+}
+
+export function listAdminFeedbacks(params: URLSearchParams): Promise<FeedbackListResponse> {
+  const query = params.toString()
+  return getJSON<FeedbackListResponse>(`/api/admin/feedbacks${query ? `?${query}` : ''}`)
+}
+
+export function updateAdminFeedbackStatus(id: string, status: FeedbackStatus): Promise<FeedbackCreateResponse> {
+  return patchJSON<FeedbackCreateResponse>(`/api/admin/feedbacks/${encodeURIComponent(id)}/status`, { status })
+}
+
 export type QueryLoginResponse = {
   user: QueryUser
 }

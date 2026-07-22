@@ -443,6 +443,18 @@ h2 {
   color: #4b5563;
 }
 
+.status-chip[data-state="new"] {
+  color: #7a4a00;
+  background: #fff8df;
+  border-color: #edc86e;
+}
+
+.status-chip[data-state="processed"] {
+  color: #176448;
+  background: #edf8f3;
+  border-color: #b9ddcb;
+}
+
 .endpoint-list {
   display: grid;
   gap: 10px;
@@ -3794,4 +3806,108 @@ table td small { display: block; font-size: var(--fs-hint); color: var(--color-h
   font-size: 13px;
   text-decoration: underline;
   cursor: pointer;
+}
+
+/* ===== Stage 2B lightweight feedback ===== */
+.feedback-entry {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 18px;
+  color: #667085;
+  font-size: 13px;
+}
+
+.feedback-form-panel {
+  max-width: 760px;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.feedback-form {
+  display: grid;
+  gap: 10px;
+}
+
+.feedback-form > label {
+  font-weight: 700;
+  color: #34495d;
+}
+
+.feedback-form textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid #ccd7e0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.feedback-form__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.feedback-admin-actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.feedback-admin-actions select {
+  min-height: 36px;
+  min-width: 130px;
+}
+
+.feedback-table table {
+  min-width: 900px;
+}
+
+.feedback-table td small {
+  display: block;
+  margin-top: 4px;
+  color: #667085;
+}
+
+.feedback-excerpt,
+.feedback-full-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.feedback-excerpt {
+  display: block;
+  min-width: 240px;
+  max-width: 440px;
+  text-align: left;
+}
+
+.feedback-content-row td {
+  background: #f7f9fb;
+}
+
+.feedback-full-content {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 8px 12px;
+  color: #27384a;
+  line-height: 1.7;
+  text-align: left;
+}
+
+@media (max-width: 560px) {
+  .feedback-form__footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }

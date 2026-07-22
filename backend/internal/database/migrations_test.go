@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -37,6 +38,31 @@ func TestListMigrationNamesSortsByFullFilename(t *testing.T) {
 	}
 	if !slices.Equal(names, want) {
 		t.Fatalf("listMigrationNames = %v, want %v", names, want)
+	}
+}
+
+func TestFeedbackMigrationHasMVPConstraintsAndIndexes(t *testing.T) {
+	sqlBytes, err := os.ReadFile("../../migrations/0026_feedbacks.sql")
+	if err != nil {
+		t.Fatalf("read feedback migration: %v", err)
+	}
+	sql := strings.ToLower(string(sqlBytes))
+	for _, required := range []string{
+		"create table if not exists feedbacks",
+		"user_id uuid not null references users(id)",
+		"char_length(btrim(content)) between 1 and 1000",
+		"status in ('new', 'processed')",
+		"on feedbacks (status, created_at desc)",
+		"on feedbacks (user_id, created_at desc)",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Errorf("feedback migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"reply", "attachment", "email", "notification", "handled_by", "status_history"} {
+		if strings.Contains(sql, forbidden) {
+			t.Errorf("feedback migration contains forbidden MVP field/system %q", forbidden)
+		}
 	}
 }
 
