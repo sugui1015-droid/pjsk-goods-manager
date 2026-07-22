@@ -6,10 +6,14 @@ defineProps<{
   identity?: string
   online?: boolean
   onlineText?: string
+  notice?: {
+    text: string
+    action?: string
+  }
   showRefresh?: boolean
   backLabel?: string
 }>()
-defineEmits<{ (e: 'refresh'): void; (e: 'logout'): void; (e: 'back'): void }>()
+defineEmits<{ (e: 'refresh'): void; (e: 'logout'): void; (e: 'back'): void; (e: 'notice'): void }>()
 </script>
 
 <template>
@@ -23,6 +27,11 @@ defineEmits<{ (e: 'refresh'): void; (e: 'logout'): void; (e: 'back'): void }>()
       <span v-if="online !== undefined" class="portal-bar__status" :data-online="online">
         <span class="portal-bar__dot" />{{ online ? (onlineText ?? '后端在线') : (onlineText ?? '后端离线') }}
       </span>
+      <button v-if="notice" class="portal-bar__notice" type="button" @click="$emit('notice')">
+        <span aria-hidden="true">🔔</span>
+        <span>{{ notice.text }}</span>
+        <span v-if="notice.action" class="portal-bar__notice-action">{{ notice.action }}</span>
+      </button>
       <button v-if="showRefresh" class="portal-bar__icon" type="button" title="刷新状态" @click="$emit('refresh')">↻</button>
       <button class="portal-bar__logout" type="button" @click="$emit('logout')">退出登录</button>
     </div>

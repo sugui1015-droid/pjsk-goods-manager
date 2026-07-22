@@ -2985,6 +2985,9 @@ th {
 .portal-bar__status { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid #d7e4dd; color: #176448; background: #edf8f3; white-space: nowrap; }
 .portal-bar__status[data-online="false"] { color: #8a4b15; background: #fff5e6; border-color: #ead7b7; }
 .portal-bar__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.portal-bar__notice { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid #edc86e; color: #7a4a00; background: #fff8df; font-weight: 600; }
+.portal-bar__notice:hover { border-color: #d8aa37; background: #fff1bd; }
+.portal-bar__notice-action { color: #315b7d; text-decoration: underline; text-underline-offset: 2px; }
 .portal-bar__icon { width: 34px; height: 34px; border: 1px solid #d4dde5; border-radius: 8px; background: #fff; color: #27384a; }
 .portal-bar__logout { min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid #cbd6df; background: #ffffff; color: #27384a; }
 

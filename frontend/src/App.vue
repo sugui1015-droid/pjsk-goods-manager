@@ -139,6 +139,7 @@ import {
 } from './filters/columnFilters'
 import { localDevelopmentFrontendOrigins } from './developmentOrigins'
 import { vSyncedScroll } from './directives/syncedScroll'
+import { getPaymentNoticeState, readPaymentViewedAt, writePaymentViewedAt } from './paymentNotice'
 const maxExcelSize = 20 * 1024 * 1024
 const categoryPresets = ['吧唧', 'ep', '色纸', '立牌', '麻将', '亚克力']
 
@@ -428,6 +429,8 @@ const paymentActiveFilterCount = computed(() => activeFilterCount(paymentFilterS
 const userSubmissions = ref<UserPaymentSubmission[]>([])
 const userSubmissionsLoading = ref(false)
 const userSubmissionsMessage = ref('')
+const lastPaymentViewedAt = ref('')
+const paymentNoticeState = computed(() => getPaymentNoticeState(userSubmissions.value, lastPaymentViewedAt.value))
 const submissionAcceptedTypes = ['image/png', 'image/jpeg', 'image/webp']
 const submissionMaxBytes = 10 * 1024 * 1024
 const submissionFile = ref<File | null>(null)
@@ -921,7 +924,10 @@ async function handleUserRouteEntered() {
   if (routeName.value === 'query-orders' || routeName.value === 'query-payment' || routeName.value === 'query-payments') {
     if (!queryOrders.value) await loadQueryOrders(false)
   }
-  if (routeName.value === 'query-payment') await loadUserSubmissions()
+  if (routeName.value === 'query-payment') {
+    const loaded = await loadUserSubmissions()
+    if (loaded) markPaymentSubmissionsViewed()
+  }
 }
 
 async function handleQueryPortalEntered() {
@@ -930,7 +936,9 @@ async function handleQueryPortalEntered() {
     const target = pendingQueryTarget.value
     pendingQueryTarget.value = ''
     navigate(target)
+    return
   }
+  if (queryUser.value) await loadUserSubmissions()
 }
 
 async function load() {
@@ -1997,15 +2005,29 @@ function resetPaymentFilters() {
 
 // --- Payment proof submissions: regular-user side ---
 
+function readLastPaymentViewedAt() {
+  return readPaymentViewedAt(queryUser.value?.cn_code)
+}
+
+function markPaymentSubmissionsViewed() {
+  if (!queryUser.value?.cn_code) return
+  const viewedAt = new Date().toISOString()
+  lastPaymentViewedAt.value = viewedAt
+  writePaymentViewedAt(queryUser.value.cn_code, viewedAt)
+}
+
 async function loadUserSubmissions() {
   userSubmissionsLoading.value = true
   userSubmissionsMessage.value = ''
   try {
     const response = await listUserPaymentSubmissions()
     userSubmissions.value = response.items ?? []
+    lastPaymentViewedAt.value = readLastPaymentViewedAt()
+    return true
   } catch (error) {
-    if (error instanceof ApiError && error.status === 401) return
+    if (error instanceof ApiError && error.status === 401) return false
     userSubmissionsMessage.value = error instanceof Error ? `收肾记录加载失败：${error.message}` : '收肾记录加载失败'
+    return false
   } finally {
     userSubmissionsLoading.value = false
   }
@@ -3547,6 +3569,7 @@ async function logoutQuery() {
   queryQRZoom.value = false
   userSubmissions.value = []
   userSubmissionsMessage.value = ''
+  lastPaymentViewedAt.value = ''
   clearSubmissionSelection()
   submissionUploadMessage.value = ''
   pendingQueryTarget.value = ''
@@ -5750,7 +5773,14 @@ onUnmounted(() => {
       </template>
 
       <template v-else-if="routeName === 'query'">
-        <PortalStatusBar :identity="queryUser ? ('CN：' + queryUser.cn_code) : undefined" back-label="← 返回系统主页" @back="navigate('/')" @logout="logoutQuery" />
+        <PortalStatusBar
+          :identity="queryUser ? ('CN：' + queryUser.cn_code) : undefined"
+          :notice="paymentNoticeState.hasNotice ? { text: paymentNoticeState.text, action: '查看' } : undefined"
+          back-label="← 返回系统主页"
+          @notice="navigate('/query/payment')"
+          @back="navigate('/')"
+          @logout="logoutQuery"
+        />
         <section class="portal-hero">
           <h1 class="portal-hero__title">用户中心</h1>
           <p class="portal-hero__subtitle">当前登录 CN：{{ queryUser?.cn_code }}</p>
